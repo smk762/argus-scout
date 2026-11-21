@@ -18,6 +18,29 @@ from argus_scout.events import StatusEvent
 from argus_scout.recommendations import Recommendation, Status
 
 
+class Unchecked:
+    """The type of :data:`UNCHECKED`."""
+
+    def __repr__(self) -> str:
+        return "UNCHECKED"
+
+
+UNCHECKED = Unchecked()
+"""``expected_status`` default: the caller makes no claim about what is stored (seeding, imports, tests)."""
+
+
+class StoreConflict(Exception):
+    """A recommendation write was refused and nothing was written. Reload and decide again."""
+
+
+class IllegalTransition(StoreConflict):
+    """The write would move a stored recommendation along a step the lifecycle doesn't allow."""
+
+
+class StaleRecommendation(StoreConflict):
+    """The stored status is no longer the one the caller loaded: someone else changed it in between."""
+
+
 @dataclass
 class InboxEntry:
     """A stored status event plus the inbox's own bookkeeping."""
@@ -94,8 +117,20 @@ class Store(Protocol):
     def open_fingerprints(self) -> dict[str, int]: ...
 
     # -- recommendations -----------------------------------------------------
-    def save_recommendation(self, rec: Recommendation, *, by: str | None = None, reason: str | None = None) -> None:
-        """Insert or update; a status change appends a :class:`Transition`."""
+    def save_recommendation(
+        self,
+        rec: Recommendation,
+        *,
+        by: str | None = None,
+        reason: str | None = None,
+        expected_status: Status | None | Unchecked = UNCHECKED,
+    ) -> None:
+        """Insert or update; a status change appends a :class:`Transition`.
+
+        Atomically, before writing: if ``expected_status`` is given (``None`` meaning "no row yet") and the
+        stored status differs, raise :class:`StaleRecommendation`; if a stored row's status would change to one
+        ``TRANSITIONS`` doesn't allow from it, raise :class:`IllegalTransition`. Either way nothing is written.
+        """
         ...
 
     def get_recommendation(self, rec_id: str) -> Recommendation | None: ...
@@ -157,4 +192,15 @@ class Store(Protocol):
     def prune(self, older_than: datetime) -> dict[str, int]: ...
 
 
-__all__ = ["InboxEntry", "JobRun", "Report", "Store", "Transition"]
+__all__ = [
+    "UNCHECKED",
+    "IllegalTransition",
+    "InboxEntry",
+    "JobRun",
+    "Report",
+    "StaleRecommendation",
+    "Store",
+    "StoreConflict",
+    "Transition",
+    "Unchecked",
+]

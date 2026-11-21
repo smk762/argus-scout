@@ -69,8 +69,9 @@ services:
   # echo_url: http://<TTS_HOST>:8034
 
 server:
-  host: 127.0.0.1                 # reads have no auth: keep scout on loopback
+  host: 127.0.0.1                 # reads have no auth unless read_auth: keep scout on loopback
   port: 8400
-  read_only: true                 # refuse every state-changing route
+  read_only: true                 # refuse every state-changing route; turn off once the token is set
   allowed_origins: []             # browser origins trusted for writes
-  token_env: SCOUT_API_TOKEN      # bearer token for write routes
+  token_env: SCOUT_API_TOKEN      # bearer token for write routes (unset: writes are closed)
+  read_auth: false                # also require the token on /api/* reads and /wall
