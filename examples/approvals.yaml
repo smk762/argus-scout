@@ -1,0 +1,33 @@
+# Standing approvals: auto-approve recurring low-risk recommendations.
+#
+# A matching recommendation moves from proposed to approved and records the
+# rule id (approved_by_rule). It is NEVER deployed or dispatched: carrying it
+# out is always a human step. Recommendations with high impact, or raised from
+# a critical signal, are never auto-approved, whatever these rules say.
+#
+# The file is re-read when it changes. Check with:
+#   argus-scout check approvals examples/approvals.yaml
+#
+# Fields:
+#   id              stable name shown in briefings and the audit trail
+#   scope           analyzer (until removed) | until (needs expires_at)
+#   analyzer        the analyzer that raised it, or "*"
+#   title_pattern   regex, case-insensitive, searched in the title (optional)
+#   action_pattern  regex, case-insensitive, searched in the action (optional)
+#   max_impact      low (default) | medium; high is always refused
+#   min_confidence  low | medium (default) | high
+#   expires_at      ISO time, needed for scope: until
+#   note            free text
+
+rules: []
+#  - id: evening-energy-shift
+#    scope: analyzer
+#    analyzer: power
+#    title_pattern: "(defer|shift).*off-?peak"
+#    note: same off-peak shift suggestion every evening
+#
+#  - id: fan-curve-trial
+#    scope: until
+#    analyzer: thermal
+#    title_pattern: "fan curve"
+#    expires_at: "2027-01-31T23:59:00+00:00"

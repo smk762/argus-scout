@@ -17,6 +17,6 @@ COPY . .
 
 RUN uv pip install --system --no-cache ".[server]"
 
-EXPOSE 8000
-CMD ["uvicorn", "argus_scout.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8400
+CMD ["uvicorn", "argus_scout.server.app:app", "--host", "0.0.0.0", "--port", "8400"]
 
