@@ -31,6 +31,27 @@ OPSEC = {
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b")
 RESERVED_EMAIL = re.compile(r"(?:^|\.)(?:example\.(?:com|net|org)|example|test|invalid|localhost)$", re.I)
 
+# The suite's README brand header, verbatim from argus-cortex brand/README.md ("README header"). The handbook renders
+# with react-markdown's `skipHtml` (argus-handbook web/src/components/docs/PackageDoc.tsx), so this block is dropped
+# whole, and its packageDocs.test.ts asserts no `<picture` reaches a rendered page. Its title strip
+# (web/src/lib/packageDocsRender.ts) removes the first heading node, which is still `# argus-scout` after an HTML
+# block. So this exact block, at the very top of README.md, is the one piece of raw HTML allowed.
+BRAND = "https://raw.githubusercontent.com/smk762/argus-cortex/dev/brand/packages/scout/argus-scout-lockup"
+BRAND_HEADER = f"""<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="{BRAND}-dark.svg">
+  <img alt="argus scout" src="{BRAND}-light.svg" height="52">
+</picture>
+
+"""
+
+
+def without_brand_header(doc: Path) -> str:
+    """The doc's text, minus the brand header when it opens README.md (and only there)."""
+    text = doc.read_text()
+    if doc == ROOT / "README.md" and text.startswith(BRAND_HEADER):
+        return text[len(BRAND_HEADER) :]
+    return text
+
 
 def _private_ipv4(a: int, b: int) -> bool:
     return (
@@ -88,7 +109,7 @@ def test_doc_passes_the_opsec_gate(doc: Path):
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.relative_to(ROOT).as_posix())
 def test_doc_has_no_raw_html(doc: Path):
     """The handbook renders markdown with raw HTML skipped, so a bare ``<PLACEHOLDER>`` would vanish there."""
-    tags = re.findall(r"<[A-Za-z/!][^>\n]*>", prose(doc.read_text()))
+    tags = re.findall(r"<[A-Za-z/!][^>\n]*>", prose(without_brand_header(doc)))
     assert not tags, f"put these in backticks: {tags}"
 
 
