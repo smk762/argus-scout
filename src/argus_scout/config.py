@@ -63,6 +63,7 @@ EVENT_FIELDS = frozenset(
         "summary",
         "body_md",
         "speakable",
+        "speech",
         "requires_ack",
         "quiet_exempt",
         "expires_at",
@@ -161,8 +162,18 @@ class FilesConfig(_Section):
     persona: ConfigPath | None = None
     """The narrator's persona (YAML). Unset, or a bad file: the neutral built-in persona."""
     memory: ConfigPath | None = None
-    """A directory of operator-written markdown notes folded into briefings. Scout reads them and writes only
-    its own recent-rejections file there (see :mod:`argus_scout.memory`)."""
+    """A directory of operator-written markdown notes folded into briefings (``README.md`` and names starting with
+    ``_`` are skipped). Scout reads them and writes only its own recent-rejections file there, unless
+    ``memory.write_rejections`` is off (see :mod:`argus_scout.memory`)."""
+
+
+class MemoryConfig(_Section):
+    """What scout does with the memory directory (``files.memory``) beyond reading your notes."""
+
+    write_rejections: bool = True
+    """Keep ``scout-recent-rejections.md`` in the memory directory up to date. ``false`` writes nothing there, for a
+    read-only mount; reports still quote recent rejections, which come from the store. A directory scout can't
+    write is logged once and then left alone either way."""
 
 
 class StoreConfig(_Section):
@@ -302,7 +313,8 @@ class ChannelSettings(_Section):
     name: Name
     """Unique among channels. Delivery records are keyed by it, so renaming a channel makes it a new one."""
     enabled: bool = True
-    """``false`` keeps the entry but sends nothing."""
+    """``false`` keeps the entry but sends nothing. The entry is still validated, but the channel is never built, so a
+    disabled ``snapcast`` or ``mask`` needs no extra installed. Read at startup: enabling it means a restart."""
     min_severity: Literal["info", "notice", "warning", "critical"] = "info"
     """Deliver only messages at or above this severity. A report's severity is that of the worst item in it (a
     briefing also counts its open recommendations); a report with nothing open is ``info``."""
@@ -518,8 +530,9 @@ class EchoConfig(_Section):
     """argus-echo, the speech server voice channels play from. See :mod:`argus_scout.channels.echo`.
 
     The voice keys are argus-echo's shared request fields, sent as they are: ``voice_clone_id`` (a stored clone;
-    wins over ``speaker``), ``speaker`` (a built-in speaker), ``language``, and the Qwen3-TTS-only
-    ``instruction``, ``voice_description`` and ``emotion`` (other engines ignore them). ``extra`` passes
+    wins over ``speaker``), ``speaker`` (a built-in speaker), ``language``, the Qwen3-TTS-only ``instruction``,
+    ``voice_description`` and ``emotion`` (other engines ignore them), and ``speed`` (reserved by the contract; no
+    engine applies it yet). Every shared field has its own key, so none may go under ``extra``, which passes
     engine-specific fields through (Miso's ``temperature``, ``topk``). Scout never holds a GPU lease around a
     synthesis: echo takes its own.
     """
@@ -540,6 +553,9 @@ class EchoConfig(_Section):
     """Qwen3-TTS only: a designed voice, described in words. Other engines ignore it."""
     emotion: str | None = None
     """Qwen3-TTS only. Other engines ignore it."""
+    speed: float | None = Field(default=None, gt=0, le=4)
+    """Speaking rate (``1.0`` is normal). Part of the shared request, but reserved: no engine applies it yet, so it
+    is sent only when set and changes nothing today."""
     extra: Annotated[dict[str, Any], NullAsEmptyDict] = Field(default_factory=dict)
     """Engine-specific request fields, passed through (Miso: ``temperature``, ``topk``)."""
     format: Literal["pcm_s16le", "wav"] = "pcm_s16le"
@@ -654,6 +670,8 @@ class ScoutConfig(_Section):
     # A dict default is validated like file input, so the default store path resolves beside the config too.
     store: Annotated[StoreConfig, NullAsEmptyDict] = Field(default={}, validate_default=True)
     """Where scout keeps its state."""
+    memory: Annotated[MemoryConfig, NullAsEmptyDict] = MemoryConfig()
+    """What scout writes in the memory directory."""
     sources: Annotated[list[SourceConfig], NullAsEmptyList] = Field(default_factory=list)
     """Where status events come from."""
     channels: Annotated[list[ChannelConfig], NullAsEmptyList] = Field(default_factory=list)

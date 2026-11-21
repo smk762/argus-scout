@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from datetime import UTC, datetime
 
 import pytest
+from structlog.testing import capture_logs
 
 from argus_scout.engine import Rejection
-from argus_scout.memory import MAX_NOTE_BYTES, SCOUT_FILE, Memory, MemoryPathError
+from argus_scout.memory import MAX_NOTE_BYTES, MAX_NOTES, SCOUT_FILE, Memory, MemoryPathError, is_note
 from argus_scout.severity import Severity
 
 REJECTION = Rejection("r1", "k", "Move backups to off-peak", "  backups must finish before 06:00 ", Severity.NOTICE,
@@ -84,3 +87,75 @@ def test_creates_root_and_no_root_means_no_memory(tmp_path):
     assert Memory(None).notes() == []
     with pytest.raises(MemoryPathError):
         Memory(None).resolve("x.md")
+
+
+# --- which files are notes -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["README.md", "readme.md", "Readme.MD", "_draft.md", "_.md", SCOUT_FILE])
+def test_readme_and_underscore_files_are_not_notes(root, name):
+    (root / name).write_text("for people, not the prompt")
+    (root / "prefs.md").write_text("mine")
+    assert [n.name for n in Memory(root).notes()] == ["prefs.md"]
+    assert not is_note(name) and is_note("prefs.md") and is_note("my_readme.md") and is_note("README-ops.md")
+
+
+def test_skipped_files_do_not_use_up_the_note_cap(root):
+    for i in range(MAX_NOTES):
+        (root / f"_{i:02}.md").write_text("set aside")
+    (root / "z.md").write_text("real")
+    assert [n.name for n in Memory(root).notes()] == ["z.md"]
+
+
+# --- not writing ---------------------------------------------------------------------------------------------
+
+
+def test_write_rejections_off_writes_nothing(root):
+    memory = Memory(root, write_rejections=False)
+    assert memory.write_rejections([REJECTION]) is None
+    assert not memory.check_writable()
+    assert list(root.iterdir()) == []
+
+
+def test_an_unwritable_directory_is_one_warning_then_left_alone(root, monkeypatch):
+    memory = Memory(root)
+    calls = []
+
+    def refuse(rejections):
+        calls.append(1)
+        raise PermissionError(errno.EROFS, "Read-only file system", str(root))
+
+    monkeypatch.setattr(memory, "_write", refuse)
+    with capture_logs() as logs:
+        assert memory.write_rejections([REJECTION]) is None
+        assert memory.write_rejections([REJECTION]) is None
+        assert memory.write_rejections([REJECTION]) is None
+    assert len(calls) == 1  # never tried again
+    assert [entry["event"] for entry in logs] == ["memory.not_writable"]
+
+
+def test_other_write_errors_still_raise(root, monkeypatch):
+    memory = Memory(root)
+
+    def full(rejections):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(memory, "_write", full)
+    with pytest.raises(OSError, match="No space"):
+        memory.write_rejections([REJECTION])
+    assert memory.writes  # a full disk may clear: keep trying
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a non-root POSIX user for permissions")
+def test_startup_check_catches_a_read_only_directory(root):
+    root.chmod(0o555)
+    try:
+        memory = Memory(root)
+        with capture_logs() as logs:
+            assert memory.check_writable() is False
+            assert memory.write_rejections([REJECTION]) is None
+        assert [entry["event"] for entry in logs] == ["memory.not_writable"]
+        assert list(root.iterdir()) == []
+    finally:
+        root.chmod(0o755)
+    assert Memory(root / "not-yet").check_writable()  # created on first write, under a writable parent

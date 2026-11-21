@@ -27,7 +27,7 @@ Check the file with `argus-scout check config scout.yaml`. Re-send the newest re
 |---|---|---|
 | `kind` | required | `text`, `webhook`, `snapcast`, `mask`, or a kind an installed plugin provides |
 | `name` | required | Unique among channels. Delivery records are keyed by it, so renaming a channel makes it new. |
-| `enabled` | `true` | `false` keeps the entry but sends nothing |
+| `enabled` | `true` | `false` keeps the entry but sends nothing. The entry is still validated, but the channel is never built, so a disabled `snapcast` or `mask` needs no extra installed. Config is read at startup: enabling one means editing the file and restarting. |
 | `min_severity` | `info` | Send only messages at or above `info` / `notice` / `warning` / `critical` |
 | `kinds` | all | Send only these kinds: report kinds (`morning`, `evening`, `status`), or `event` for a single inbox item |
 | `timeout` | `30` | Seconds one delivery may take, retries included |
@@ -56,7 +56,8 @@ names its worst item), and it counts as `quiet_exempt` when any item in it is.
   when an item in it is). A report is kept off the speakers when `sources.scout.channel` in the heartbeat file is
   `text`. A status update speaks only its items the heartbeat voice rules allow (source routed to `voice`,
   `speakable`, at or above `voice.min_severity`, and with `voice.on_change_only` only those that are news),
-  and is not spoken at all when none is. Text channels are never held back by these rules.
+  and is not spoken at all when none is. Each item says its `speech` when the event has one, else its summary
+  (see [sources.md](sources.md#the-status-event)). Text channels are never held back by these rules.
 
 ## Speech: argus-echo
 
@@ -79,7 +80,8 @@ services:
 | `speaker` | unset | A built-in speaker (`GET /speakers` on the engine). Neither: the engine's default voice. |
 | `language` | `en` | ISO code. Miso speaks English only. |
 | `instruction`, `voice_description`, `emotion` | unset | Qwen3-TTS only; other engines ignore them |
-| `extra` | `{}` | Engine-specific request fields, passed through (Miso: `temperature`, `topk`) |
+| `speed` | unset | Speaking rate (`1.0` is normal, up to `4`). Reserved by echo's contract: no engine applies it yet. |
+| `extra` | `{}` | Engine-specific request fields, passed through (Miso: `temperature`, `topk`). A shared field (any key above that goes in the request) is refused here: set it as its own key. |
 | `format` | `pcm_s16le` | The audio voice channels receive: raw 16-bit little-endian PCM, or the same in a WAV container |
 | `timeout` | `60` | Seconds one synthesis may take with the model loaded |
 | `load_timeout` | `180` | Seconds one synthesis may take when echo has to load the model first |

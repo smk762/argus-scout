@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from api_helpers import AUTH, NOW, OWN_TOKEN, TOKEN, make_app, scout_client
@@ -68,6 +68,20 @@ def test_push_one_event_and_see_the_outcomes(client):
 
     worse = client.post("/api/events/hook", headers=AUTH, json={**event, "severity": "critical"}).json()["events"][0]
     assert worse["outcome"] == "escalated" and worse["previous_severity"] == "warning"
+
+
+def test_push_an_event_with_speech(client, store):
+    event = {
+        "event_id": "ups",
+        "severity": "warning",
+        "summary": "UPS: on_batt",
+        "speech": "The UPS is on\x07 battery.",
+    }
+    assert client.post("/api/events/hook", headers=AUTH, json=event).status_code == 200
+    [stored] = store.open_events(now=datetime.now(UTC))
+    assert stored.speech == "The UPS is on battery." and stored.summary == "UPS: on_batt"
+    bad = client.post("/api/events/hook", headers=AUTH, json={**event, "speech": ["no"]})
+    assert bad.status_code == 422 and "speech: expected text" in bad.text
 
 
 def test_push_a_batch_reports_duplicates(client):

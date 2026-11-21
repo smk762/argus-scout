@@ -452,3 +452,28 @@ def test_a_plugin_model_raising_anything_fails_only_its_entry(plugin_module):
     assert built.errors["boom"] == "renaming: TypeError: plugin bug"
     assert "must keep name 'r'" in built.errors["r"]
     assert "interval must be a positive number" in built.errors["i"]
+
+
+def test_json_poll_maps_a_feeds_spoken_sentence_onto_speech():
+    # A feed with its own sentence for speech maps it onto ``speech``; ``speakable`` stays the yes/no flag.
+    cfg = JsonPollSource(
+        kind="json_poll",
+        name="feed",
+        url="http://feed.lan/status",
+        items="items",
+        fields={"summary": "title", "speech": "spoken"},
+        id="id",
+    )
+    data = {
+        "items": [{"id": "a", "title": "UPS: on_batt", "spoken": "The UPS is on battery."}, {"id": "b", "title": "x"}]
+    }
+    mapped = map_response(cfg, data)
+    assert mapped.skipped == []
+    assert [(e.summary, e.speech, e.spoken) for e in mapped.events] == [
+        ("UPS: on_batt", "The UPS is on battery.", "The UPS is on battery."),
+        ("x", None, "x"),
+    ]
+    # An endpoint that already speaks the envelope needs no mapping for it either.
+    plain = JsonPollSource(kind="json_poll", name="env", url="http://feed.lan/status", items="items")
+    [event] = map_response(plain, {"items": [{"summary": "s", "speech": "Said aloud"}]}).events
+    assert event.speech == "Said aloud"

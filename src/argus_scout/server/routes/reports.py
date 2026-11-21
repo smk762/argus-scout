@@ -100,6 +100,9 @@ def write_router(server: ServerConfig) -> APIRouter:
         names = {b.name for b in runtime.dispatcher.channels}
         if not names:
             raise HTTPException(status_code=409, detail="no channels configured")
+        off = sorted(set(body.channels or ()) & set(runtime.channels.disabled))
+        if off:
+            raise HTTPException(status_code=422, detail=f"channel {', '.join(off)} is disabled (enabled: false)")
         unknown = sorted(set(body.channels or ()) - names)
         if unknown:
             raise HTTPException(status_code=422, detail=f"no channel named {', '.join(unknown)}")

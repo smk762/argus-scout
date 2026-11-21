@@ -149,7 +149,20 @@ report's `meta.persona_error` says why.
 things to ignore. They're folded into morning and evening briefings, after everything else. Scout reads them and
 never edits them; each is read up to 16 KiB, at most 50 files, and about 2000 characters in total reach a prompt.
 
+**What counts as a note.** Every `*.md` file in the directory, except:
+
+- `README.md`, in any case (`readme.md`, `Readme.MD`): it is for people browsing the directory, not for the model.
+- Any name starting with `_` (`_draft.md`, `_template.md`): set a note aside by renaming it, without deleting it.
+- `scout-recent-rejections.md`, scout's own file (below).
+
+`argus-scout check config` reports how many notes it found.
+
 Scout writes one file there, `scout-recent-rejections.md`, rewritten whenever it writes a report: the recent
 rejections and the reasons given, so you can see what it has been told not to raise again. Every path stays under
 the directory: absolute names, `..` and symlinks out are refused, and scout's own file is never written through a
 symlink.
+
+**A read-only directory.** Set `memory.write_rejections: false` and scout writes nothing there. Reports still quote
+the recent rejections and their reasons: those come from the store, not from this file. If the directory can't be
+written anyway (checked at startup, or the first write is refused), scout logs `memory.not_writable` once and stops
+trying until it restarts.

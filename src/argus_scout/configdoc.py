@@ -251,6 +251,12 @@ files:
     ),
     Section("store", cfg.StoreConfig, example="store:\n  path: scout.db\n"),
     Section(
+        "memory",
+        cfg.MemoryConfig,
+        example="memory:\n  write_rejections: false   # the memory directory is mounted read-only\n",
+        intro="The directory itself is `files.memory`. Guide: [narrative.md](narrative.md#memory).",
+    ),
+    Section(
         "sources",
         cfg.SourceSettings,
         intro="A list. Every entry has these keys; each kind adds its own below. A bad entry fails only itself "

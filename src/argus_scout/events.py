@@ -6,6 +6,7 @@ repeat-until-ack and delivery (see :mod:`argus_scout.heartbeat`).
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,21 @@ from argus_scout.severity import Severity, coerce_severity
 
 SCHEMA_VERSION = 1
 SUMMARY_MAX = 200
+SPEECH_MAX = 500
+"""The longest ``speech`` kept, in characters. Longer is cut at a word boundary."""
+
+
+def clean_speech(value: Any) -> str | None:
+    """``speech`` fit to store and synthesise: control and format characters removed, whitespace collapsed to one
+    line, at most :data:`SPEECH_MAX` characters (cut at a word). ``None`` for nothing left."""
+    if value is None:
+        return None
+    text = "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in str(value))
+    text = " ".join(text.split())
+    if len(text) > SPEECH_MAX:
+        cut = text[: SPEECH_MAX + 1]
+        text = (cut.rsplit(" ", 1)[0] if " " in cut else cut[:SPEECH_MAX]).rstrip()
+    return text or None
 
 
 def parse_dt(value: Any) -> datetime | None:
@@ -40,6 +56,9 @@ class StatusEvent:
     summary: str
     body_md: str = ""
     speakable: bool = True
+    speech: str | None = None
+    """What to say aloud instead of ``summary`` when the event is spoken (``speakable`` still decides whether it
+    may be). Presentation only: it is not part of the :attr:`fingerprint`."""
     requires_ack: bool = False
     quiet_exempt: bool = False
     expires_at: datetime | None = None
@@ -69,6 +88,7 @@ class StatusEvent:
             summary=summary[:SUMMARY_MAX],
             body_md=str(raw.get("body_md") or ""),
             speakable=bool(raw.get("speakable", True)),
+            speech=clean_speech(raw.get("speech")),
             requires_ack=bool(raw.get("requires_ack", False)),
             quiet_exempt=bool(raw.get("quiet_exempt", False)),
             expires_at=parse_dt(raw.get("expires_at")),
@@ -95,11 +115,19 @@ class StatusEvent:
         return (now or datetime.now(UTC)) >= self.expires_at
 
     @property
+    def spoken(self) -> str:
+        """The text to say for this event: its ``speech`` when it has one, else its summary. Whether it may be
+        spoken at all is ``speakable`` (and the heartbeat policy), not this."""
+        return self.speech or self.summary
+
+    @property
     def fingerprint(self) -> str:
         """Content identity: the same source, severity and summary is the same news.
 
         Sources may re-emit an unchanged condition under a fresh event_id, so
-        duplicate collapsing and change detection key on content, not id.
+        duplicate collapsing and change detection key on content, not id. ``speech`` is left out on purpose: it
+        is how the news is phrased aloud, not what it is, so rewording it is neither a new event nor a change
+        worth re-announcing (and two producers phrasing the same condition differently still collapse).
         """
         summary = " ".join(self.summary.lower().split())
         return f"{self.source}|{self.severity.value}|{summary}"

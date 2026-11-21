@@ -17,8 +17,13 @@ files:
   # tariff: tariff.yaml         # time-of-use energy tariff
   # signals: signals.yaml       # PromQL rules that raise recommendations
   # persona: persona.yaml       # how the narrative sounds (a bad file falls back to the neutral default)
-  # memory: memory/             # operator notes (*.md) folded into briefings; scout writes only
-  #                             # scout-recent-rejections.md there
+  # memory: memory/             # operator notes (*.md, not README.md or _*) folded into briefings;
+  #                             # scout writes only scout-recent-rejections.md there
+
+# What scout writes in the memory directory. Turn it off for a read-only mount; reports
+# still quote recent rejections (from the store).
+# memory:
+#   write_rejections: true
 
 # Where scout keeps events, recommendations, approvals and reports.
 store:

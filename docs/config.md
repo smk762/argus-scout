@@ -26,6 +26,7 @@ test fails if it drifts, so edit the model's descriptions, not this file. For a 
 |---|---|---|---|---|
 | `files` | [files](#files) | section defaults |  | The policy files scout reads (reloaded while it runs). |
 | `store` | [store](#store) | section defaults |  | Where scout keeps its state. |
+| `memory` | [memory](#memory) | section defaults |  | What scout writes in the memory directory. |
 | `sources` | list of [sources: webhook](#sources-webhook) or [sources: json_poll](#sources-json_poll) or [plugin kind](#plugin-kinds) | `[]` |  | Where status events come from. |
 | `channels` | list of [channels: text](#channels-text) or [channels: webhook](#channels-webhook) or [plugin kind](#plugin-kinds) | `[]` |  | Where reports go. |
 | `schedule` | [schedule](#schedule) | section defaults |  | Cycle intervals, the timezone and the briefings. |
@@ -47,7 +48,7 @@ Check each one with `argus-scout check <kind> FILE`, or all of them with `argus-
 | `tariff` | path or null | `null` |  | A time-of-use energy tariff (YAML), for the narrative, `/metrics` and the tariff-aware signal rules. Unset: no tariff. See `examples/tariff.yaml`. |
 | `signals` | path or null | `null` |  | Signal rules (YAML): PromQL questions that raise recommendations. Unset: the analysis cycle does nothing. See `examples/signals.yaml`. |
 | `persona` | path or null | `null` |  | The narrator's persona (YAML). Unset, or a bad file: the neutral built-in persona. |
-| `memory` | path or null | `null` |  | A directory of operator-written markdown notes folded into briefings. Scout reads them and writes only its own recent-rejections file there (see `argus_scout.memory`). |
+| `memory` | path or null | `null` |  | A directory of operator-written markdown notes folded into briefings (`README.md` and names starting with `_` are skipped). Scout reads them and writes only its own recent-rejections file there, unless `memory.write_rejections` is off (see `argus_scout.memory`). |
 
 ```yaml
 files:
@@ -70,6 +71,21 @@ Where scout keeps events, recommendations, approvals and reports.
 ```yaml
 store:
   path: scout.db
+```
+
+## memory
+
+What scout does with the memory directory (`files.memory`) beyond reading your notes.
+
+The directory itself is `files.memory`. Guide: [narrative.md](narrative.md#memory).
+
+| Key | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `write_rejections` | boolean | `true` |  | Keep `scout-recent-rejections.md` in the memory directory up to date. `false` writes nothing there, for a read-only mount; reports still quote recent rejections, which come from the store. A directory scout can't write is logged once and then left alone either way. |
+
+```yaml
+memory:
+  write_rejections: false   # the memory directory is mounted read-only
 ```
 
 ## sources
@@ -137,7 +153,7 @@ A list. Every entry has these keys; each kind adds its own below. A bad entry fa
 |---|---|---|---|---|
 | `kind` | text | required |  | `text`, `webhook`, `snapcast`, `mask`, or a kind an installed plugin provides. |
 | `name` | text | required |  | Unique among channels. Delivery records are keyed by it, so renaming a channel makes it a new one. |
-| `enabled` | boolean | `true` |  | `false` keeps the entry but sends nothing. |
+| `enabled` | boolean | `true` |  | `false` keeps the entry but sends nothing. The entry is still validated, but the channel is never built, so a disabled `snapcast` or `mask` needs no extra installed. Read at startup: enabling it means a restart. |
 | `min_severity` | `info` \| `notice` \| `warning` \| `critical` | `info` |  | Deliver only messages at or above this severity. A report's severity is that of the worst item in it (a briefing also counts its open recommendations); a report with nothing open is `info`. |
 | `kinds` | list of text | `[]` |  | Deliver only these kinds (report kinds such as `morning`, or `event` for an inbox item). Empty: all. |
 | `timeout` | number | `30.0` | > 0, <= 600 | Seconds one delivery may take, retries included. |
@@ -348,7 +364,7 @@ services:
 
 ### services.echo
 
-argus-echo, the speech server voice channels play from. See `argus_scout.channels.echo`. The voice keys are argus-echo's shared request fields, sent as they are: `voice_clone_id` (a stored clone; wins over `speaker`), `speaker` (a built-in speaker), `language`, and the Qwen3-TTS-only `instruction`, `voice_description` and `emotion` (other engines ignore them). `extra` passes engine-specific fields through (Miso's `temperature`, `topk`). Scout never holds a GPU lease around a synthesis: echo takes its own.
+argus-echo, the speech server voice channels play from. See `argus_scout.channels.echo`. The voice keys are argus-echo's shared request fields, sent as they are: `voice_clone_id` (a stored clone; wins over `speaker`), `speaker` (a built-in speaker), `language`, the Qwen3-TTS-only `instruction`, `voice_description` and `emotion` (other engines ignore them), and `speed` (reserved by the contract; no engine applies it yet). Every shared field has its own key, so none may go under `extra`, which passes engine-specific fields through (Miso's `temperature`, `topk`). Scout never holds a GPU lease around a synthesis: echo takes its own.
 
 | Key | Type | Default | Constraints | Description |
 |---|---|---|---|---|
@@ -359,6 +375,7 @@ argus-echo, the speech server voice channels play from. See `argus_scout.channel
 | `instruction` | text or null | `null` |  | Qwen3-TTS only: a speaking instruction. Other engines ignore it. |
 | `voice_description` | text or null | `null` |  | Qwen3-TTS only: a designed voice, described in words. Other engines ignore it. |
 | `emotion` | text or null | `null` |  | Qwen3-TTS only. Other engines ignore it. |
+| `speed` | number or null | `null` | > 0, <= 4 | Speaking rate (`1.0` is normal). Part of the shared request, but reserved: no engine applies it yet, so it is sent only when set and changes nothing today. |
 | `extra` | map of text to any | `{}` |  | Engine-specific request fields, passed through (Miso: `temperature`, `topk`). |
 | `format` | `pcm_s16le` \| `wav` | `pcm_s16le` |  | The audio handed to voice channels: raw 16-bit little-endian PCM, or the same in a WAV container. |
 | `timeout` | number | `60.0` | > 0, <= 600 | Seconds one synthesis may take, model warm. |

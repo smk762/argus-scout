@@ -207,6 +207,32 @@ channel.
 watch -n 60 curl -s localhost:8400/wall
 ```
 
+**In a browser or kiosk.** With `server.read_auth: true`, `/wall` needs `Authorization: Bearer <TOKEN>` like the
+rest of the read API, and a plain browser can't send that header. Scout deliberately takes no token in the query
+string (it would end up in browser history, proxy logs and `Referer` headers) and has no login page or session
+cookie; argus-cortex's `auth` module, which every suite service uses, offers only the bearer header check. So pick
+one of these:
+
+- **`read_auth: false` on a network you trust.** Bind scout to loopback (`server.host: 127.0.0.1`, the default) for
+  a kiosk on the same host, or to a LAN address for one elsewhere on the LAN. The `Host` check still applies: open
+  it by IP, `localhost`, or a name listed in `server.trusted_hosts`, so a DNS-rebinding page can't read it. Writes
+  stay behind the token whatever `read_auth` says. Remember this opens every read route (`/api/*` GETs too) to
+  whoever can reach the port, so don't do it on a network you don't control.
+- **A reverse proxy that adds the header.** Keep `read_auth: true`, keep scout on loopback, and put a proxy in front
+  that authenticates the person or device its own way (its login, client certificates, an allowlist) and adds
+  `Authorization: Bearer <TOKEN>` to requests it forwards to `/wall`. List the name the proxy forwards in
+  `server.trusted_hosts` if it passes `Host` through. Forward only `GET /wall` (and whatever else the kiosk needs),
+  not the write routes, so the proxy's users can't approve or ack with the token it holds. For example, with
+  nginx:
+
+  ```nginx
+  location = /wall {
+      limit_except GET { deny all; }
+      proxy_pass http://127.0.0.1:8400;
+      proxy_set_header Authorization "Bearer <TOKEN>";
+  }
+  ```
+
 ## `/api/policy/explain`
 
 What the status cycle would decide if it ran now: `now`, `timezone`, whether rest or quiet hours are on, the

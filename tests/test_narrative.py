@@ -106,6 +106,28 @@ async def test_prompt_holds_the_facts_and_quotes_rejections(store, tmp_path):
     assert REASON in (tmp_path / "mem" / SCOUT_FILE).read_text()
 
 
+async def test_rejections_are_quoted_from_the_store_when_the_memory_file_is_off(store, tmp_path):
+    seed(store)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "mem" / "README.md").write_text("How this directory works, for people.")
+    gen = FakeGenerator()
+    await narrator(store, gen, memory=Memory(tmp_path / "mem", write_rejections=False)).report("morning")
+    (prompt,) = gen.prompts
+    assert f'"Power down the NAS overnight" (notice), rejected 2026-06-01: reason "{REASON}"' in prompt.user
+    assert "How this directory works" not in prompt.user
+    assert [p.name for p in (tmp_path / "mem").iterdir()] == ["README.md"]  # nothing written
+
+
+def test_build_narrator_reads_memory_write_rejections(tmp_path):
+    from argus_scout.config import parse_config
+    from argus_scout.narrative import build_narrator
+
+    config = parse_config({"files": {"memory": "mem"}, "memory": {"write_rejections": False}}, tmp_path)
+    with SqliteStore(":memory:") as s:
+        assert build_narrator(config, s, DailyBudget({})).memory.writes is False
+        assert build_narrator(parse_config({"files": {"memory": "mem"}}, tmp_path), s, DailyBudget({})).memory.writes
+
+
 def test_truncation_drops_least_severe_first():
     facts = Facts(kind="morning", at=T0)
     for i in range(40):

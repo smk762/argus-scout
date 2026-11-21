@@ -179,19 +179,20 @@ class StatusCycle:
     def speech(
         self, groups: list[EventGroup], decisions: dict[str, Decision], policy: HeartbeatPolicy, now: datetime
     ) -> str | bool:
-        """What the report says aloud: the summaries of the groups the voice policy allows
+        """What the report says aloud: each group's spoken text (its latest event's ``speech``, else its summary) for
+        the groups the voice policy allows
         (:func:`~argus_scout.heartbeat.voice_gate` via ``Decision.voice``: the source's routing, ``speakable``,
         ``voice.min_severity``), or ``False`` when there are none, so the report goes to text channels only.
         With ``voice.on_change_only`` (the default) a group already announced is left out unless it is news
         again (:meth:`is_news`): repeats stay text-only."""
         spoken = [
-            g.latest.summary.strip().rstrip(".")
+            g.latest.spoken.strip().rstrip(".")
             for g in groups
             if decisions[g.fingerprint].voice and (not policy.voice_on_change_only or self.is_news(g, policy, now))
         ]
         if not spoken:
             return False
-        return " ".join([f"{TITLES['status']}.", *(f"{s}." for s in spoken)])
+        return " ".join([f"{TITLES['status']}.", *(s if s.endswith(("!", "?")) else f"{s}." for s in spoken)])
 
     async def _report(self, result: StatusResult, policy: HeartbeatPolicy, now: datetime) -> Report | None:
         assert self.narrator is not None
