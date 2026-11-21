@@ -100,7 +100,12 @@ channels:
   #   face: <FACE_ID>
   #   wait_ready: 0
   #   token_env: SCOUT_MASK_TOKEN    # optional: for a proxy in front of mask
-  #   allow_cloned_voice: false      # refuse cloned-voice speech: /push can't disclose it to viewers
+  #   transport: http                # or websocket: mask's source socket, which can show a cloned voice
+  #                                  # with mask's disclosure label
+  #   cloned_voice_consented: false  # websocket only: true attests the clone's owner consented, and every
+  #                                  # viewer is shown that claim. false: cloned speech is skipped
+  #   allow_cloned_voice: false      # http only: /push can't disclose a clone, so it is refused. true pushes
+  #                                  # it with no disclosure at all (not recommended: use websocket)
   #
   # Any other kind comes from an installed plugin (entry-point group argus_scout.channels),
   # which validates its own keys. Re-send the newest report:

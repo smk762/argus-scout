@@ -169,8 +169,9 @@ class SpeechAudio:
     """What was said."""
     voice: str | None = None
     cloned: bool = False
-    """The voice is a clone (possibly of a real person), not a synthetic one. A channel that can't disclose that to
-    its audience refuses such audio unless its config allows it (``mask``: ``allow_cloned_voice``). A synthesiser
+    """The voice is a clone (possibly of a real person), not a synthetic one. A channel that can disclose that to
+    its audience does when its config allows it (``mask`` over websocket: ``cloned_voice_consented``); one that can't refuses such audio unless its config
+    allows it (``mask`` over http: ``allow_cloned_voice``). A synthesiser
     that can't tell sets it whenever it asked for a clone."""
 
 

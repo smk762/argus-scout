@@ -528,7 +528,8 @@ class EchoConfig(_Section):
     """The engine's root, e.g. ``http://echo:8000``: scout calls ``/health`` and ``/synthesise/stream`` under it."""
     voice_clone_id: str | None = None
     """A clone stored on that engine (clones are per engine). Wins over ``speaker``. Speech in a clone is marked
-    as cloned, which the ``mask`` channel refuses unless its ``allow_cloned_voice`` is set."""
+    as cloned: the ``mask`` channel discloses it over ``transport: websocket`` when ``cloned_voice_consented`` attests consent, and over http refuses it unless its
+    ``allow_cloned_voice`` is set."""
     speaker: str | None = None
     """A built-in speaker (``GET /speakers`` on the engine). Neither this nor a clone: the engine's default voice."""
     language: str = "en"

@@ -244,6 +244,12 @@ FETCHERS = {
 # host its config names: a delivery target (the speakers), not a monitored host.
 RAW_SOCKET_CALLS = {"open_connection", "create_connection", "open_unix_connection", "start_server", "sock_connect"}
 RAW_SOCKET_USERS = {"channels/snapcast.py"}
+# WebSocket clients, which bypass argus_cortex.net. Only the mask channel, for argus-mask's source socket
+# (``transport: websocket``, the one path that can carry mask's disclosure label for a cloned voice) at the one
+# host its config names: a delivery target (a face), not a monitored host. It pins the connection itself: the
+# configured host resolved once and checked with ``argus_cortex.net.check_url``, connected to those addresses only,
+# no redirects, no proxy, capped messages and timeouts (``tests/test_voice_channels.py``, ``test_mask_ws_*``).
+WEBSOCKET_USERS = {"channels/mask.py"}
 
 
 def test_no_module_contacts_hosts_directly():
@@ -263,6 +269,9 @@ def test_no_module_contacts_hosts_directly():
                 continue
             bad = {n for n in names if n in NETWORK_MODULES or n.split(".")[0] in {"httpx", "requests", "aiohttp"}}
             assert not bad, f"{rel} imports {bad}"
+            if rel not in WEBSOCKET_USERS:
+                ws = {n for n in names if n.split(".")[0] == "websockets"}
+                assert not ws, f"{rel} opens WebSockets: {ws}"
         if rel not in RAW_SOCKET_USERS:
             calls = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in RAW_SOCKET_CALLS} | {
                 n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in RAW_SOCKET_CALLS
