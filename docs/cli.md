@@ -106,7 +106,7 @@ $ argus-scout serve [OPTIONS]
 **Options**:
 
 * `-c, --config <file>`: scout.yaml; refuses to start if it is invalid.
-* `--host <str>`: Bind address . Scout has no auth yet: keep it on loopback.
+* `--host <str>`: Bind address . Reads are open unless server.read_auth: keep it on loopback.
 * `--port <int>`: 
 * `--help`: Show this message and exit.
 

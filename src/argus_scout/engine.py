@@ -40,7 +40,7 @@ from argus_scout.approvals import StandingApprovals
 from argus_scout.recommendations import Recommendation, Status
 from argus_scout.severity import Severity, rank
 from argus_scout.signals import Evaluation, SignalHit
-from argus_scout.store.base import Store
+from argus_scout.store.base import Store, StoreConflict
 
 log = structlog.get_logger()
 
@@ -156,23 +156,22 @@ class RecommendationEngine:
         for key, hit in by_key.items():
             open_recs = self.store.recommendations_by_key(key, OPEN)
             if open_recs:
-                self._refresh(open_recs[0], hit, now)
-                report.refreshed.append(open_recs[0])
+                if self._refresh(open_recs[0], hit, now):
+                    report.refreshed.append(open_recs[0])
                 continue
             if self._suppressed(hit, now):
                 report.suppressed.append(hit)
                 continue
             rec = self._propose(hit, now)
             report.new.append(rec)
-            if rec.status == Status.APPROVED:
+            if rec.status == Status.APPROVED and rec.approval_source == "standing":
                 report.auto_approved.append(rec)
 
         for rec in self.store.list_recommendations(Status.PROPOSED):
             if rec.key in by_key:
                 continue
             reason = self._expiry_reason(rec, ran, now)
-            if reason and rec.retire(reason, now=now):
-                self.store.save_recommendation(rec, by=ENGINE, reason=reason)
+            if reason and rec.retire(reason, now=now) and self._save(rec, Status.PROPOSED, by=ENGINE, reason=reason):
                 report.retired.append(rec)
 
         log.info("engine.cycle", summary=report.summary())
@@ -182,7 +181,18 @@ class RecommendationEngine:
     def _expires_at(self, hit: SignalHit, now: datetime) -> datetime:
         return now + (hit.expires_after or self.default_ttl)
 
-    def _refresh(self, rec: Recommendation, hit: SignalHit, now: datetime) -> None:
+    def _save(self, rec: Recommendation, loaded: Status | None, **kwargs: str | None) -> bool:
+        """Save ``rec`` if its stored status is still ``loaded``. A person may have decided it since this cycle
+        read it: then the write is refused, logged and skipped, and the next cycle sees the decision."""
+        try:
+            self.store.save_recommendation(rec, expected_status=loaded, **kwargs)
+        except StoreConflict as exc:
+            log.warning("engine.stale_skipped", rec_id=rec.id, key=rec.key, error=str(exc))
+            return False
+        return True
+
+    def _refresh(self, rec: Recommendation, hit: SignalHit, now: datetime) -> bool:
+        loaded = rec.status
         if rec.status in (Status.DRAFT, Status.PROPOSED):
             rec.title, rec.action, rec.rationale = hit.title, hit.action, hit.rationale
             rec.impact, rec.confidence = hit.impact, hit.confidence
@@ -192,7 +202,7 @@ class RecommendationEngine:
         rec.last_seen_at = now
         rec.expires_at = self._expires_at(hit, now)
         rec.updated_at = now
-        self.store.save_recommendation(rec, by=ENGINE)
+        return self._save(rec, loaded, by=ENGINE)
 
     def _suppressed(self, hit: SignalHit, now: datetime) -> bool:
         rejected = self.store.recommendations_by_key(hit.key, Status.REJECTED)
@@ -229,12 +239,15 @@ class RecommendationEngine:
             last_seen_at=now,
             expires_at=self._expires_at(hit, now),
         )
-        self.store.save_recommendation(rec, by=ENGINE)
+        self.store.save_recommendation(rec, by=ENGINE, expected_status=None)
         rec.transition(Status.PROPOSED, now=now)
-        self.store.save_recommendation(rec, by=ENGINE)
+        self.store.save_recommendation(rec, by=ENGINE, expected_status=Status.DRAFT)
         if self.approvals is not None and self.approvals.apply(rec, now) is not None:
-            self.store.save_recommendation(rec)  # the transition records rule:<id> as who approved it
-            log.info("engine.auto_approved", key=rec.key, rule=rec.approved_by_rule)
+            # The transition records rule:<id> as who approved it. A person who decided first wins.
+            if self._save(rec, Status.PROPOSED):
+                log.info("engine.auto_approved", key=rec.key, rule=rec.approved_by_rule)
+            else:
+                rec = self.store.get_recommendation(rec.id) or rec
         return rec
 
     def _expiry_reason(self, rec: Recommendation, ran: set[str], now: datetime) -> str | None:
