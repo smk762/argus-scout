@@ -15,15 +15,23 @@ so a slow model is never asked twice, and wraps every failure (bad status, bad J
 
 ``await generator.generate(prompt, max_tokens=..., kind="llm_calls")``
 
-1. **Daily cap.** The call is charged to ``kind`` in the :class:`~argus_scout.budget.DailyBudget`
+1. **Daily cap, checked.** Over today's cap for ``kind`` it raises :class:`LLMBudgetExceeded` at once: no
+   lease is waited for and the model is never called.
+2. **The call guard (the GPU lease).** The rest runs inside ``call_guard()``, an async context manager that
+   defaults to doing nothing. With ``services.llm.gpu`` set it is :func:`argus_scout.gpu.narrative_guard`: a
+   preemptible ``argus_cortex.gpu`` lease (brokered by argus-iris) held for exactly the model call, never
+   while a prompt is being built or a report stored. A lease that is not granted
+   (:data:`argus_scout.gpu.LEASE_ERRORS`) raises :class:`LLMGpuUnavailable`; any other guard failure is
+   :class:`LLMUnavailable`. If the guard yields a grant with a ``base_url`` (the broker placed the work on
+   another node), the call goes to that model server (:func:`argus_scout.gpu.routed_url`).
+3. **Daily cap, charged.** The call is charged to ``kind`` in the :class:`~argus_scout.budget.DailyBudget`
    *before* the model is asked, so a failing backend still counts and a retry loop can't run up an
-   unbounded bill. Over the cap it raises :class:`LLMBudgetExceeded` and the model is never called.
-2. **The call guard (the GPU-lease seam).** The model call runs inside ``call_guard()``, an async context
-   manager that defaults to doing nothing. A GPU lease (``argus_cortex.gpu``, brokered by argus-iris)
-   wraps the call here later: pass ``call_guard=lambda: lease(...)`` and the lease is held for exactly
-   the duration of the HTTP round-trip, never while a prompt is being built or a report stored. A guard
-   that raises (no lease granted) is reported as :class:`LLMUnavailable` like any backend failure.
-3. **The call.** The backend's blocking HTTP call runs in a worker thread.
+   unbounded bill. The charge is atomic across processes (see :mod:`argus_scout.budget`), so if another
+   process spent the last call while this one waited for its lease, it is refused here.
+4. **The call.** The backend's blocking HTTP call runs in a worker thread.
+
+Speech is argus-echo's GPU work, under echo's own lease and residency: nothing here wraps a call to echo
+(see :mod:`argus_scout.gpu`).
 
 **The model's output is untrusted text.** :func:`clean_output` strips control characters and
 ``<think>`` blocks and caps its length; after that it is only ever stored and shown. Nothing parses it,
@@ -45,6 +53,7 @@ from argus_cortex.backends import BackendError, RemoteBackend
 
 from argus_scout.budget import DailyBudget
 from argus_scout.config import LLMConfig, resolve_secret
+from argus_scout.gpu import LEASE_ERRORS, routed_url
 
 log = structlog.get_logger()
 
@@ -74,6 +83,12 @@ class LLMBudgetExceeded(LLMUnavailable):
     """Today's cap for this kind is spent; the model was not called."""
 
     reason = "budget"
+
+
+class LLMGpuUnavailable(LLMUnavailable):
+    """No GPU lease was granted in time (or the broker refused it); the model was not called or charged."""
+
+    reason = "gpu_unavailable"
 
 
 @dataclass(frozen=True)
@@ -137,6 +152,18 @@ class TextBackend(RemoteBackend):
         super().__init__(base_url, api_key=api_key, timeout=timeout)
         self.model = model
         self.temperature = temperature
+
+    def at(self, base_url: str) -> TextBackend:
+        """This backend (same model, key, timeout and temperature) pointed at ``base_url``; itself if unchanged."""
+        if base_url.rstrip("/") == self.base_url:
+            return self
+        return type(self)(
+            base_url,
+            self.model,
+            api_key=self.api_key,
+            timeout=self.timeout,
+            temperature=self.temperature,
+        )
 
     def request(self, prompt: Prompt, max_tokens: int) -> dict[str, Any]:  # pragma: no cover - abstract
         raise NotImplementedError
@@ -252,22 +279,32 @@ class TextGenerator:
         self.backend = backend
         self.budget = budget
         self.call_guard: CallGuard = call_guard or nullcontext
+        self._routed: dict[str, TextBackend] = {}
 
     @property
     def model(self) -> str:
         return self.backend.model
 
     async def generate(self, prompt: Prompt, *, max_tokens: int, kind: str = LLM_CALLS) -> Completion:
-        """Generate text for ``prompt``: charge ``kind``, hold the call guard, call the model.
+        """Generate text for ``prompt``: check the cap, hold the call guard, charge ``kind``, call the model.
 
-        Raises :class:`LLMBudgetExceeded` over the cap (the model is not called) and :class:`LLMUnavailable`
-        for anything else that leaves no text. The returned text is untrusted.
+        Raises :class:`LLMBudgetExceeded` over the cap (the model is not called), :class:`LLMGpuUnavailable` when
+        no GPU lease was granted, and :class:`LLMUnavailable` for anything else that leaves no text. The returned
+        text is untrusted.
         """
-        if self.budget is not None and not self.budget.try_consume(kind):
-            raise LLMBudgetExceeded(f"daily {kind} limit reached ({self.budget.limit_for(kind)})")
+        if self.budget is not None and not self.budget.available(kind):
+            raise self._over_cap(kind)
         try:
-            async with self.call_guard():
-                return await asyncio.to_thread(self.backend.complete, prompt, max_tokens=max_tokens)
+            async with self.call_guard() as grant:
+                if self.budget is not None and not self.budget.try_consume(kind):
+                    raise self._over_cap(kind)
+                backend = self._backend_for(getattr(grant, "base_url", None))
+                return await asyncio.to_thread(backend.complete, prompt, max_tokens=max_tokens)
+        except LLMBudgetExceeded:
+            raise
+        except LEASE_ERRORS as exc:
+            log.warning("llm.no_gpu_lease", backend=self.backend.name, model=self.backend.model, error=str(exc))
+            raise LLMGpuUnavailable(str(exc)) from exc
         except BackendError as exc:
             log.warning("llm.failed", backend=self.backend.name, model=self.backend.model, error=str(exc))
             raise LLMUnavailable(str(exc)) from exc
@@ -275,8 +312,27 @@ class TextGenerator:
             log.warning("llm.failed", backend=self.backend.name, model=self.backend.model, error=repr(exc))
             raise LLMUnavailable(repr(exc)) from exc
 
+    def _over_cap(self, kind: str) -> LLMBudgetExceeded:
+        assert self.budget is not None
+        return LLMBudgetExceeded(f"daily {kind} limit reached ({self.budget.limit_for(kind)})")
+
+    def _backend_for(self, granted_url: str | None) -> TextBackend:
+        """The configured backend, or one pointed at the model server the broker's grant named."""
+        if not granted_url or not self.backend.base_url:
+            return self.backend
+        url = routed_url(self.backend.base_url, granted_url)
+        if url == self.backend.base_url:
+            return self.backend
+        if url not in self._routed:
+            log.info("llm.routed", backend=self.backend.name, model=self.backend.model, base_url=url)
+            self._routed[url] = self.backend.at(url)
+        return self._routed[url]
+
     def close(self) -> None:
         self.backend.unload()
+        for backend in self._routed.values():
+            backend.unload()
+        self._routed.clear()
 
 
 __all__ = [
@@ -286,6 +342,7 @@ __all__ = [
     "CallGuard",
     "Completion",
     "LLMBudgetExceeded",
+    "LLMGpuUnavailable",
     "LLMUnavailable",
     "OllamaBackend",
     "OpenAICompatBackend",

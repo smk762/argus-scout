@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,6 +136,16 @@ MIGRATIONS: tuple[str, ...] = (
         key   TEXT NOT NULL,
         since TEXT NOT NULL,
         PRIMARY KEY (rule, key)
+    );
+    """,
+    # 5: daily usage counts (budget caps), one row per local day and kind. Each charge is one atomic upsert, so
+    # the server and a CLI run sharing this file can't lose a count or exceed a cap together (was usage.json).
+    """
+    CREATE TABLE usage_counts (
+        day  TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, kind)
     );
     """,
 )
@@ -615,6 +625,37 @@ class SqliteStore:
             row = conn.execute("SELECT * FROM job_runs WHERE name = ?", (name,)).fetchone()
         return self._job_from_row(row)
 
+    # -- daily usage counts (DailyBudget's UsageCounter) ---------------------------------------
+    def usage_counts(self, day: str) -> dict[str, int]:
+        return {r["kind"]: r["used"] for r in self._query("SELECT kind, used FROM usage_counts WHERE day = ?", (day,))}
+
+    def consume_usage(self, day: str, kind: str, limit: int, *, allow_over: bool = False) -> tuple[bool, int]:
+        """Charge one ``kind`` on ``day`` unless it is at ``limit``; returns (charged, count after).
+
+        The limit check is the upsert's own ``WHERE``, so check and increment are one statement inside one
+        ``BEGIN IMMEDIATE`` transaction: another connection (another process) can't slip in between them.
+        """
+        unlimited = allow_over or limit <= 0
+        with self._tx() as conn:
+            row = conn.execute(
+                """INSERT INTO usage_counts (day, kind, used) VALUES (?, ?, 1)
+                   ON CONFLICT (day, kind) DO UPDATE SET used = used + 1 WHERE ? OR used < ?
+                   RETURNING used""",
+                (day, kind, unlimited, limit),
+            ).fetchone()
+            if row is not None:
+                return True, row["used"]
+            used = conn.execute("SELECT used FROM usage_counts WHERE day = ? AND kind = ?", (day, kind)).fetchone()
+        return False, used["used"] if used else 0
+
+    def merge_usage(self, day: str, counts: Mapping[str, int]) -> None:
+        with self._tx() as conn:
+            conn.executemany(
+                """INSERT INTO usage_counts (day, kind, used) VALUES (?, ?, ?)
+                   ON CONFLICT (day, kind) DO UPDATE SET used = MAX(used, excluded.used)""",
+                [(day, str(kind), max(0, int(n))) for kind, n in counts.items()],
+            )
+
     # -- counts (read at scrape time by /metrics) ----------------------------------------
     def recommendation_counts(self) -> dict[Status, int]:
         """Recommendations per status; every status is present, zero when empty."""
@@ -649,7 +690,8 @@ class SqliteStore:
 
     # -- retention -------------------------------------------------------------------
     def prune(self, older_than: datetime) -> dict[str, int]:
-        """Delete events acked (or expired) before ``older_than`` and reports generated before it.
+        """Delete events acked (or expired) before ``older_than``, reports generated before it and usage counts of
+        earlier days.
 
         Open events, recommendations and their audit trail are never pruned.
         """
@@ -661,9 +703,10 @@ class SqliteStore:
                 (cutoff, cutoff),
             ).rowcount
             reports = conn.execute("DELETE FROM reports WHERE generated_at < ?", (cutoff,)).rowcount
-        if events or reports:
-            log.info("store.pruned", events=events, reports=reports, older_than=cutoff)
-        return {"events": events, "reports": reports}
+            usage = conn.execute("DELETE FROM usage_counts WHERE day < ?", (older_than.date().isoformat(),)).rowcount
+        if events or reports or usage:
+            log.info("store.pruned", events=events, reports=reports, usage=usage, older_than=cutoff)
+        return {"events": events, "reports": reports, "usage": usage}
 
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION", "SqliteStore", "migrate"]

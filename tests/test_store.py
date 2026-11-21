@@ -317,8 +317,11 @@ def test_prune(store):
     store.add_report("morning", T0 + timedelta(days=10), "new")
     rec = proposal()
     store.save_recommendation(rec)
+    store.consume_usage(T0.date().isoformat(), "llm_calls", 0)
+    store.consume_usage((T0 + timedelta(days=5)).date().isoformat(), "llm_calls", 0)
 
-    assert store.prune(T0 + timedelta(days=5)) == {"events": 2, "reports": 1}
+    assert store.prune(T0 + timedelta(days=5)) == {"events": 2, "reports": 1, "usage": 1}
+    assert store.usage_counts((T0 + timedelta(days=5)).date().isoformat()) == {"llm_calls": 1}
     assert store.get_event("nas", "old-acked") is None
     assert store.get_event("nas", "expired") is None
     assert store.get_event("nas", "new-acked") is not None

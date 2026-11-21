@@ -253,6 +253,44 @@ class ScheduleConfig(_Section):
         return ZoneInfo(self.timezone)
 
 
+GpuPriority = Literal["realtime", "interactive", "batch", "background"]
+"""argus-cortex's ``PriorityClass``, highest first (kept literal here so config never imports the GPU client)."""
+
+TARGET_RE = re.compile(r"^[a-z][a-z0-9-]*(:\S+)?$")
+
+
+def _check_target(value: str) -> str:
+    if not TARGET_RE.match(value) or len(value) > 200:
+        raise ValueError("must be <service> or <service>:<model>, e.g. ollama or vllm:qwen3-8b")
+    return value
+
+
+class LLMGpuConfig(_Section):
+    """A GPU lease around each model call (argus-iris broker, through ``argus_cortex.gpu``). See :mod:`argus_scout.gpu`.
+
+    Present (even empty, ``gpu: {}``) means every narrative model call holds a lease for its HTTP round-trip;
+    absent means no lease, which is right for a hosted backend. Which coordinator grants it (none, a host lock,
+    the broker) is the host-wide ``ARGUS_GPU_*`` environment, never this file. The defaults are an 8B model in
+    Ollama and its KV cache, the figures ``gpu-tenant.yaml`` declares.
+    """
+
+    min_vram_mb: int = Field(default=6000, gt=0, description="The whole footprint: weights plus working set, MiB.")
+    model_mb: int | None = Field(
+        default=5200, ge=0, description="The part of min_vram_mb that stays loaded in the model server after a call."
+    )
+    priority: GpuPriority = Field(default="background", description="Briefings can wait: the lowest class.")
+    target: Annotated[str, AfterValidator(_check_target)] | None = Field(
+        default=None,
+        description="The broker service that serves the model. Default for ollama: ollama:<model>. Required for openai.",
+    )
+
+    @model_validator(mode="after")
+    def _model_within_total(self) -> LLMGpuConfig:
+        if self.model_mb is not None and self.model_mb > self.min_vram_mb:
+            raise ValueError(f"model_mb ({self.model_mb}) cannot exceed min_vram_mb ({self.min_vram_mb})")
+        return self
+
+
 class LLMConfig(_Section):
     """The model the narrative is written with. See :mod:`argus_scout.llm`.
 
@@ -271,6 +309,19 @@ class LLMConfig(_Section):
         default=3072, ge=1024, description="The model's context window; prompts are cut to fit it with the output."
     )
     temperature: float | None = Field(default=None, ge=0, le=2)
+    gpu: LLMGpuConfig | None = None
+    """Hold a GPU lease around each model call. Leave unset for a hosted backend."""
+
+    @model_validator(mode="after")
+    def _gpu_target_for_openai(self) -> LLMConfig:
+        # The broker can only place a lease on a service its operator configured. For Ollama that is
+        # ollama:<model>; an OpenAI-compatible server has no implied service, and a hosted one has none at all.
+        if self.gpu is not None and self.backend == "openai" and self.gpu.target is None:
+            raise ValueError(
+                "gpu with backend openai needs gpu.target (the broker service serving the model); "
+                "a hosted backend takes no GPU lease, so leave gpu unset"
+            )
+        return self
 
 
 class ServicesConfig(_Section):
