@@ -8,7 +8,9 @@
       face: <FACE_ID>                 # a face id or alias it serves
       wait_ready: 0                   # seconds to wait for a screen that can be heard; 0: skip at once
       token_env: SCOUT_MASK_TOKEN     # optional: a bearer token for a proxy in front of mask
-      allow_cloned_voice: false       # refuse speech in a cloned voice: /push cannot disclose it
+      transport: http                 # http (POST /push) or websocket (the source socket, which can disclose)
+      cloned_voice_consented: false   # websocket only: attest a cloned voice's owner consented (mask shows it)
+      allow_cloned_voice: false       # http only: push a cloned voice with no disclosure (not recommended)
 
 argus-mask's agent contract (its README, "Agent clients: HTTP push and speak") is used as published:
 
@@ -21,6 +23,16 @@ argus-mask's agent contract (its README, "Agent clients: HTTP push and speak") i
   and answers ``{"session_id", "frames", "duration_ms"}``. ``require_screen`` makes mask itself refuse (409) if
   the screen went away between the check and the push, so speech is never pushed to a face no one can hear.
 
+- **Speech over the source socket** (``transport: websocket``): ``WS /session/<face>/source``. The first message
+  is a JSON hello, ``{"sample_rate", "channels", "format": "s16le", "seed", "disclose"}`` (mask's ``SourceHello``);
+  mask answers ``{"type": "ready", ...}`` once it has opened its driver and announced the stream. Then binary
+  messages of raw PCM, paced at real time plus a one-second lead (as mask's own client does: the socket has no
+  server-side pacing), then ``{"type": "end"}``; mask answers ``{"type": "done", "frames", "duration_ms"}`` and
+  closes. A refusal is ``{"type": "error", "detail"}`` and a close (1013 for a face that already has a source,
+  which is skipped; anything else fails). ``disclose`` is true exactly when the audio is ``SpeechAudio.cloned``
+  (pushed only with ``cloned_voice_consented``): viewers then show mask's fixed label, "An AI voice of a real person, used with their consent." The socket has
+  no ``require_screen``, so the ``/health`` check just before connecting is the only readiness check.
+
 **Not ready is skipped, not failed**: no screen (or a busy face) returns a ``skipped`` result unless
 ``wait_ready`` gives it time to become ready. A read-only server or a driver that is down is a failure.
 
@@ -28,30 +40,41 @@ argus-mask has no authentication of its own (reaching its port is access, and it
 that sends no ``Origin`` through). ``token_env`` is for a reverse proxy that adds one. Mask takes its own GPU
 lease (argus-iris) for the stream; scout holds none.
 
-**Cloned voices are refused by default.** ``/push`` carries no consent or disclosure flag, so a face fed a
-clone would speak in a possibly real person's voice with nothing telling the viewer. Speech marked
-``SpeechAudio.cloned`` (argus-echo with a ``voice_clone_id``) is skipped, permanently and with a reason, unless
-the channel sets ``allow_cloned_voice: true``. Nothing is fetched or pushed for it.
+**Cloned voices are disclosed on attestation, or refused.** Over the socket, speech marked ``SpeechAudio.cloned``
+(argus-echo with a ``voice_clone_id``) goes with ``disclose: true`` only when the operator attests consent with
+``cloned_voice_consented: true``: the label asserts consent, which scout can't verify. Otherwise it is skipped,
+permanently and with a reason, before mask is contacted. ``/push`` carries no disclosure flag, so over http a clone is
+skipped, permanently and with a reason, before mask is contacted, unless the channel sets
+``allow_cloned_voice: true`` (logged as a warning on every push: the face speaks a possibly real person's voice
+with nothing telling the viewer). The hello carries no consent reference: mask checks consent records only for
+voices it synthesises itself, and trusts a source's ``disclose``. Scout can't see whether a clone is consented,
+so it never asserts that on its own: ``cloned_voice_consented`` is the operator's attestation.
 
-Fetching goes through ``argus_cortex.net.afetch`` with only the configured host allowed and no redirects.
-Needs the ``mask`` extra (numpy, to normalise the audio): ``pip install argus-scout[mask]``.
+Fetching (``/health``, ``/push``) goes through ``argus_cortex.net.afetch`` with only the configured host allowed and
+no redirects. The socket can't use ``afetch``, so it is pinned the same way here: the configured host is resolved
+once, the addresses pass ``argus_cortex.net.check_url`` (with only that host allowed), and the connection goes to
+those addresses only (``Host`` and TLS SNI stay the configured name), with redirects refused, environment proxies
+ignored, no compression, capped messages and timeouts on the connect, the ``ready`` and the whole push.
+Needs the ``mask`` extra (numpy, to normalise the audio; websockets, for the socket):
+``pip install argus-scout[mask]``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import structlog
-from argus_cortex.net import Reply, UrlRefused, afetch
+from argus_cortex.net import CheckedUrl, Reply, UrlRefused, afetch, check_url
 from pydantic import Field
 
 import argus_scout
-from argus_scout.channels.audio import decode, require_numpy, to_s16le
+from argus_scout.channels.audio import MissingExtra, Pcm, decode, require_numpy, to_s16le
 from argus_scout.channels.base import ChannelError, Delivery, DeliveryResult, SpeechAudio
 from argus_scout.config import ChannelSettings, EnvName, HttpUrl, resolve_secret
 from argus_scout.sources.json_poll import allow_host
@@ -66,8 +89,21 @@ MAX_HEALTH_BYTES = 256 * 1024
 PUSH_SLACK_S = 15.0
 """How much longer than the speech a push may take to answer (mask paces it at real time, plus its driver)."""
 
+WS_CONNECT_TIMEOUT_S = 10.0
+"""The TCP connect and the WebSocket handshake, together."""
+WS_READY_TIMEOUT_S = 30.0
+"""From the hello to mask's ``ready`` (it opens its driver first)."""
+WS_CLOSE_TIMEOUT_S = 5.0
+WS_MAX_MESSAGE_BYTES = 64 * 1024
+"""The largest message accepted from mask. It only sends small JSON (``ready``, ``done``, ``error``)."""
+WS_FRAME_BYTES = 64 * 1024
+"""The most PCM sent in one message (mask refuses one over 4 MB). websockets sends a message as one frame."""
+WS_LEAD_S = 1.0
+"""How far ahead of real time the socket is fed: mask paces ``/push`` itself, but not its socket."""
+
 Fetcher = Callable[..., Awaitable[Reply]]
 Sleep = Callable[[float], Awaitable[object]]
+Resolver = Callable[[str, int], list[str]]
 
 
 class MaskConfig(ChannelSettings):
@@ -88,15 +124,56 @@ class MaskConfig(ChannelSettings):
     """Env var holding a bearer token, for a proxy in front of mask. Unset: no Authorization header."""
     timeout: float = Field(default=120.0, gt=0, le=600)
     """Seconds the whole delivery may take: mask answers a push when the speech ends."""
+    transport: Literal["http", "websocket"] = "http"
+    """How speech reaches mask: ``http`` (``POST /push``) or ``websocket`` (its source socket, whose hello sets the
+    disclosure label for a cloned voice). The same host and port either way: ``ws://`` or ``wss://`` from ``url``."""
     allow_cloned_voice: bool = False
-    """Push speech in a cloned voice (``SpeechAudio.cloned``) to this face. Off by default: ``/push`` can't set
-    mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure."""
+    """http only: push speech in a cloned voice (``SpeechAudio.cloned``) anyway. Off by default: ``/push`` can't
+    set mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure. Use
+    ``transport: websocket`` instead, which discloses it. Ignored over websocket."""
+    cloned_voice_consented: bool = False
+    """websocket only: setting this attests that the owner of the cloned voice (``services.echo.voice_clone_id``)
+    consented to its use. Cloned speech is then pushed with mask's disclosure label, which every viewer sees as
+    "An AI voice of a real person, used with their consent": mask displays your claim. Scout can't verify it.
+    Unset, cloned speech is skipped over websocket. Synthetic voices are unaffected."""
 
 
 CLONED_REFUSAL = (
     "refused: the speech is in a cloned voice and argus-mask's /push cannot carry a disclosure; "
-    "set allow_cloned_voice: true on this channel only if the clone is consented and disclosed some other way"
+    "use transport: websocket with cloned_voice_consented: true (which discloses it), or set allow_cloned_voice: true on this channel only if the "
+    "clone is consented and disclosed some other way"
 )
+UNATTESTED_REFUSAL = (
+    "refused: the speech is in a cloned voice, and argus-mask would label it as a real person's voice used with "
+    "their consent, which scout can't verify; set cloned_voice_consented: true on this channel only if the voice's "
+    "owner consented"
+)
+BUSY_MARK = "already has a source"
+"""How mask's socket says the face is taken (close code 1013, which a driver that is down shares)."""
+
+
+def source_url(url: str, face: str) -> str:
+    """The source socket for ``face`` on the mask server at ``url`` (``http`` -> ``ws``, ``https`` -> ``wss``)."""
+    scheme, sep, rest = url.rstrip("/").partition("://")
+    secure = {"http": False, "https": True}.get(scheme.lower()) if sep else None
+    if secure is None:
+        raise ChannelError(f"{url!r} is not an http(s):// URL")
+    return f"{'wss' if secure else 'ws'}://{rest}/session/{quote(face, safe='')}/source"
+
+
+def hello(pcm: Pcm, *, seed: int, disclose: bool) -> str:
+    """Mask's ``SourceHello``: the audio format, the idle layer's seed, and whether to show the disclosure label."""
+    fmt = {"sample_rate": pcm.sample_rate, "channels": pcm.channels, "format": "s16le"}
+    return json.dumps(fmt | {"seed": seed, "disclose": disclose})
+
+
+def require_websockets() -> Any:
+    """The ``websockets`` package (the ``mask`` extra), imported only for ``transport: websocket``."""
+    try:
+        import websockets.asyncio.client
+    except ImportError as exc:
+        raise MissingExtra(f"transport: websocket needs websockets: install argus-scout[{EXTRA}]") from exc
+    return websockets
 
 
 def face_keys(face: str, aliases: dict[str, str]) -> set[str]:
@@ -148,12 +225,16 @@ class MaskChannel:
         environ: MutableMapping[str, str] | None = None,
         fetcher: Fetcher | None = None,
         sleep: Sleep = asyncio.sleep,
+        resolve: Resolver | None = None,
     ) -> None:
         require_numpy(EXTRA)
+        if config.transport == "websocket":
+            require_websockets()
         self.config = config
         self.environ = environ
         self.fetcher = fetcher
         self.sleep = sleep
+        self.resolve = resolve
         self.allow = [allow_host(config.url)]
 
     async def deliver(self, message: Delivery) -> DeliveryResult:
@@ -201,11 +282,163 @@ class MaskChannel:
                 return ready, why
             await self.sleep(self.config.poll_interval)
 
+    async def pin(self) -> CheckedUrl:
+        """Resolve the configured host once and check its addresses as ``afetch`` would, with only that host
+        allowed. The socket then connects to these addresses and nothing else."""
+        parts = urlsplit(self.config.url)
+        host = (parts.hostname or "").lower().rstrip(".")
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            if self.resolve is not None:
+                addresses = list(self.resolve(host, port))
+            else:
+                infos = await asyncio.get_running_loop().getaddrinfo(host, port)
+                addresses = list(dict.fromkeys(str(i[4][0]) for i in infos))
+        except (OSError, UnicodeError) as exc:
+            raise ChannelError(f"mask {self.config.name}: cannot resolve {host}") from exc
+        try:
+            return check_url(self.config.url, allow_hosts=self.allow, resolve=lambda _host, _port: addresses)
+        except UrlRefused as exc:
+            raise ChannelError(f"mask {self.config.name}: {exc}") from exc
+
+    async def connect(self, headers: dict[str, str]) -> Any:
+        """A source socket to the configured host's checked addresses, tried in turn. No redirect is followed and
+        no environment proxy used; ``Host`` (and TLS SNI) stay the configured name."""
+        websockets = require_websockets()
+
+        class Pinned(websockets.asyncio.client.connect):
+            def process_redirect(self, exc: Exception) -> Exception:
+                return exc  # a redirect is final: the socket goes nowhere but the configured host
+
+        name = self.config.name
+        checked = await self.pin()
+        uri = source_url(self.config.url, self.config.face)
+        tls = {"server_hostname": checked.host} if checked.scheme == "https" else {}
+        extra = {k: v for k, v in headers.items() if k != "User-Agent"}
+        last: Exception | None = None
+        for ip in checked.addresses:
+            try:
+                return await Pinned(
+                    uri,
+                    host=ip,
+                    port=checked.port,
+                    proxy=None,
+                    compression=None,
+                    additional_headers=extra,
+                    user_agent_header=headers.get("User-Agent"),
+                    open_timeout=WS_CONNECT_TIMEOUT_S,
+                    close_timeout=WS_CLOSE_TIMEOUT_S,
+                    ping_interval=None,
+                    max_size=WS_MAX_MESSAGE_BYTES,
+                    **tls,
+                )
+            except TimeoutError as exc:
+                raise ChannelError(
+                    f"mask {name}: the source socket took over {WS_CONNECT_TIMEOUT_S:g}s to open"
+                ) from exc
+            except OSError as exc:  # this address is down: try the next
+                last = exc
+            except websockets.InvalidStatus as exc:
+                status = exc.response.status_code
+                raise ChannelError(
+                    f"mask {name}: the source socket answered {status} (no redirect is followed)"
+                ) from exc
+            except (websockets.InvalidHandshake, websockets.InvalidURI) as exc:
+                raise ChannelError(f"mask {name}: the source socket handshake failed: {exc}") from exc
+        raise ChannelError(f"mask {name}: could not connect to {checked.host}") from last
+
+    async def stream(
+        self, pcm: Pcm, body: bytes, headers: dict[str, str], *, disclose: bool, why: str
+    ) -> DeliveryResult:
+        """Speak ``body`` (``pcm`` as s16le) over the source socket, with mask's disclosure label when ``disclose``."""
+        cfg = self.config
+        websockets = require_websockets()
+        frame = 2 * pcm.channels
+        step = WS_FRAME_BYTES - WS_FRAME_BYTES % frame
+        per_second = frame * pcm.sample_rate
+        stage = "ready"
+        ws = await self.connect(headers)
+        try:
+            async with ws:
+                # Mask refuses (a face already taken, a driver down) before it reads the hello, so sending it
+                # can fail: the refusal is still read below.
+                with contextlib.suppress(websockets.ConnectionClosed):
+                    await ws.send(hello(pcm, seed=cfg.seed, disclose=disclose))
+                ready = await asyncio.wait_for(self._reply(ws, "ready"), WS_READY_TIMEOUT_S)
+                if ready is None:
+                    log.info("channel.mask.not_ready", channel=cfg.name, face=cfg.face, why=BUSY_MARK)
+                    return DeliveryResult(ok=True, status="skipped", detail=f"not ready: face {cfg.face!r} {BUSY_MARK}")
+                stage = "push"
+                async with asyncio.timeout(min(cfg.timeout, pcm.duration + PUSH_SLACK_S)):
+                    started = time.monotonic()
+                    for at in range(0, len(body), step):
+                        chunk = body[at : at + step]
+                        await ws.send(chunk)
+                        ahead = (at + len(chunk)) / per_second - (time.monotonic() - started) - WS_LEAD_S
+                        if ahead > 0:
+                            await self.sleep(ahead)
+                    await ws.send(json.dumps({"type": "end"}))
+                    done = await self._reply(ws, "done")
+        except TimeoutError as exc:
+            took = f"no ready in {WS_READY_TIMEOUT_S:g}s" if stage == "ready" else "the push outlasted the speech"
+            raise ChannelError(f"mask {cfg.name}: the source socket timed out ({took})") from exc
+        except websockets.ConnectionClosed as exc:
+            raise ChannelError(f"mask {cfg.name}: mask closed the source socket: {exc.reason or exc.code}") from exc
+        if done is None:
+            raise ChannelError(f"mask {cfg.name}: the face was taken mid-speech")
+        if disclose:
+            log.info("channel.mask.cloned_voice_disclosed", channel=cfg.name, face=cfg.face)
+        try:
+            spoken = f"{int(done.get('duration_ms', 0)) / 1000:.1f}s"
+        except (TypeError, ValueError):
+            spoken = f"{pcm.duration:.1f}s"
+        label = ", disclosed as a cloned voice" if disclose else ""
+        return DeliveryResult(ok=True, detail=f"face {cfg.face} spoke {spoken} ({why}{label})")
+
+    async def _reply(self, ws: Any, expect: str) -> dict[str, Any] | None:
+        """The next ``expect`` message from mask. ``None`` if it says the face already has a source;
+        :class:`ChannelError` for any other refusal, or a socket closed before ``expect``."""
+        websockets = require_websockets()
+        while True:
+            try:
+                raw = await ws.recv()
+            except websockets.ConnectionClosed as exc:
+                why = exc.reason or exc.code
+                if BUSY_MARK in str(exc.reason):  # the close's reason repeats the refusal
+                    return None
+                raise ChannelError(
+                    f"mask {self.config.name}: the source socket closed before {expect!r}: {why}"
+                ) from exc
+            try:
+                message = json.loads(raw) if isinstance(raw, str) else None
+            except ValueError:
+                message = None
+            if not isinstance(message, dict):
+                continue
+            if message.get("type") == "error":
+                detail = str(message.get("detail") or "refused")[:200]
+                if BUSY_MARK in detail:
+                    return None
+                raise ChannelError(f"mask {self.config.name}: the source socket refused: {detail}")
+            if message.get("type") == expect:
+                return message
+
     async def play(self, audio: SpeechAudio, message: Delivery) -> DeliveryResult:
         cfg = self.config
-        if audio.cloned and not cfg.allow_cloned_voice:
-            log.warning("channel.mask.cloned_voice_refused", channel=cfg.name, face=cfg.face, voice=audio.voice)
-            return DeliveryResult(ok=True, status="skipped", permanent=True, detail=CLONED_REFUSAL)
+        if audio.cloned and cfg.transport == "websocket" and not cfg.cloned_voice_consented:
+            log.warning("channel.mask.cloned_voice_unattested", channel=cfg.name, face=cfg.face, voice=audio.voice)
+            return DeliveryResult(ok=True, status="skipped", permanent=True, detail=UNATTESTED_REFUSAL)
+        if audio.cloned and cfg.transport == "http":
+            if not cfg.allow_cloned_voice:
+                log.warning("channel.mask.cloned_voice_refused", channel=cfg.name, face=cfg.face, voice=audio.voice)
+                return DeliveryResult(ok=True, status="skipped", permanent=True, detail=CLONED_REFUSAL)
+            log.warning(
+                "channel.mask.cloned_voice_undisclosed",
+                channel=cfg.name,
+                face=cfg.face,
+                voice=audio.voice,
+                why="allow_cloned_voice over http: the face speaks a cloned voice with no disclosure label",
+            )
         pcm = decode(audio)
         body = to_s16le(pcm)
         if len(body) > MAX_PUSH_BYTES:
@@ -215,6 +448,8 @@ class MaskChannel:
         if not ready:
             log.info("channel.mask.not_ready", channel=cfg.name, face=cfg.face, why=why)
             return DeliveryResult(ok=True, status="skipped", detail=f"not ready: {why}")
+        if cfg.transport == "websocket":
+            return await self.stream(pcm, body, headers, disclose=audio.cloned, why=why)
         push = f"{cfg.url}/push?face={quote(cfg.face)}&seed={cfg.seed}&require_screen=true"
         headers |= {
             "Content-Type": "application/octet-stream",
@@ -238,4 +473,4 @@ class MaskChannel:
         return DeliveryResult(ok=True, detail=f"face {cfg.face} spoke {spoken} ({why})")
 
 
-__all__ = ["CLONED_REFUSAL", "MaskChannel", "MaskConfig", "face_keys", "readiness"]
+__all__ = ["CLONED_REFUSAL", "MaskChannel", "MaskConfig", "face_keys", "hello", "readiness", "source_url"]
