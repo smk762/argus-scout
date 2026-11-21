@@ -48,8 +48,11 @@ services:
     base_url: http://ollama:11434
     model: llama3.2:1b            # pulled by the ollama-pull service: change both together
     timeout: 180                  # seconds; a CPU is slow, and over this the report uses the template
-  # Voice (argus-echo) is not part of the quickstart. With an echo server, it would be:
-  # echo_url: http://<TTS_HOST>:8034
+  # Voice (argus-echo) is not part of the quickstart; voice channels also need a speaker channel. With an
+  # echo server, it would be (see `argus-scout init` for every key):
+  # echo:
+  #   url: http://<TTS_HOST>:8000
+  #   speaker: <SPEAKER>
 
 budget:
   limits:
