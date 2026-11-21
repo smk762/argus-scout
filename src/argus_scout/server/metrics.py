@@ -15,9 +15,9 @@ Families (all prefixed ``scout_``):
 - ``recommendations{status}`` (gauge): recommendations in each lifecycle status.
 - ``approvals_total{source}`` (counter): approvals in the audit trail, ``manual`` or ``standing``.
 - ``inbox_open_events{severity}`` (gauge): unacked, unexpired status events.
-- ``job_runs_total{job}``, ``job_errors_total{job}`` (counters): scheduler runs, and runs that raised.
-- ``job_last_success_timestamp_seconds{job}`` (gauge): Unix time the job last finished cleanly.
-- ``job_running{job}`` (gauge): 1 while the job is running.
+- ``job_runs_total{job_name}``, ``job_errors_total{job_name}`` (counters): scheduler runs, and runs that raised.
+- ``job_last_success_timestamp_seconds{job_name}`` (gauge): Unix time the job last finished cleanly.
+- ``job_running{job_name}`` (gauge): 1 while the job is running.
 - ``deliveries_total{channel,result}`` (counter): delivery attempts recorded in the store, ``sent`` or ``failed``.
 """
 
@@ -135,12 +135,14 @@ class ScoutCollector(Collector):
         yield deliveries
 
     def _jobs(self) -> Iterator[Metric]:
-        runs = CounterMetricFamily(f"{PREFIX}_job_runs", "Scheduler job runs.", labels=["job"])
-        errors = CounterMetricFamily(f"{PREFIX}_job_errors", "Scheduler job runs that raised.", labels=["job"])
+        runs = CounterMetricFamily(f"{PREFIX}_job_runs", "Scheduler job runs.", labels=["job_name"])
+        errors = CounterMetricFamily(f"{PREFIX}_job_errors", "Scheduler job runs that raised.", labels=["job_name"])
         success = GaugeMetricFamily(
-            f"{PREFIX}_job_last_success_timestamp_seconds", "Unix time a job last finished cleanly.", labels=["job"]
+            f"{PREFIX}_job_last_success_timestamp_seconds",
+            "Unix time a job last finished cleanly.",
+            labels=["job_name"],
         )
-        running = GaugeMetricFamily(f"{PREFIX}_job_running", "1 while a job is running.", labels=["job"])
+        running = GaugeMetricFamily(f"{PREFIX}_job_running", "1 while a job is running.", labels=["job_name"])
         # The store is the source of truth (it survives restarts); the scheduler adds jobs that never ran yet.
         rows: dict[str, tuple[int, int, float | None]] = {}
         if self.scheduler is not None:

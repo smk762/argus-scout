@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import threading
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -116,7 +116,7 @@ def test_server_and_cli_count_in_the_store(tmp_path):
 
 
 def test_usage_json_is_imported_once(tmp_path):
-    today = date.today().isoformat()
+    today = datetime.now(UTC).date().isoformat()  # the caps roll over in schedule.timezone (UTC here), not host-local
     legacy = tmp_path / USAGE_STATE_FILE
     legacy.write_text(json.dumps({"day": today, "counts": {"llm_calls": 4, "tts": 2}}))
     config = ScoutConfig.model_validate({"store": {"path": str(tmp_path / "scout.db")}})

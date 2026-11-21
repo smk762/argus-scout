@@ -256,11 +256,14 @@ Read from the store and the policy files at scrape time, so the values survive r
 | `scout_recommendations` | gauge | `status` | Recommendations in each status |
 | `scout_approvals_total` | counter | `source` | Approvals in the audit trail, `manual` or `standing` |
 | `scout_inbox_open_events` | gauge | `severity` | Open (unacked, unexpired) status events |
-| `scout_job_runs_total` | counter | `job` | Scheduler job runs |
-| `scout_job_errors_total` | counter | `job` | Runs that raised |
-| `scout_job_last_success_timestamp_seconds` | gauge | `job` | When a job last finished cleanly |
-| `scout_job_running` | gauge | `job` | 1 while a job runs |
+| `scout_job_runs_total` | counter | `job_name` | Scheduler job runs |
+| `scout_job_errors_total` | counter | `job_name` | Runs that raised |
+| `scout_job_last_success_timestamp_seconds` | gauge | `job_name` | When a job last finished cleanly |
+| `scout_job_running` | gauge | `job_name` | 1 while a job runs |
 | `scout_deliveries_total` | counter | `channel`, `result` | Delivery attempts, `sent` or `failed` |
 
+The job label is `job_name`, not `job`: Prometheus sets `job` and `instance` on every series from the scrape
+target, so a label of that name would be renamed `exported_job` on ingest. No family uses either.
+
 Jobs are named `status`, `analysis`, `redeliver`, `briefing:<kind>@<HH:MM>` and `poll:<source>`. A useful alert:
-`time() - scout_job_last_success_timestamp_seconds{job="analysis"} > 3600`.
+`time() - scout_job_last_success_timestamp_seconds{job_name="analysis"} > 3600`.
