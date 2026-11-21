@@ -182,7 +182,7 @@ def map_response(cfg: JsonPollSource, data: Any) -> Mapped:
     if len(items) > MAX_ITEMS:
         mapped.skipped.append(f"{len(items) - MAX_ITEMS} items past the first {MAX_ITEMS} were ignored")
         items = items[:MAX_ITEMS]
-    parsed: list[tuple[Any, dict[str, Any], StatusEvent]] = []
+    parsed: list[tuple[Any, bool, StatusEvent]] = []  # (raw item, id was derived, event)
     for index, item in enumerate(items):
         where = "response" if single else f"item {index}"
         try:
@@ -192,12 +192,12 @@ def map_response(cfg: JsonPollSource, data: Any) -> Mapped:
         except InvalidEvent as exc:
             mapped.skipped.append(f"{where}: {exc}")
             continue
-        parsed.append((item, envelope, event))
+        parsed.append((item, not single and event.event_id == default_id, event))
     # A derived id two items share would merge two conditions into one event (and flip between them on every
     # poll): give each of those the hash of its whole raw item instead, and say how to fix it properly.
-    derived = Counter(e.event_id for _, env, e in parsed if "event_id" not in env)
-    for item, envelope, event in parsed:
-        if "event_id" not in envelope and derived[event.event_id] > 1:
+    derived = Counter(e.event_id for _, was_derived, e in parsed if was_derived)
+    for item, was_derived, event in parsed:
+        if was_derived and derived[event.event_id] > 1:
             event.event_id = f"{cfg.name}:{_digest(item)}"
         mapped.events.append(event)
     clashes = sum(n for n in derived.values() if n > 1)
