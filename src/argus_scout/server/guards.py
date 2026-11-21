@@ -35,25 +35,26 @@ on the read API. ``/health`` and ``/metrics`` are always open (they hold no even
 **DNS rebinding.** Under an open read API, a page on ``evil.example`` that re-resolves its name to ``127.0.0.1``
 could read ``/wall`` and ``/api/*`` as same-origin. Such a request always carries the attacker's name in ``Host``,
 so :class:`HostGuard` (outermost, every request and websocket) refuses with a ``400`` any ``Host`` that isn't an IP
-literal, ``localhost`` or a ``server.trusted_hosts`` name, the test argus-cortex's ``cross_site_refuse`` applies to
-a same-host ``Origin`` (its ``_rebind_proof``). The same ``trusted_hosts`` go to ``cross_site_refuse``, so a page
+literal, ``localhost`` or a ``server.trusted_hosts`` name: the same-host rule argus-cortex's ``cross_site_refuse``
+applies to an ``Origin``, mirrored locally in :func:`host_name` / :func:`rebind_proof` (cortex keeps its own private,
+so scout doesn't import them; a parity test checks the two agree). The same ``trusted_hosts`` go to ``cross_site_refuse``, so a page
 served from a trusted name can write to its own server. Only :data:`HOST_OPEN_PATHS` answer any ``Host``: they hold
 no event or report content and are reached by service names (a Prometheus scrape of ``scout:8400``).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 from argus_cortex.auth import bearer, check_bearer
 from argus_cortex.limits import BadInput, TooLarge, read_body
 from argus_cortex.server import UNSAFE_METHODS, WriteGuard, constant_refuse, cross_site_refuse
-from argus_cortex.server import _host_name as host_name  # the suite's rebinding test, shared with cross_site_refuse
-from argus_cortex.server import _rebind_proof as rebind_proof
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ValidationError
@@ -90,6 +91,31 @@ def _mark(dep: Any, kind: str) -> Any:
     return dep
 
 
+def host_name(hostport: str) -> str | None:
+    """The host of a ``Host`` value (``h``, ``h:80``, ``[::1]:80``), lower-cased; None if it doesn't parse.
+
+    Mirrors argus-cortex's private ``server._host_name`` (``tests/test_api_hardening.py`` checks they agree)."""
+    try:
+        return urlsplit("//" + hostport).hostname
+    except ValueError:
+        return None
+
+
+def rebind_proof(host: str) -> bool:
+    """Whether ``host`` (from :func:`host_name`) can't be a DNS-rebound name: ``localhost`` or an IP literal.
+
+    A rebinding page is loaded from the attacker's own name, so its ``Host`` carries that name; an IP literal or
+    ``localhost`` is only sent by a page loaded from that address. Mirrors argus-cortex's private
+    ``server._rebind_proof``, the rule ``cross_site_refuse`` applies to a same-host ``Origin``."""
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 HOST_OPEN_PATHS = frozenset({"/health", "/metrics"})
 """Paths :class:`HostGuard` answers for any ``Host``: liveness and the scrape target, which hold no event or report
 content and are reached by service names (Prometheus scrapes ``scout:8400`` in the quickstart)."""
@@ -102,7 +128,7 @@ HOST_REFUSAL = (
 class HostGuard:
     """Pure-ASGI gate refusing (400) any request whose ``Host`` could be a DNS-rebound name.
 
-    Passes an IP literal, ``localhost`` and the ``trusted_hosts`` names (argus-cortex's ``_rebind_proof``, the test
+    Passes an IP literal, ``localhost`` and the ``trusted_hosts`` names (:func:`rebind_proof`, the rule argus-cortex's
     ``cross_site_refuse`` applies to a same-host ``Origin``), and a request with no ``Host`` at all (no browser sends
     one). Reads and writes alike: CORS keeps another origin from *reading* a reply, but a rebound page **is** the same
     origin. A refused websocket is closed before it is accepted. The refusal never echoes the Host back.
@@ -352,6 +378,8 @@ __all__ = [
     "HOST_OPEN_PATHS",
     "HOST_REFUSAL",
     "HostGuard",
+    "host_name",
+    "rebind_proof",
     "READ_ONLY_REFUSAL",
     "SAFE_METHODS",
     "RouteView",

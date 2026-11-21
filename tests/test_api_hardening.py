@@ -418,3 +418,57 @@ def test_revision_migration_reads_old_rows_as_zero_and_replays_harmlessly(tmp_pa
         s._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
     with SqliteStore(db) as s:  # migration 9 again over its own table: nothing lost
         assert s.get_recommendation(rec.id).revision == 1
+
+
+HOST_TABLE = [
+    "127.0.0.1",
+    "127.0.0.1:8400",
+    "10.0.0.5",
+    "0.0.0.0:80",
+    "localhost",
+    "localhost:8400",
+    "LOCALHOST",
+    "LocalHost:1",
+    "localhost.",
+    "localhost.localdomain",
+    "[::1]",
+    "[::1]:8400",
+    "[fe80::1%25eth0]:80",
+    "::1",
+    "[2001:db8::1]:443",
+    "evil.example",
+    "evil.example:8400",
+    "EVIL.Example.",
+    "127.0.0.1.nip.io",
+    "xn--bcher-kva.example",
+    "bücher.example",
+    "scout",
+    "0x7f.1",
+    "2130706433",
+    "",
+    ":8400",
+    "[::1",
+    "a b",
+    "host:notaport",
+    "user@127.0.0.1",
+    "127.0.0.1/x",
+]
+
+
+def test_host_rule_matches_argus_cortex():
+    """HostGuard's Host test is local (cortex's helpers are private); drift from cortex's same-host rule shows here."""
+    import argus_cortex.server as cortex
+
+    from argus_scout.server.guards import host_name, rebind_proof
+
+    theirs_name = getattr(cortex, "_host_name", None)
+    theirs_proof = getattr(cortex, "_rebind_proof", None)
+    if theirs_name is None or theirs_proof is None:
+        pytest.skip("argus_cortex.server no longer has _host_name/_rebind_proof: compare with its public helper")
+    for host in HOST_TABLE:
+        ours, theirs = host_name(host), theirs_name(host)
+        assert ours == theirs, host
+        if ours is not None:
+            assert rebind_proof(ours) == theirs_proof(ours), host
+    assert rebind_proof("127.0.0.1") and rebind_proof("::1") and rebind_proof("localhost")
+    assert not rebind_proof("evil.example") and not rebind_proof("localhost.")
