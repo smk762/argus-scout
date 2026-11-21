@@ -3,7 +3,9 @@
 - ``POST /api/events/{source}``: a push source's producer sends one envelope or a list of them (see
   :mod:`argus_scout.sources.webhook`). Auth is the source's own token, else the server token
   (:func:`~argus_scout.server.guards.source_auth`). The body is taken whole or not at all: every envelope is
-  validated before any is ingested. The reply gives each event's inbox outcome.
+  validated before any is ingested, and the batch is stored in one transaction (:meth:`Inbox.ingest_many`), so a
+  store error part-way stores none of it. The reply gives each event's inbox outcome. A body the plugin can't
+  parse is a ``400`` (its own error stays in the log), an invalid envelope a ``422``.
 - ``POST /api/events/{source}/{event_id}/ack``: ``{"by": ...}``; server token only.
 - ``GET /api/events``: open events, grouped by fingerprint.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
@@ -21,7 +24,9 @@ from argus_scout.inbox import EventGroup, IngestResult, InvalidEvent, normalise
 from argus_scout.server.deps import get_runtime
 from argus_scout.server.guards import EVENTS_MAX_BYTES, read_bounded, read_json, source_auth, write_auth
 from argus_scout.server.routes.models import AckBody
-from argus_scout.sources import BoundSource
+from argus_scout.sources import BoundSource, SourceError
+
+log = structlog.get_logger(__name__)
 
 
 def _outcome(result: IngestResult) -> dict[str, Any]:
@@ -56,21 +61,25 @@ def write_router(server: ServerConfig) -> APIRouter:
     async def push(request: Request, bound: BoundSource = Depends(source_auth(server))) -> dict[str, Any]:  # noqa: B008
         runtime = get_runtime(request)
         body = await read_bounded(request, EVENTS_MAX_BYTES, what="event body")
-        try:
-            events: list[StatusEvent] = bound.plugin.parse(bound.config, body)  # type: ignore[attr-defined]
-            now = runtime.inbox.now()
-            for index, event in enumerate(events):
-                try:
-                    normalise(event, now=now)  # all or nothing: refuse the batch before ingesting any of it
-                except InvalidEvent as exc:
-                    raise InvalidEvent(f"event {index}: {exc}") from exc
-        except InvalidEvent as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from None
 
-        def ingest() -> list[IngestResult]:
-            return [runtime.inbox.ingest(event) for event in events]
+        def parse() -> list[StatusEvent]:
+            try:
+                events: list[StatusEvent] = bound.plugin.parse(bound.config, body)  # type: ignore[attr-defined]
+                now = runtime.inbox.now()
+                for index, event in enumerate(events):
+                    try:
+                        normalise(event, now=now)  # all or nothing: refuse the batch before ingesting any of it
+                    except InvalidEvent as exc:
+                        raise InvalidEvent(f"event {index}: {exc}") from exc
+            except InvalidEvent as exc:  # the plugin's own message for the producer: what is wrong with the body
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+            except (SourceError, ValueError, TypeError) as exc:  # JSONDecodeError and UnicodeDecodeError included
+                log.warning("source.parse_failed", source=bound.name, error=f"{type(exc).__name__}: {exc}")
+                raise HTTPException(status_code=400, detail=f"source {bound.name!r} could not parse the body") from None
+            return events
 
-        results = await run_in_threadpool(ingest)
+        events = await run_in_threadpool(parse)  # plugin code, synchronous: off the event loop
+        results = await run_in_threadpool(runtime.inbox.ingest_many, events)
         return {"source": bound.name, "accepted": len(results), "events": [_outcome(r) for r in results]}
 
     @router.post("/{source}/{event_id:path}/ack", dependencies=[Depends(write_auth(server))])

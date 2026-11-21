@@ -12,8 +12,7 @@ from collections.abc import Callable
 from datetime import timedelta
 
 import pytest
-from api_helpers import AUTH, TOKEN, make_app
-from fastapi.testclient import TestClient
+from api_helpers import AUTH, TOKEN, make_app, scout_client
 from test_engine import KEY, T0, Clock, hit, ran
 
 from argus_scout.approvals import StandingApprovals
@@ -57,7 +56,7 @@ def engine(store, clock):
 
 @pytest.fixture
 def client(store, tmp_path):
-    with TestClient(make_app(store, tmp_path)) as c:
+    with scout_client(make_app(store, tmp_path)) as c:
         yield c
 
 
@@ -68,7 +67,10 @@ def proposed(engine) -> Recommendation:
 
 
 def decide(client, rec_id: str, verb: str = "approve"):
-    return client.post(f"/api/recommendations/{rec_id}/{verb}", headers=AUTH, json={"by": "sam", "reason": "mine"})
+    """What a person does: view the recommendation, then decide on the revision they saw."""
+    revision = client.get(f"/api/recommendations/{rec_id}").json()["revision"]
+    body = {"by": "sam", "reason": "mine", "revision": revision}
+    return client.post(f"/api/recommendations/{rec_id}/{verb}", headers=AUTH, json=body)
 
 
 # --- the person decides inside the engine's load-then-save window ----------------------------------------------

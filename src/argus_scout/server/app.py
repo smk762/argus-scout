@@ -4,7 +4,8 @@
 store, registers the scheduler's jobs and starts the scheduler, and stops both on shutdown. Building the
 app has no side effects; nothing is opened until the app starts.
 
-Routes: ``/health`` and ``/metrics`` (see :mod:`argus_scout.server.metrics`), always open; the API in
+Routes: ``/health`` and ``/metrics`` (see :mod:`argus_scout.server.metrics`), always open (to any ``Host`` too);
+FastAPI's ``/docs``, ``/redoc`` and ``/openapi.json`` unless ``server.read_auth`` is set; the API in
 :mod:`argus_scout.server.routes`. Every state-changing route goes behind argus-cortex's ``auth.bearer`` (or a
 push source's token) and ``WriteGuard``: see :mod:`argus_scout.server.guards`, and ``tests/test_api_guards.py``,
 which walks the routes and fails on an unguarded one.
@@ -15,6 +16,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
@@ -168,7 +170,10 @@ def create_app(
             if owns_store:
                 runtime.store.close()
 
-    app = FastAPI(title="argus-scout", version=argus_scout.__version__, lifespan=lifespan)
+    # The interactive docs and the schema are on by default, as across the suite. They are served outside the read
+    # API's bearer check, so read_auth (the API's contents are nobody else's business) turns them off.
+    docs: dict[str, Any] = {"docs_url": None, "redoc_url": None, "openapi_url": None} if config.server.read_auth else {}
+    app = FastAPI(title="argus-scout", version=argus_scout.__version__, lifespan=lifespan, **docs)
     app.add_middleware(ManualOriginMiddleware)
     install_guards(app, config.server)  # after other middleware: the guards run first
     include_routes(app, config.server)

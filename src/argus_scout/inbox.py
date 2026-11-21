@@ -242,43 +242,52 @@ class Inbox:
 
     def ingest(self, event: StatusEvent | Mapping[str, Any]) -> IngestResult:
         """Validate, normalise and upsert one event; raise :class:`InvalidEvent` if it is malformed."""
+        return self.ingest_many([event])[0]
+
+    def ingest_many(self, events: Iterable[StatusEvent | Mapping[str, Any]]) -> list[IngestResult]:
+        """Validate and normalise every event, then upsert them all in **one store transaction**: every event is
+        stored, or (on :class:`InvalidEvent` or a store error) none is, so a retried batch never finds half of
+        itself already there. Each event sees the ones before it, as if ingested in turn."""
         now = self.now()
-        if not isinstance(event, StatusEvent):
-            event = parse_envelope(event, now=now)
-        event = normalise(event, now=now)
-        with self._lock:
-            before = self.store.get_entry(event.source, event.event_id)
-            duplicates: tuple[tuple[str, str], ...] = ()
-            if before is None:
-                duplicates = tuple(
-                    (e.source, e.event_id)
-                    for e in self.store.events_by_fingerprint(event.fingerprint)
-                    if not e.expired(now)
-                )
-            self.store.upsert_event(event, now=now)
+        normalised = [
+            normalise(e if isinstance(e, StatusEvent) else parse_envelope(e, now=now), now=now) for e in events
+        ]
+        with self._lock, self.store.transaction():
+            results = [self._upsert(event, now) for event in normalised]
+        for result in results:  # logged once committed, so a rolled-back batch logs nothing as ingested
+            log.info(
+                "inbox.ingest",
+                outcome=result.outcome.value,
+                source=result.event.source,
+                event_id=result.event.event_id,
+                severity=result.event.severity.value,
+                reopened=result.reopened,
+            )
+        return results
+
+    def _upsert(self, event: StatusEvent, now: datetime) -> IngestResult:
+        before = self.store.get_entry(event.source, event.event_id)
+        duplicates: tuple[tuple[str, str], ...] = ()
         if before is None:
-            result = IngestResult(Outcome.DUPLICATE if duplicates else Outcome.NEW, event, duplicate_of=duplicates)
+            duplicates = tuple(
+                (e.source, e.event_id)
+                for e in self.store.events_by_fingerprint(event.fingerprint)
+                if not e.expired(now)
+            )
+        self.store.upsert_event(event, now=now)
+        if before is None:
+            return IngestResult(Outcome.DUPLICATE if duplicates else Outcome.NEW, event, duplicate_of=duplicates)
+        previous = before.event.severity
+        if before.resolved_at is not None:
+            outcome = Outcome.RECURRED
+        elif before.fingerprint == event.fingerprint:
+            outcome = Outcome.REFRESHED
+        elif rank(event.severity) > rank(previous):
+            outcome = Outcome.ESCALATED
         else:
-            previous = before.event.severity
-            if before.resolved_at is not None:
-                outcome = Outcome.RECURRED
-            elif before.fingerprint == event.fingerprint:
-                outcome = Outcome.REFRESHED
-            elif rank(event.severity) > rank(previous):
-                outcome = Outcome.ESCALATED
-            else:
-                outcome = Outcome.UPDATED
-            reopened = outcome is not Outcome.REFRESHED and before.event.acked
-            result = IngestResult(outcome, event, previous_severity=previous, reopened=reopened)
-        log.info(
-            "inbox.ingest",
-            outcome=result.outcome.value,
-            source=event.source,
-            event_id=event.event_id,
-            severity=event.severity.value,
-            reopened=result.reopened,
-        )
-        return result
+            outcome = Outcome.UPDATED
+        reopened = outcome is not Outcome.REFRESHED and before.event.acked
+        return IngestResult(outcome, event, previous_severity=previous, reopened=reopened)
 
     def ack(self, source: str, event_id: str, by: str) -> bool:
         """Acknowledge an open event; False if it is unknown or already acked."""

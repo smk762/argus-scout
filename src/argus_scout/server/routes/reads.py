@@ -123,7 +123,8 @@ def render_wall(request: Request) -> str:
     ]
     lines += ["-" * WALL_WIDTH]
     lines += [
-        _clip(f"  {r.severity.value.upper():<8} {clean(r.title) or '(untitled)'}  [{r.id}]", WALL_WIDTH)
+        # The id and revision first, so clipping a long title never hides what an approve or reject has to name.
+        _clip(f"  {r.severity.value.upper():<8} [{r.id} rev {r.revision}] {clean(r.title) or '(untitled)'}", WALL_WIDTH)
         for r in proposed[:WALL_RECOMMENDATIONS]
     ] or ["  Nothing to decide."]
     return "\n".join(lines) + "\n"

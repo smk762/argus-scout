@@ -86,13 +86,14 @@ on (`server.read_only: false`); see [api.md](api.md#auth-model) for the whole mo
 | Status | Why |
 |---|---|
 | 200 | Accepted; the body lists each event's outcome. |
-| 401 | Missing or wrong token. |
-| 403 | `server.read_only` is on, or a browser sent it from an origin not in `server.allowed_origins`. |
-| 404 | No source by that name. |
-| 405 | The source is a poller; it takes no pushes. |
+| 400 | The `Host` isn't an IP, `localhost` or a `server.trusted_hosts` name, or a plugin source couldn't parse the body. |
+| 401 | Missing or wrong token. Also the answer for an unknown or polled source unless the caller holds the server token, so source names can't be probed. |
+| 403 | `server.read_only` is on, or a browser sent it from another origin not in `server.allowed_origins`. |
+| 404 | No source by that name (with the server token). |
+| 405 | The source is a poller; it takes no pushes (with the server token). |
 | 413 | Body over 256 KiB. |
 | 422 | Not JSON, more than 100 events, or an envelope is invalid. |
-| 503 | No token is configured for this source. |
+| 503 | No token is configured for this source (or, for a name that isn't a push source, no server token). |
 
 ## `json_poll`
 

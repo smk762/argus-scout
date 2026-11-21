@@ -11,15 +11,16 @@ import re
 from pathlib import Path
 
 import pytest
-from api_helpers import AUTH, OWN_TOKEN, TOKEN, make_app
+from api_helpers import AUTH, OWN_TOKEN, TOKEN, make_app, scout_client
 from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
 from starlette.routing import Mount
 
 import argus_scout.server
 from argus_scout.server.guards import (
     ACTION_MAX_BYTES,
     EVENTS_MAX_BYTES,
+    HOST_OPEN_PATHS,
+    HOST_REFUSAL,
     READ_ONLY_REFUSAL,
     SAFE_METHODS,
     install_guards,
@@ -86,7 +87,10 @@ def app_config_server(tmp_path):
 
 def test_walker_flags_missing_guards_and_unseeable_routes(tmp_path):
     bare = FastAPI()
-    assert unguarded_routes(bare) == ["app: no WriteGuard(cross_site_refuse) installed"]
+    assert unguarded_routes(bare) == [
+        "app: no HostGuard installed (a rebinding Host could read the API)",
+        "app: no WriteGuard(cross_site_refuse) installed",
+    ]
 
     server = app_config_server(tmp_path)
     install_guards(bare, server)  # read_only is off in this config
@@ -113,21 +117,21 @@ def test_walker_flags_missing_guards_and_unseeable_routes(tmp_path):
 
 def test_no_token_configured_refuses_every_write(store, tmp_path, monkeypatch):
     monkeypatch.delenv("SCOUT_API_TOKEN")
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         for method, path in write_routes(client.app):
             response = client.request(method, path, headers=AUTH, json={"by": "me"})
             assert response.status_code == 503, f"{method} {path} is open with no token configured"
 
 
 def test_token_env_null_closes_every_write(store, tmp_path):
-    with TestClient(make_app(store, tmp_path, token_env=None)) as client:
+    with scout_client(make_app(store, tmp_path, token_env=None)) as client:
         for method, path in write_routes(client.app):
             assert client.request(method, path, headers=AUTH, json={"by": "me"}).status_code == 503, path
 
 
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}, {"Authorization": f"Basic {TOKEN}"}])
 def test_missing_or_wrong_token_is_401(store, tmp_path, headers):
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         for method, path in write_routes(client.app):
             response = client.request(method, path, headers=headers, json={"by": "me"})
             assert response.status_code == 401, f"{method} {path}"
@@ -135,7 +139,7 @@ def test_missing_or_wrong_token_is_401(store, tmp_path, headers):
 
 
 def test_read_only_refuses_every_write_even_with_the_token(store, tmp_path):
-    with TestClient(make_app(store, tmp_path, read_only=True)) as client:
+    with scout_client(make_app(store, tmp_path, read_only=True)) as client:
         for method, path in write_routes(client.app):
             response = client.request(method, path, headers=AUTH, content=b"not json")
             assert response.status_code == 403, f"{method} {path}"
@@ -149,13 +153,13 @@ def test_read_only_is_the_default(store, tmp_path):
 
     app = create_app(parse_config({}, tmp_path), store=store, run_scheduler=False)
     assert unguarded_routes(app, read_only=True) == []
-    with TestClient(app) as client:
+    with scout_client(app) as client:
         assert client.post("/api/recommendations/r1/approve", headers=AUTH, json={"by": "me"}).status_code == 403
 
 
 def test_untrusted_origin_is_refused(store, tmp_path):
     trusted = "https://ui.example"
-    with TestClient(make_app(store, tmp_path, allowed_origins=[trusted])) as client:
+    with scout_client(make_app(store, tmp_path, allowed_origins=[trusted])) as client:
         for method, path in write_routes(client.app):
             response = client.request(method, path, headers={**AUTH, "Origin": "https://evil.example"}, json={})
             assert response.status_code == 403, f"{method} {path}"
@@ -166,16 +170,30 @@ def test_untrusted_origin_is_refused(store, tmp_path):
 
 
 def test_same_host_dns_name_origin_is_refused(store, tmp_path):
-    """A DNS-rebound page sends its own name as Origin and Host: only IP literals and localhost pass."""
-    with TestClient(make_app(store, tmp_path), base_url="http://scout.example:8400") as client:
-        response = client.post(
-            "/api/recommendations/r1/approve", headers={**AUTH, "Origin": "http://scout.example:8400"}, json={}
-        )
-        assert response.status_code == 403
+    """A DNS-rebound page sends its own name as Origin and Host: only IP literals, localhost and trusted_hosts pass.
+    The HostGuard refuses it (400) before the origin guard; with the name trusted, another origin is still a 403."""
+    rebound = {**AUTH, "Origin": "http://scout.example:8400"}
+    with scout_client(make_app(store, tmp_path), base_url="http://scout.example:8400") as client:
+        response = client.post("/api/recommendations/r1/approve", headers=rebound, json={})
+        assert response.status_code == 400
+    app = make_app(store, tmp_path, trusted_hosts=["scout.example"])
+    with scout_client(app, base_url="http://scout.example:8400") as client:
+        other = {**AUTH, "Origin": "http://evil.example:8400"}
+        assert client.post("/api/recommendations/r1/approve", headers=other, json={}).status_code == 403
+        assert client.post("/api/recommendations/r1/approve", headers=rebound, json={}).status_code == 422
+
+
+def test_walker_flags_a_host_guard_that_is_not_outermost(store, tmp_path):
+    from argus_scout.budget import ManualOriginMiddleware
+
+    app = make_app(store, tmp_path)
+    assert unguarded_routes(app) == []
+    app.add_middleware(ManualOriginMiddleware)  # now outside the HostGuard
+    assert unguarded_routes(app) == ["app: HostGuard is not the outermost middleware"]
 
 
 def test_oversized_bodies_are_413(store, tmp_path):
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         for method, path in write_routes(client.app):
             cap = EVENTS_MAX_BYTES if path == "/api/events/hook" else ACTION_MAX_BYTES
             response = client.request(method, path, headers=AUTH, content=b" " * (cap + 1))
@@ -189,20 +207,41 @@ def test_oversized_chunked_body_is_413(store, tmp_path):
         for _ in range(ACTION_MAX_BYTES // 1024 + 2):
             yield b" " * 1024
 
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         response = client.post("/api/recommendations/r1/approve", headers=AUTH, content=chunks())
         assert response.status_code == 413
 
 
 def test_bad_content_length_is_400(store, tmp_path):
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         headers = {**AUTH, "Content-Length": "abc"}
         assert client.post("/api/recommendations/r1/approve", headers=headers).status_code == 400
 
 
+@pytest.mark.parametrize("read_only", [True, False])
+def test_the_host_guard_covers_every_route(store, tmp_path, read_only):
+    """Every route the walk finds, every method, read or write: a DNS-rebinding Host is a 400 before anything else
+    (read-only, the origin guard, auth). Only HOST_OPEN_PATHS answer it."""
+    app = make_app(store, tmp_path, read_only=read_only)
+    requests = [
+        (method, re.sub(r"\{(\w+)(:\w+)?\}", lambda m: PARAMS[m.group(1)], view.path))
+        for view in iter_routes(app)
+        for method in sorted(view.methods - {"HEAD"})
+    ]
+    assert len(requests) > 10
+    with scout_client(app, base_url="http://rebound.example:8400") as client:
+        for method, path in requests:
+            response = client.request(method, path, headers={**AUTH, "Origin": "http://rebound.example:8400"})
+            if path in HOST_OPEN_PATHS:
+                assert response.status_code == 200, path
+            else:
+                assert response.status_code == 400, f"{method} {path}"
+                assert response.json()["detail"] == HOST_REFUSAL
+
+
 def test_auth_runs_before_the_body_is_read(store, tmp_path):
     """An unauthenticated caller gets 401 even for an oversized body: scout never buffers it."""
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         for method, path in write_routes(client.app):
             assert client.request(method, path, content=b" " * (EVENTS_MAX_BYTES + 1)).status_code == 401, path
 
@@ -213,13 +252,13 @@ READS = ["/api/events", "/api/recommendations", "/api/reports/latest", "/api/pol
 
 
 def test_reads_are_open_by_default(store, tmp_path):
-    with TestClient(make_app(store, tmp_path)) as client:
+    with scout_client(make_app(store, tmp_path)) as client:
         for path in READS:
             assert client.get(path).status_code in (200, 404), path
 
 
 def test_read_auth_closes_the_read_api(store, tmp_path, monkeypatch):
-    with TestClient(make_app(store, tmp_path, read_auth=True)) as client:
+    with scout_client(make_app(store, tmp_path, read_auth=True)) as client:
         for path in READS:
             assert client.get(path).status_code == 401, path
             assert client.get(path, headers=AUTH).status_code in (200, 404), path
