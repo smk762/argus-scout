@@ -1,0 +1,16 @@
+# Run Ollama on an NVIDIA GPU. Needs the NVIDIA Container Toolkit on the host.
+#
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
+#
+# With a GPU, a bigger model is worth it: change the model in compose.yaml (ollama-pull) and in
+# config/scout.yaml (services.llm.model) together.
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

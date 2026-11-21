@@ -1,0 +1,64 @@
+# argus-scout config for the quickstart (deploy/quickstart/compose.yaml). Mounted at /config in the
+# container; relative paths resolve against this directory, so scout.db and scout-reports.log land here.
+#
+# The full commented reference is what `argus-scout init` writes. Check this file with:
+#   docker compose exec scout argus-scout check config /config/scout.yaml
+
+# The policy files are copies of the repo's examples/ (a test keeps them identical). Edit them here: they
+# reload while scout runs, and a bad edit falls back to defaults.
+files:
+  heartbeat: heartbeat.yaml       # what is worth interrupting for
+  approvals: approvals.yaml       # standing approvals (approve only, never deploy); none by default
+  tariff: tariff.yaml             # time-of-use energy tariff
+  signals: signals.yaml           # PromQL rules that raise recommendations
+  # persona: persona.yaml         # how the narrative sounds; the neutral default without one
+
+store:
+  path: scout.db
+
+sources:
+  # Producers POST status events to scout. Writes are off (server.read_only) until you set a token;
+  # README.md here shows how to turn them on and push an event.
+  # - kind: webhook
+  #   name: ci
+
+channels:
+  # Every report and status update is appended here: tail -f config/scout-reports.log
+  - kind: text
+    name: log
+    dir: .
+    file: scout-reports.log
+    rotate_bytes: 1048576
+    keep: 3
+
+schedule:
+  analysis_interval: 60           # seconds: run the signal rules every minute (the default is 15 minutes)
+  status_interval: 60             # seconds: check for new status events every minute (default 5 minutes)
+  timezone: UTC                   # IANA name, e.g. Europe/London; briefing times are in this zone
+  briefings:                      # the first-brief service writes one at startup as well
+    - kind: morning
+      at: "07:30"
+    - kind: evening
+      at: "19:00"
+
+services:
+  prometheus_url: http://prometheus:9090
+  llm:
+    backend: ollama
+    base_url: http://ollama:11434
+    model: llama3.2:1b            # pulled by the ollama-pull service: change both together
+    timeout: 180                  # seconds; a CPU is slow, and over this the report uses the template
+  # Voice (argus-echo) is not part of the quickstart. With an echo server, it would be:
+  # echo_url: http://<TTS_HOST>:8034
+
+budget:
+  limits:
+    llm_calls: 48                 # model calls a day; over it, reports come from the template
+
+server:
+  host: 0.0.0.0                   # in the container; compose publishes the port on loopback only
+  port: 8400
+  read_only: true                 # refuse every write; set a token in .env before turning this off
+  token_env: SCOUT_API_TOKEN      # bearer token for writes (unset: writes are closed)
+  read_auth: false                # true: /api/* reads and /wall need the token too. Turn it on before
+                                  # publishing the port anywhere but loopback

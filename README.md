@@ -10,6 +10,20 @@ Part of the [Argus suite](https://github.com/smk762/argus-cortex/blob/dev/SUITE.
 > **Status: pre-alpha.** The policy core, signals, the HTTP API, the narrative (briefings) and text and webhook
 > delivery are here. Voice channels are being built in phases; see the development epic in this repo's issues.
 
+## Quickstart
+
+Scout, Prometheus, a node exporter and Ollama with a small model, with text delivery working out of the box:
+
+```bash
+git clone https://github.com/smk762/argus-scout && cd argus-scout/deploy/quickstart
+docker compose up -d --build                                  # or: podman compose up -d --build
+docker compose exec scout tail -f /config/scout-reports.log   # the first briefing, a minute or so in
+curl -s localhost:8400/wall                                   # the latest report and open items
+docker compose down -v                                        # stop and delete the volumes
+```
+
+GPU, model choice, turning on writes, adding an event source and cleanup: [deploy/quickstart/README.md](deploy/quickstart/README.md).
+
 ## What's here
 
 | Module | What it does |

@@ -1,0 +1,44 @@
+# Example time-of-use tariff. Rates are per `unit`, in the currency's minor
+# unit (cents, pence). Periods use local wall-clock time; start is inclusive,
+# end exclusive, and a period may cross midnight. Check a file with:
+#   argus-scout check tariff examples/tariff.yaml
+plan: time_of_use
+currency: USD
+unit: kWh
+daily_charge: 110.0
+
+periods:
+  solar_soak:
+    start: "10:00"
+    end: "15:00"
+    rate: 9.0
+  peak:
+    start: "15:00"
+    end: "21:00"
+    rate: 48.0
+  off_peak:
+    start: "21:00"
+    end: "10:00"
+    rate: 22.0
+
+# Plans to compare the active one against. A `kind: tariff_plan` signal rule
+# prices your real usage under each of them (see examples/signals.yaml). A
+# plan with tiers is priced on the rule window's total usage; otherwise each
+# hour is priced at its period's rate. A plan whose periods leave gaps is left
+# out of the comparison.
+comparison_plans:
+  flat_rate:
+    daily_charge: 100.0
+    periods:
+      all_day:
+        start: "00:00"
+        end: "00:00"   # start == end means all day
+        rate: 30.0
+  block_rate:
+    daily_charge: 180.0
+    tiers:             # ascending; only the last tier may omit up_to_units
+      - up_to_units: 20
+        rate: 32.0
+      - up_to_units: 1500
+        rate: 30.0
+      - rate: 34.0

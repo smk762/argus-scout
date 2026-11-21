@@ -80,6 +80,7 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | Voice outside the heartbeat policy (quiet or rest hours), or the voice gate holding back text | `tests/test_channels.py` (`test_the_voice_gate_suppresses_voice_but_not_text`, `test_heartbeat_gates`); the dispatcher calls `heartbeat.broadcast_gate` / `voice_gate`, never a copy |
 | A channel POSTing anywhere but its configured URL, following a redirect, or sending without its configured credentials | `tests/test_prometheus.py` (`test_no_module_contacts_hosts_directly`); `tests/test_channels.py` (`test_webhook_payload_and_signature`, `test_webhook_refuses_to_send_without_its_secrets_or_to_another_host`) |
 | A broken channel plugin or bad `channels:` entry stopping the other channels | `tests/test_channels.py` (`test_bad_channel_entries_do_not_stop_the_others`, `test_check_config_reports_a_bad_channel`) |
+| The quickstart's config failing `check config`, its policy files drifting from `examples/`, an unpinned image, or a compose file that doesn't parse | `tests/test_quickstart.py`; CI `Quickstart` workflow (`docker compose config`) |
 | A deployment's hostnames, IPs or persona in this repo | CI `docs` job (private IPs/paths/emails in published docs); examples use placeholders |
 
 ## Layout
@@ -118,6 +119,7 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `server/metrics.py` — `ScoutCollector`, a custom collector on its own `CollectorRegistry` (never the global one) that reads the store, usage caps, tariff file and scheduler at scrape time, so values survive restarts. Families: `scout_usage_used` / `scout_usage_limit{kind}`, `scout_tariff_loaded`, `scout_tariff_period{plan,period}`, `scout_tariff_rate{plan,period,currency,unit}`, `scout_tariff_next_change_seconds{next_period}`, `scout_recommendations{status}`, `scout_approvals_total{source}`, `scout_inbox_open_events{severity}`, `scout_job_runs_total` / `scout_job_errors_total` / `scout_job_last_success_timestamp_seconds` / `scout_job_running{job}`, `scout_deliveries_total{channel,result}`.
 - `examples/` (repo root) — commented config for each policy file scout reads; tests load them, so they must stay valid.
 - `src/argus_scout/examples/` — packaged templates `argus-scout init` writes (`scout.yaml`, `env.example` → `.env.example`); tests validate them.
+- `deploy/quickstart/` — compose (scout, Prometheus, node exporter, Ollama), its `prometheus.yml` and `config/`. The policy files in `config/` are copies of `examples/`: change both (`tests/test_quickstart.py` fails on drift). `.github/workflows/quickstart.yml` is this repo's own (not copier-managed).
 
 ## Commands
 

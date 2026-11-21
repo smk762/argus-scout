@@ -1,0 +1,127 @@
+# argus-scout quickstart: scout, Prometheus with a node exporter, and Ollama with a small model.
+# Text delivery works out of the box: reports land in config/scout-reports.log and at /wall.
+#
+#   cd deploy/quickstart
+#   docker compose up -d --build                      # podman compose works too
+#   docker compose logs -f first-brief                # the first briefing, a minute or so after startup
+#   tail -f config/scout-reports.log                  # or: curl -s localhost:8400/wall
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d   # Ollama on an NVIDIA GPU
+#   docker compose down -v                            # stop and delete the volumes (models, metrics)
+#
+# Ports are published on loopback only. Override with SCOUT_PUBLISH / PROMETHEUS_PUBLISH, e.g.
+# SCOUT_PUBLISH=127.0.0.1:18400 when 8400 is taken. Scout is advisory: it reads Prometheus and
+# writes reports, and never acts on the hosts it reports on. See README.md here for the details.
+
+name: argus-scout-quickstart
+
+services:
+  scout:
+    # Built from this checkout. To run a published release instead:
+    #   SCOUT_IMAGE=ghcr.io/smk762/argus-scout:<VERSION> docker compose pull scout
+    #   SCOUT_IMAGE=ghcr.io/smk762/argus-scout:<VERSION> docker compose up -d --no-build
+    image: ${SCOUT_IMAGE:-argus-scout:quickstart}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Root by default, which suits rootless podman (root in the container is you). With rootful Docker the files
+    # scout writes in config/ are then root's: set SCOUT_USER=$(id -u):$(id -g) before the first `up` to own them.
+    user: ${SCOUT_USER:-0:0}
+    ports:
+      - "${SCOUT_PUBLISH:-127.0.0.1:8400}:8400"
+    volumes:
+      # scout.yaml, its .env, the policy files, and what scout writes: scout.db and scout-reports.log.
+      # :z relabels the directory for SELinux hosts; it is ignored elsewhere.
+      - ./config:/config:z
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8400/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      # Started, not healthy and not pulled: until the model is there, reports come from the template.
+      ollama:
+        condition: service_started
+
+  # One-shot: write a morning briefing as soon as scout is up and deliver it to the channels, so there is a
+  # report to read without waiting for the scheduled times. It uses the plain CLI, the same as you would:
+  #   docker compose exec scout argus-scout brief --config /config/scout.yaml --kind morning
+  #   docker compose exec scout argus-scout deliver --config /config/scout.yaml --latest
+  # Each `up` writes a fresh one. Remove this service if you don't want that.
+  first-brief:
+    image: ${SCOUT_IMAGE:-argus-scout:quickstart}
+    restart: "no"
+    user: ${SCOUT_USER:-0:0}
+    volumes:
+      - ./config:/config:z
+    command:
+      - sh
+      - -c
+      - >-
+        argus-scout brief --config /config/scout.yaml --kind morning &&
+        argus-scout deliver --config /config/scout.yaml --latest --kind morning
+    depends_on:
+      scout:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "${PROMETHEUS_PUBLISH:-127.0.0.1:9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Real data for the example signal rules. In a container it sees the host's CPU, load and memory, but its
+  # own filesystem. For the host's disks too (Linux only), uncomment the lines below; the SELinux line is
+  # needed on Fedora/RHEL hosts.
+  node-exporter:
+    image: prom/node-exporter:v1.13.1
+    restart: unless-stopped
+    # command: ["--path.rootfs=/host"]
+    # pid: host
+    # volumes:
+    #   - /:/host:ro,rslave
+    # security_opt:
+    #   - label=disable
+
+  ollama:
+    image: ollama/ollama:0.40.16
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # One-shot: pull the model scout.yaml names (services.llm.model). Change both together. A 1B model runs
+  # on a CPU; a bigger one writes better briefings but wants a GPU (compose.gpu.yaml).
+  ollama-pull:
+    image: ollama/ollama:0.40.16
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: ["pull", "llama3.2:1b"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+volumes:
+  prometheus-data:
+  ollama-models:

@@ -1,0 +1,49 @@
+# Heartbeat policy: what is worth interrupting for.
+#
+# Every key is optional; a missing key keeps the built-in default (shown in the
+# comments). Edits apply on the next status tick, no restart needed. Check with:
+#   argus-scout check heartbeat examples/heartbeat.yaml
+#
+# Severities, lowest to highest: info, notice, warning, critical
+
+# What goes into a scheduled status update. Items that need an ack
+# (requires_ack) or are quiet_exempt are always included.
+report:
+  # min_severity: notice
+  # max_items: 4
+
+# Which items are spoken. Everything else in the update is text only.
+voice:
+  # min_severity: warning
+  # on_change_only: true          # repeats stay text-only
+  # backoff_max_seconds: 21600    # after a failed voice delivery
+
+# Overnight rest: no scheduled status updates at all. Empty disables it.
+rest_hours:
+  # start: "00:30"
+  # end: "06:00"
+
+# Quiet hours: only items at or above min_severity get through. Critical and
+# quiet_exempt items are always exempt. Empty start or end disables quiet hours.
+quiet_hours:
+  # start: "23:00"
+  # end: "07:00"
+  # min_severity: critical
+
+# Re-announce an unchanged, still-unacked item once this many seconds have
+# passed since it was last reported. Without an entry, unchanged items are
+# never repeated.
+reannounce:
+  # critical: 3600
+
+# Per-source routing, keyed by the event `source`. Use "*" for a default.
+#   channel: voice     may be spoken (subject to the voice rules), the default
+#   channel: text      included in status updates, never spoken
+#   channel: briefing  never interrupts; shows only in scheduled briefings
+#   min_severity:      overrides report.min_severity for this source
+sources:
+  # ci:
+  #   channel: briefing
+  # energy:
+  #   channel: text
+  #   min_severity: warning
