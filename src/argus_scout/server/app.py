@@ -77,7 +77,9 @@ def build_runtime(
     scheduler = Scheduler(store, clock=clock, **({"sleep": sleep} if sleep else {}))
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
-    register_jobs(scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus)
+    register_jobs(
+        scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus, tariff=tariff
+    )
     collector = ScoutCollector(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
     )

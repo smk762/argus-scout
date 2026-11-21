@@ -254,3 +254,75 @@ rules:
       rationale: The UPS has been above {threshold:.0f}% load for {for}.
       impact: low
       confidence: medium
+
+  # --- energy (tariff-aware) -------------------------------------------------
+  # These two kinds read the tariff file (files.tariff) as well as Prometheus.
+  # Without a tariff, or with one whose periods leave gaps, they are skipped
+  # (reported as unknown, never as clear); the other rules still run. Amounts
+  # are in the tariff currency's minor unit (cents, pence); {saving},
+  # {plan_cost} and {current_cost} render in major units (1.25).
+  #
+  # kind: tariff_shift fields (plus name, query, for, severity, labels_key,
+  # labels, rejection_ttl, expires_after, recommendation as above):
+  #   unit           W | kW: power, assumed to keep running for `duration`;
+  #                  kWh: the energy the load still has to use (default W)
+  #   min_shiftable  in `unit`; smaller samples aren't worth moving
+  #   duration       power units only: how long the load would run (default 1h)
+  #   periods        the expensive tariff periods this rule watches
+  #   horizon        a cheaper period must start within this, up to 24h (default 12h)
+  #   min_saving     optional, minor units: smaller savings aren't raised
+  # Saving = energy (kWh) x (current rate - cheapest rate starting within horizon).
+  # Extra placeholders: {period} {rate} {cheaper_period} {cheaper_rate}
+  # {starts_at} {starts_in} {energy} {saving} {currency} {unit}.
+  # Rename the metric to whatever your power meters export.
+  - name: shift-heavy-loads
+    kind: tariff_shift
+    query: sum by (load) (load_power_watts{shiftable="true"})
+    unit: W
+    min_shiftable: 300
+    duration: 2h
+    periods: [peak]
+    horizon: 8h
+    min_saving: 20
+    for: 15m
+    severity: notice
+    labels_key: [load]
+    recommendation:
+      title: "Run {load} after {starts_at} ({cheaper_period}) instead of now"
+      action: Pause or reschedule {load} until {cheaper_period} starts in {starts_in}.
+      rationale: >-
+        {load} is drawing {value:.0f} W in {period}. {energy} kWh at {rate} rather
+        than {cheaper_rate} per kWh saves about {saving} {currency}.
+      impact: low
+      confidence: medium
+
+  # kind: tariff_plan prices real usage under the active plan and every
+  # comparison plan in the tariff file, and recommends the cheapest one.
+  #   query        energy per step (unit kWh), or average power per step (W | kW),
+  #                run as a range query; all series are summed
+  #   unit         kWh (default) | W | kW
+  #   window       usage to price, 1d-400d (default 30d). Tier caps apply to its
+  #                total, so match it to your billing period
+  #   step         range-query step (default 1h)
+  #   every        how often it runs: at least (and by default) 1d
+  #   min_saving   minor units over the window (default 0)
+  #   min_coverage share of the window that must have data (default 0.9)
+  # One recommendation per suggested plan, refreshed by each daily run.
+  # Extra placeholders: {plan} {current_plan} {plan_cost} {current_cost}
+  # {saving} {usage} {window} {days} {currency}.
+  - name: cheaper-plan
+    kind: tariff_plan
+    query: sum(increase(home_energy_kwh_total[1h]))
+    unit: kWh
+    window: 30d
+    step: 1h
+    min_saving: 500
+    severity: info
+    recommendation:
+      title: "{plan} would have cost {saving} {currency} less than {current_plan} over {window}"
+      action: Check {plan}'s current terms with your provider before deciding whether to switch.
+      rationale: >-
+        {usage} kWh over the last {days} days: {current_cost} {currency} on
+        {current_plan}, {plan_cost} {currency} on {plan}.
+      impact: low
+      confidence: medium

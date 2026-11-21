@@ -45,6 +45,10 @@ Reserved placeholders: ``value``, ``threshold``, ``op``, ``rule``, ``severity``,
 re-read when it changes (:class:`SignalRulesFile`), and a file that won't parse at all gives no rules
 plus an error, never a crash. ``argus-scout check signals FILE`` validates it.
 
+**Rule kinds.** ``kind:`` picks a rule's schema; without it a rule is ``threshold`` (the shape above).
+``tariff_shift`` and ``tariff_plan`` are the tariff-aware kinds (:mod:`argus_scout.tariff_rules`).
+:func:`evaluate` runs the threshold rules and leaves the rest to their own evaluators.
+
 **Other evaluators.** The engine only sees :class:`SignalHit` and :class:`Evaluation`, so anything
 that can produce them (tariff-aware rules, for one) plugs into the same dedup, expiry, approval and
 rejection memory: build hits with :func:`make_hit` and combine evaluations with :meth:`Evaluation.merge`.
@@ -60,7 +64,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import structlog
 import yaml
@@ -69,6 +73,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from argus_scout.prometheus import PrometheusClient, PrometheusError, Sample
 from argus_scout.recommendations import Confidence
 from argus_scout.severity import Severity, rank
+
+if TYPE_CHECKING:
+    from argus_scout.tariff_rules import TariffPlanRule, TariffShiftRule
 
 log = structlog.get_logger()
 
@@ -211,19 +218,15 @@ class Escalation(_Strict):
     severity: Severity
 
 
-class SignalRule(_Strict):
-    """One rule. See the module docstring for the YAML shape."""
+class RuleBase(_Strict):
+    """What every rule kind shares: a name, a PromQL query, a severity and a recommendation to render.
+
+    Subclasses set ``kind`` (a literal; the YAML key that picks the class) and :attr:`placeholders`.
+    """
 
     name: str
     query: str
-    op: Op = ">"
-    threshold: float
-    for_: timedelta = Field(default=timedelta(0), alias="for")
     severity: Severity = Severity.WARNING
-    escalate: list[Escalation] = Field(default_factory=list)
-    labels_key: list[str] = Field(default_factory=lambda: ["instance"])
-    labels: list[str] = Field(default_factory=list)
-    """Extra labels the templates may quote (beyond ``labels_key``); they don't affect identity."""
     rejection_ttl: timedelta | None = None
     expires_after: timedelta | None = None
     recommendation: RecommendationTemplate
@@ -242,6 +245,52 @@ class SignalRule(_Strict):
             raise ValueError("must not be empty")
         return value.strip()
 
+    @field_validator("rejection_ttl", "expires_after", mode="before")
+    @classmethod
+    def _optional_duration(cls, value: Any) -> Any:
+        return None if value is None else parse_duration(value)
+
+    @model_validator(mode="after")
+    def _templates(self) -> RuleBase:
+        allowed = self.placeholders
+        for part in ("title", "action", "rationale", "impact"):
+            try:
+                template_fields(getattr(self.recommendation, part), allowed)
+            except ValueError as exc:
+                raise ValueError(f"recommendation.{part}: {exc}") from exc
+        return self
+
+    @property
+    def placeholders(self) -> frozenset[str]:
+        return RESERVED
+
+    @property
+    def summary(self) -> str:
+        """One line for ``check signals``."""
+        return f"{self.kind} -> {self.severity}"  # type: ignore[attr-defined]
+
+
+def check_label_names(value: list[str]) -> list[str]:
+    for name in value:
+        if not _NAME.match(name):
+            raise ValueError(f"{name!r} is not a Prometheus label name")
+    if len(set(value)) != len(value):
+        raise ValueError("repeats a label")
+    return value
+
+
+class SignalRule(RuleBase):
+    """One threshold rule (``kind: threshold``, the default). See the module docstring for the YAML shape."""
+
+    kind: Literal["threshold"] = "threshold"
+    op: Op = ">"
+    threshold: float
+    for_: timedelta = Field(default=timedelta(0), alias="for")
+    escalate: list[Escalation] = Field(default_factory=list)
+    labels_key: list[str] = Field(default_factory=lambda: ["instance"])
+    labels: list[str] = Field(default_factory=list)
+    """Extra labels the templates may quote (beyond ``labels_key``); they don't affect identity."""
+
     @field_validator("threshold")
     @classmethod
     def _finite(cls, value: float) -> float:
@@ -249,20 +298,15 @@ class SignalRule(_Strict):
             raise ValueError("must be a finite number")
         return value
 
-    @field_validator("for_", "rejection_ttl", "expires_after", mode="before")
+    @field_validator("for_", mode="before")
     @classmethod
     def _duration(cls, value: Any) -> Any:
-        return None if value is None else parse_duration(value)
+        return parse_duration(value)
 
     @field_validator("labels_key", "labels")
     @classmethod
     def _label_names(cls, value: list[str]) -> list[str]:
-        for name in value:
-            if not _NAME.match(name):
-                raise ValueError(f"{name!r} is not a Prometheus label name")
-        if len(set(value)) != len(value):
-            raise ValueError("repeats a label")
-        return value
+        return check_label_names(value)
 
     @model_validator(mode="after")
     def _check(self) -> SignalRule:
@@ -276,13 +320,11 @@ class SignalRule(_Strict):
             if rank(step.severity) <= rank(self.severity):
                 raise ValueError(f"escalate severity {step.severity} is not above {self.severity}")
             previous = step.threshold
-        allowed = self.placeholders
-        for part in ("title", "action", "rationale", "impact"):
-            try:
-                template_fields(getattr(self.recommendation, part), allowed)
-            except ValueError as exc:
-                raise ValueError(f"recommendation.{part}: {exc}") from exc
         return self
+
+    @property
+    def summary(self) -> str:
+        return f"{self.op} {self.threshold:g} for {format_duration(self.for_)} -> {self.severity}"
 
     @property
     def placeholders(self) -> frozenset[str]:
@@ -310,11 +352,19 @@ def dedup_key(rule: str, labels: Mapping[str, str], labels_key: Iterable[str]) -
     return f"{rule}{{{inner}}}"
 
 
+def rule_kinds() -> dict[str, type[RuleBase]]:
+    """``kind`` -> rule class. The tariff kinds live in :mod:`argus_scout.tariff_rules`, which imports this
+    module, so they're looked up when a file is parsed rather than at import time."""
+    from argus_scout.tariff_rules import TariffPlanRule, TariffShiftRule
+
+    return {"threshold": SignalRule, "tariff_shift": TariffShiftRule, "tariff_plan": TariffPlanRule}
+
+
 @dataclass
 class RuleSet:
     """What a rules file loaded to: the good rules, and why any were skipped."""
 
-    rules: list[SignalRule] = field(default_factory=list)
+    rules: list[SignalRule | TariffShiftRule | TariffPlanRule] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     file_error: str | None = None
 
@@ -344,6 +394,7 @@ def parse_rules(data: Any) -> RuleSet:
         result.file_error = "'rules' must be a list"
         return result
     seen: set[str] = set()
+    kinds = rule_kinds()
     for i, raw in enumerate(raw_rules):
         label = f"rule {i}"
         if isinstance(raw, dict) and raw.get("name"):
@@ -351,8 +402,13 @@ def parse_rules(data: Any) -> RuleSet:
         if not isinstance(raw, dict):
             result.errors.append(f"{label}: expected a mapping")
             continue
+        kind = raw.get("kind", "threshold")
+        model = kinds.get(kind) if isinstance(kind, str) else None
+        if model is None:
+            result.errors.append(f"{label}: kind: unknown kind {kind!r} (one of {', '.join(kinds)})")
+            continue
         try:
-            rule = SignalRule.model_validate(raw)
+            rule = model.model_validate(raw)
         except ValidationError as exc:
             result.errors.append(f"{label}: {_describe(exc)}")
             continue
@@ -360,7 +416,7 @@ def parse_rules(data: Any) -> RuleSet:
             result.errors.append(f"{label}: duplicate name; the first one is kept")
             continue
         seen.add(rule.name)
-        result.rules.append(rule)
+        result.rules.append(rule)  # type: ignore[arg-type]
     return result
 
 
@@ -538,14 +594,17 @@ class Evaluation(list[SignalHit]):
 
 
 async def evaluate(
-    rules: Iterable[SignalRule], client: PrometheusClient, now: datetime, *, state: SignalState | None = None
+    rules: Iterable[RuleBase], client: PrometheusClient, now: datetime, *, state: SignalState | None = None
 ) -> Evaluation:
-    """Run every rule's query once and return the instances that have held for their ``for``.
+    """Run every threshold rule's query once and return the instances that have held for their ``for``.
 
-    Without a ``state`` the pending clock starts fresh each call, so only ``for: 0`` rules can fire.
+    Other kinds in ``rules`` are left to their own evaluators (:func:`argus_scout.tariff_rules.evaluate_tariff`),
+    but their pending state is kept, so pass the whole rule set. Without a ``state`` the pending clock starts
+    fresh each call, so only ``for: 0`` rules can fire.
     """
     state = state if state is not None else SignalState()
-    rules = list(rules)
+    every = list(rules)
+    rules = [rule for rule in every if isinstance(rule, SignalRule)]
     result = Evaluation()
     for rule in rules:
         try:
@@ -574,18 +633,20 @@ async def evaluate(
             else:
                 result.pending += 1
         state.update(rule.name, pending)
-    state.keep_only(r.name for r in rules)
+    state.keep_only(r.name for r in every)
     return result
 
 
 __all__ = [
     "Evaluation",
     "PendingStore",
+    "RuleBase",
     "RuleSet",
     "SignalHit",
     "SignalRule",
     "SignalRulesFile",
     "SignalState",
+    "check_label_names",
     "dedup_key",
     "evaluate",
     "format_duration",
@@ -594,5 +655,6 @@ __all__ = [
     "parse_duration",
     "parse_rules",
     "render",
+    "rule_kinds",
     "template_fields",
 ]
