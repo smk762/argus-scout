@@ -20,10 +20,11 @@ format:  ## Ruff autoformat + autofix
 test:  ## Run the test suite
 	$(UV) run --no-sync pytest --tb=short -q
 
-docs:  ## Regenerate docs/cli.md from the Typer CLI (CI fails if it drifts)
+docs:  ## Regenerate docs/cli.md (Typer) and docs/config.md (the config schema); CI and a test fail if they drift
 	$(UV) pip install -e ".[cli]"
 	mkdir -p docs
 	$(UV) run --no-sync python -m typer argus_scout.cli utils docs --name argus-scout --output docs/cli.md
+	$(UV) run --no-sync python -m argus_scout.configdoc docs/config.md
 
 build:  ## Build sdist + wheel
 	$(UV) build

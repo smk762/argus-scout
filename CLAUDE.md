@@ -93,6 +93,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A broken channel plugin or bad `channels:` entry stopping the other channels | `tests/test_channels.py` (`test_bad_channel_entries_do_not_stop_the_others`, `test_check_config_reports_a_bad_channel`) |
 | The quickstart's config failing `check config`, its policy files drifting from `examples/`, an unpinned image, or a compose file that doesn't parse | `tests/test_quickstart.py`; CI `Quickstart` workflow (`docker compose config`) |
 | A deployment's hostnames, IPs or persona in this repo | CI `docs` job (private IPs/paths/emails in published docs); examples use placeholders |
+| `docs/config.md` drifting from the config schema | `tests/test_configdoc.py` (`test_config_reference_matches_the_schema`); regenerate with `make docs` |
+| A published doc the handbook's import would refuse or mis-render (opsec hit, no `#` title, raw HTML, a broken relative link or anchor) | `tests/test_docs_publishable.py` |
 
 ## Layout
 
@@ -129,6 +131,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `server/deps.py` — `get_runtime(conn)` (503 when the app isn't running).
 - `server/metrics.py` — `ScoutCollector`, a custom collector on its own `CollectorRegistry` (never the global one) that reads the store, usage caps, tariff file and scheduler at scrape time, so values survive restarts. Families: `scout_usage_used` / `scout_usage_limit{kind}`, `scout_tariff_loaded`, `scout_tariff_period{plan,period}`, `scout_tariff_rate{plan,period,currency,unit}`, `scout_tariff_next_change_seconds{next_period}`, `scout_recommendations{status}`, `scout_approvals_total{source}`, `scout_inbox_open_events{severity}`, `scout_job_runs_total` / `scout_job_errors_total` / `scout_job_last_success_timestamp_seconds` / `scout_job_running{job}`, `scout_deliveries_total{channel,result}`.
 - `examples/` (repo root) — commented config for each policy file scout reads; tests load them, so they must stay valid.
+- `configdoc.py` — generates `docs/config.md` from the config models (types, defaults, constraints, and each field's `description=` or the docstring under it). Each section's example is validated when it renders. Improve a key's docs in `config.py`, never in `docs/config.md`.
+- `docs/` — the guides (`sources`, `signals`, `narrative`, `channels`, `api`, `operations`) plus the generated `cli.md` and `config.md`. argus-handbook imports README.md and `docs/*.md` from `dev`: keep a `#` title first, placeholders in backticks (raw HTML is dropped there), relative links, and no private addresses or paths.
 - `src/argus_scout/examples/` — packaged templates `argus-scout init` writes (`scout.yaml`, `env.example` → `.env.example`); tests validate them.
 - `deploy/quickstart/` — compose (scout, Prometheus, node exporter, Ollama), its `prometheus.yml` and `config/`. The policy files in `config/` are copies of `examples/`: change both (`tests/test_quickstart.py` fails on drift). `.github/workflows/quickstart.yml` is this repo's own (not copier-managed).
 
@@ -139,6 +143,7 @@ make install   # uv venv + editable install with the "dev" extras
 make test      # pytest --tb=short -q
 make lint      # ruff check + format --check (pinned ruff 0.15.16)
 make format    # ruff format + --fix
+make docs      # regenerate docs/cli.md (Typer) and docs/config.md (python -m argus_scout.configdoc)
 ```
 
 Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
@@ -156,4 +161,4 @@ Run one test: `uv run --no-sync pytest tests/test_x.py::test_name -q`.
 
 ## CI / release
 
-CI runs via the shared [`argus-ci`](https://github.com/smk762/argus-ci) reusable workflow. `docs.yml` runs its `docs-check` on every push: published docs (`README.md`, `docs/**/*.md`) must hold no private IPs, home/server paths or personal emails (use placeholders like `<GPU_HOST>`), and `docs/cli.md` must match the CLI — run `make docs` after changing a command. Release publishes to PyPI (OIDC trusted publishing) + GHCR on `v*` tags. Run `copier update` to pull template (CI/release/tooling) changes.
+CI runs via the shared [`argus-ci`](https://github.com/smk762/argus-ci) reusable workflow. `docs.yml` runs its `docs-check` on every push: published docs (`README.md`, `docs/**/*.md`) must hold no private IPs, home/server paths or personal emails (use placeholders like `<GPU_HOST>`), and `docs/cli.md` must match the CLI — run `make docs` after changing a command or a config model (`docs/config.md` is checked by a test, not by CI's docs job). Release publishes to PyPI (OIDC trusted publishing) + GHCR on `v*` tags. Run `copier update` to pull template (CI/release/tooling) changes.

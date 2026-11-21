@@ -24,8 +24,9 @@ These are the seams later phases fill in. The structure is already the real one:
   ``evening`` or ``status``). With no model, or the model down or over its cap, the report comes from the
   template: a briefing is never skipped.
 
-:func:`deliver` is the seam delivery channels (phase 5) plug into; for now it does nothing, so reports are
-stored and logged only.
+Every stored report goes to the ``deliver`` callable :func:`register_jobs` is given: the server passes
+:func:`argus_scout.server.app.deliver_reports`, which sends it through the channels. The module-level
+:func:`deliver` is a no-op default for tests and embedding.
 """
 
 from __future__ import annotations
@@ -65,9 +66,8 @@ Deliver = Callable[[Report], Awaitable[None]]
 
 
 async def deliver(report: Report) -> None:
-    """Hand a stored report to the delivery channels. A no-op until channels land (phase 5): reports are
-    stored and logged, and read from the store. ``BriefingJob`` and ``StatusCycle`` take a ``deliver``
-    callable, so the channels dispatcher is injected there without touching the jobs."""
+    """The default ``deliver``: does nothing. ``BriefingJob`` and ``StatusCycle`` take a ``deliver`` callable, and
+    the server injects one that sends through the channels (:func:`argus_scout.server.app.deliver_reports`)."""
 
 
 _NO_DELIVERY = deliver
@@ -319,8 +319,7 @@ def register_jobs(
     ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests); ``tariff``
     is the runtime's :class:`TariffFile` (one is made from ``files.tariff`` if not given), shared by the
     analysis cycle and the narrative. ``narrator`` overrides the one built from the config (its model calls
-    are charged to ``budget``). ``deliver`` is handed every stored report (default: :func:`deliver`, a no-op
-    until channels land).
+    are charged to ``budget``). ``deliver`` is handed every stored report (default: :func:`deliver`, a no-op).
     """
     schedule = config.schedule
     clock = scheduler.clock

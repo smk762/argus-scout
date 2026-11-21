@@ -75,16 +75,19 @@ class MaskConfig(ChannelSettings):
 
     kind: Literal["mask"]
     url: HttpUrl
+    """The argus-mask server. Only that host and port are contacted, with no redirects."""
     face: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     """A face id or alias the server serves."""
     wait_ready: float = Field(default=0.0, ge=0, le=300)
     """Seconds to wait for a ready screen before skipping. 0: skip at once."""
     poll_interval: float = Field(default=1.0, gt=0, le=30)
+    """Seconds between readiness checks while waiting."""
     seed: int = Field(default=0, ge=0, le=2**31 - 1)
     """The idle layer's seed."""
     token_env: EnvName | None = None
     """Env var holding a bearer token, for a proxy in front of mask. Unset: no Authorization header."""
     timeout: float = Field(default=120.0, gt=0, le=600)
+    """Seconds the whole delivery may take: mask answers a push when the speech ends."""
     allow_cloned_voice: bool = False
     """Push speech in a cloned voice (``SpeechAudio.cloned``) to this face. Off by default: ``/push`` can't set
     mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure."""
