@@ -4,7 +4,8 @@
 - ``GET /api/policy/explain``: the effective heartbeat policy, where each key came from (``default`` or
   ``file``), and for each open item the gate or rule that decides, right now, whether it is broadcast,
   reported and voiced (:func:`argus_scout.heartbeat.explain`, as the status cycle runs it).
-- ``GET /wall``: the latest report and the open items as ``text/plain``, readable on a dumb terminal.
+- ``GET /wall``: the latest report, the open items, the proposals awaiting a decision and what a standing rule
+  approved in the last day ("approved by standing rule X") as ``text/plain``, readable on a dumb terminal.
   Everything on it came from producers or the model, so control and format characters (terminal escapes,
   bidi overrides) are stripped before it is printed.
 """
@@ -12,7 +13,7 @@
 from __future__ import annotations
 
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -26,6 +27,7 @@ from argus_scout.store.base import Report
 
 WALL_WIDTH = 100
 WALL_RECOMMENDATIONS = 20
+WALL_STANDING_HOURS = 24
 
 
 def _report_dict(report: Report) -> dict[str, Any]:
@@ -127,6 +129,22 @@ def render_wall(request: Request) -> str:
         _clip(f"  {r.severity.value.upper():<8} [{r.id} rev {r.revision}] {clean(r.title) or '(untitled)'}", WALL_WIDTH)
         for r in proposed[:WALL_RECOMMENDATIONS]
     ] or ["  Nothing to decide."]
+
+    since = runtime.inbox.now() - timedelta(hours=WALL_STANDING_HOURS)
+    standing = [
+        r
+        for r in runtime.store.list_recommendations(Status.APPROVED)
+        if r.approved_by_rule and r.approved_at and r.approved_at >= since
+    ]
+    if standing:
+        lines += ["", f"Approved by a standing rule (last {WALL_STANDING_HOURS}h, approved only, nothing deployed)"]
+        lines += ["-" * WALL_WIDTH]
+        lines += [
+            _clip(
+                f"  [{r.id}] approved by standing rule {clean(r.approved_by_rule or '')}: {clean(r.title)}", WALL_WIDTH
+            )
+            for r in standing[-WALL_RECOMMENDATIONS:]
+        ]
     return "\n".join(lines) + "\n"
 
 
