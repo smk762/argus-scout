@@ -198,10 +198,12 @@ class RecommendationEngine:
         return now + (hit.expires_after or self.default_ttl)
 
     def _save(self, rec: Recommendation, loaded: Status | None, **kwargs: str | None) -> bool:
-        """Save ``rec`` if its stored status is still ``loaded``. A person may have decided it since this cycle
-        read it: then the write is refused, logged and skipped, and the next cycle sees the decision."""
+        """Save ``rec`` if its stored status is still ``loaded`` and its stored revision is still the one this cycle
+        read (``rec.revision``: nothing here changes it before the save). A person may have decided it, or another
+        writer changed it, since this cycle read it: then the write is refused, logged and skipped, and the next
+        cycle sees the stored row."""
         try:
-            self.store.save_recommendation(rec, expected_status=loaded, **kwargs)
+            self.store.save_recommendation(rec, expected_status=loaded, expected_revision=rec.revision, **kwargs)
         except StoreConflict as exc:
             log.warning("engine.stale_skipped", rec_id=rec.id, key=rec.key, error=str(exc))
             return False
@@ -270,7 +272,7 @@ class RecommendationEngine:
         )
         self.store.save_recommendation(rec, by=ENGINE, expected_status=None)
         rec.transition(Status.PROPOSED, now=now)
-        self.store.save_recommendation(rec, by=ENGINE, expected_status=Status.DRAFT)
+        self.store.save_recommendation(rec, by=ENGINE, expected_status=Status.DRAFT, expected_revision=rec.revision)
         if self.approvals is not None and self.approvals.apply(rec, now) is not None:
             # The transition records rule:<id> as who approved it. A person who decided first wins.
             if self._save(rec, Status.PROPOSED):

@@ -5,8 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from api_helpers import AUTH, NOW, OWN_TOKEN, TOKEN, make_app
-from fastapi.testclient import TestClient
+from api_helpers import AUTH, NOW, OWN_TOKEN, TOKEN, make_app, scout_client
 
 from argus_scout.events import StatusEvent
 from argus_scout.recommendations import Recommendation, Status
@@ -29,7 +28,7 @@ def store():
 
 @pytest.fixture
 def client(store, tmp_path):
-    with TestClient(make_app(store, tmp_path)) as c:
+    with scout_client(make_app(store, tmp_path)) as c:
         yield c
 
 
@@ -39,6 +38,11 @@ def proposal(store: SqliteStore, title: str = "Move the backup to off-peak", **k
     rec.transition(Status.PROPOSED)
     store.save_recommendation(rec, by="analyzer")
     return rec
+
+
+def decision(rec: Recommendation, by: str = "sam", **body) -> dict:
+    """An approve or reject body for ``rec`` as the person viewed it (its current revision)."""
+    return {"by": by, "revision": rec.revision, **body}
 
 
 # --- POST /api/events/{source} -------------------------------------------------------------------------------
@@ -158,7 +162,7 @@ def test_ack_bad_json_is_400(client):
 
 def test_manual_approve_is_audited(client, store):
     rec = proposal(store)
-    response = client.post(f"/api/recommendations/{rec.id}/approve", headers=AUTH, json={"by": "sam", "reason": "ok"})
+    response = client.post(f"/api/recommendations/{rec.id}/approve", headers=AUTH, json=decision(rec, reason="ok"))
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "approved"
@@ -180,7 +184,7 @@ def test_standing_and_manual_approvals_are_told_apart(client, store):
     manual, standing = proposal(store, "manual one"), proposal(store, "standing one")
     standing.approve(rule_id="low-impact")
     store.save_recommendation(standing)
-    client.post(f"/api/recommendations/{manual.id}/approve", headers=AUTH, json={"by": "sam"})
+    client.post(f"/api/recommendations/{manual.id}/approve", headers=AUTH, json=decision(manual))
 
     def last(rec_id):
         return client.get(f"/api/recommendations/{rec_id}").json()["history"][-1]
@@ -197,7 +201,7 @@ def test_standing_and_manual_approvals_are_told_apart(client, store):
 def test_reject_records_who_and_why(client, store):
     rec = proposal(store)
     response = client.post(
-        f"/api/recommendations/{rec.id}/reject", headers=AUTH, json={"by": "sam", "reason": "backups run at night"}
+        f"/api/recommendations/{rec.id}/reject", headers=AUTH, json=decision(rec, reason="backups run at night")
     )
     assert response.status_code == 200
     body = response.json()
@@ -208,15 +212,19 @@ def test_reject_records_who_and_why(client, store):
 
 def test_only_a_proposal_can_be_decided(client, store):
     rec = proposal(store)
-    assert client.post(f"/api/recommendations/{rec.id}/approve", headers=AUTH, json={"by": "a"}).status_code == 200
+    assert client.post(f"/api/recommendations/{rec.id}/approve", headers=AUTH, json=decision(rec)).status_code == 200
+    current = store.get_recommendation(rec.id)
     for verb in ("approve", "reject"):
-        response = client.post(f"/api/recommendations/{rec.id}/{verb}", headers=AUTH, json={"by": "b"})
+        response = client.post(f"/api/recommendations/{rec.id}/{verb}", headers=AUTH, json=decision(current, "b"))
         assert response.status_code == 409
         assert "is approved" in response.json()["detail"]
     draft = Recommendation(title="draft")
     store.save_recommendation(draft)
-    assert client.post(f"/api/recommendations/{draft.id}/approve", headers=AUTH, json={"by": "a"}).status_code == 409
-    assert client.post("/api/recommendations/nope/approve", headers=AUTH, json={"by": "a"}).status_code == 404
+    assert (
+        client.post(f"/api/recommendations/{draft.id}/approve", headers=AUTH, json=decision(draft)).status_code == 409
+    )
+    response = client.post("/api/recommendations/nope/approve", headers=AUTH, json={"by": "a", "revision": 1})
+    assert response.status_code == 404
     assert store.get_recommendation(rec.id).status is Status.APPROVED  # nothing moved past approved
 
 
@@ -229,9 +237,11 @@ def test_no_route_moves_a_recommendation_past_approved(client):
 def test_decision_body_validation(client, store):
     rec = proposal(store)
     url = f"/api/recommendations/{rec.id}/reject"
-    assert client.post(url, headers=AUTH, json={"reason": "no who"}).status_code == 422
-    assert client.post(url, headers=AUTH, json={"by": "sam", "reason": "x" * 2001}).status_code == 422
-    assert client.post(url, headers=AUTH, json={"by": "sam", "reason": "line one\nline two"}).status_code == 200
+    assert client.post(url, headers=AUTH, json={"reason": "no who", "revision": rec.revision}).status_code == 422
+    assert client.post(url, headers=AUTH, json=decision(rec, reason="x" * 2001)).status_code == 422
+    for revision in (None, -1, "2", True):
+        assert client.post(url, headers=AUTH, json={"by": "sam", "revision": revision}).status_code == 422, revision
+    assert client.post(url, headers=AUTH, json=decision(rec, reason="line one\nline two")).status_code == 200
 
 
 # --- reads ---------------------------------------------------------------------------------------------------
@@ -239,7 +249,7 @@ def test_decision_body_validation(client, store):
 
 def test_list_recommendations_by_status(client, store):
     a, b = proposal(store, "a"), proposal(store, "b")
-    client.post(f"/api/recommendations/{a.id}/approve", headers=AUTH, json={"by": "sam"})
+    client.post(f"/api/recommendations/{a.id}/approve", headers=AUTH, json=decision(a))
     assert client.get("/api/recommendations").json()["count"] == 2
     approved = client.get("/api/recommendations?status=approved").json()["recommendations"]
     assert [r["id"] for r in approved] == [a.id]
@@ -309,7 +319,7 @@ def seeded_client(store, tmp_path, policy):
     from argus_scout.server.app import create_app
 
     config = parse_config({"files": {"heartbeat": str(policy)}, "schedule": {"timezone": "UTC"}}, tmp_path)
-    return TestClient(create_app(config, store=store, clock=lambda: NOW, run_scheduler=False))
+    return scout_client(create_app(config, store=store, clock=lambda: NOW, run_scheduler=False))
 
 
 def test_policy_explain(store, tmp_path, seeded):

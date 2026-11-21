@@ -3,10 +3,18 @@
 ``POST /api/recommendations/{id}/approve`` and ``/reject`` are **manual** transitions: approve sets
 ``approval_source="manual"`` (never a standing rule), and both record who decided, and why, in the store's
 transition audit trail. Only a ``proposed`` recommendation can be approved or rejected; anything else is a
-``409``, as is a decision on a copy that changed before the save (the store's ``expected_status`` check: an
-engine cycle can't overwrite a person's decision, and a person can't decide on a copy the engine has since
-retired). There is no route past ``approved``: recording that a person carried a recommendation out
-(``deployed``, ``retired``) is left out of v0.1, and scout itself never deploys anything.
+``409``.
+
+**A decision is on the content the person saw.** Every save bumps a recommendation's ``revision`` (shown by the
+GETs and on ``/wall``), and the engine rewrites a proposal's title, action, severity, evidence and expiry while it
+stays ``proposed``. So the body names the ``revision`` the person viewed, and the store compares it in the same
+transaction as the write (:meth:`~argus_scout.store.base.Store.update_recommendation`): a mismatch is a ``409``
+"changed since you viewed it; reload", never a yes to wording nobody read. The decision is applied to the row as
+stored inside that transaction, never to a copy read earlier, so it can't revert an engine refresh either; and the
+engine's own load-then-save carries the revision it read, so it can't overwrite a person's decision.
+
+There is no route past ``approved``: recording that a person carried a recommendation out (``deployed``,
+``retired``) is left out of v0.1, and scout itself never deploys anything.
 """
 
 from __future__ import annotations
@@ -21,9 +29,13 @@ from argus_scout.recommendations import Recommendation, Status
 from argus_scout.server.deps import get_runtime
 from argus_scout.server.guards import read_json, write_auth
 from argus_scout.server.routes.models import DecisionBody
-from argus_scout.store.base import Store, StoreConflict, Transition
+from argus_scout.store.base import StaleRecommendation, Store, StoreConflict, Transition
 
 LIST_LIMIT = 500
+
+
+class NotDecidable(Exception):
+    """The stored recommendation isn't ``proposed``: nothing is written."""
 
 
 def transition_dict(t: Transition) -> dict[str, Any]:
@@ -50,22 +62,29 @@ def write_router(server: ServerConfig) -> APIRouter:
         body = await read_json(request, DecisionBody)
         done = "approved" if approve else "rejected"
 
+        def change(rec: Recommendation) -> None:
+            now = runtime.inbox.now()  # the app's clock, as the engine's, so the audit trail orders correctly
+            if not (rec.approve(now=now) if approve else rec.reject(body.reason, now=now)):
+                raise NotDecidable(
+                    f"recommendation {rec_id!r} is {rec.status.value}; only a proposed one can be {done}"
+                )
+
         def apply() -> dict[str, Any]:
-            rec = runtime.store.get_recommendation(rec_id)
-            if rec is None:
-                raise HTTPException(status_code=404, detail=f"no recommendation {rec_id!r}")
-            loaded = rec.status
-            moved = rec.approve() if approve else rec.reject(body.reason)
-            if not moved:
+            try:
+                rec = runtime.store.update_recommendation(
+                    rec_id, change, expected_revision=body.revision, by=body.by, reason=body.reason
+                )
+            except NotDecidable as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
+            except StaleRecommendation:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"recommendation {rec_id!r} is {rec.status.value}; only a proposed one can be {done}",
-                )
-            try:
-                # The store refuses the write if anyone (the engine, another request) changed it since we read it.
-                runtime.store.save_recommendation(rec, by=body.by, reason=body.reason, expected_status=loaded)
+                    detail=f"recommendation {rec_id!r} changed since you viewed it (revision {body.revision}); reload",
+                ) from None
             except StoreConflict as exc:
                 raise HTTPException(status_code=409, detail=f"{exc}; reload and decide again") from None
+            if rec is None:
+                raise HTTPException(status_code=404, detail=f"no recommendation {rec_id!r}")
             return with_history(runtime.store, rec)
 
         return await run_in_threadpool(apply)

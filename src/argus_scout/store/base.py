@@ -8,7 +8,8 @@ transition audit trail, reports).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
@@ -38,7 +39,7 @@ class IllegalTransition(StoreConflict):
 
 
 class StaleRecommendation(StoreConflict):
-    """The stored status is no longer the one the caller loaded: someone else changed it in between."""
+    """The stored status or revision is no longer the one the caller loaded: someone else changed it in between."""
 
 
 @dataclass
@@ -156,13 +157,34 @@ class Store(Protocol):
         by: str | None = None,
         reason: str | None = None,
         expected_status: Status | None | Unchecked = UNCHECKED,
+        expected_revision: int | Unchecked = UNCHECKED,
     ) -> None:
-        """Insert or update; a status change appends a :class:`Transition`.
+        """Insert or update; a status change appends a :class:`Transition`. Every save bumps the row's revision
+        and sets ``rec.revision`` to it.
 
         Atomically, before writing: if ``expected_status`` is given (``None`` meaning "no row yet") and the
-        stored status differs, raise :class:`StaleRecommendation`; if a stored row's status would change to one
-        ``TRANSITIONS`` doesn't allow from it, raise :class:`IllegalTransition`. Either way nothing is written.
+        stored status differs, or ``expected_revision`` is given and the stored revision differs (or there is no
+        row), raise :class:`StaleRecommendation`; if a stored row's status would change to one ``TRANSITIONS``
+        doesn't allow from it, raise :class:`IllegalTransition`. Either way nothing is written.
         """
+        ...
+
+    def update_recommendation(
+        self,
+        rec_id: str,
+        change: Callable[[Recommendation], None],
+        *,
+        expected_revision: int,
+        by: str | None = None,
+        reason: str | None = None,
+    ) -> Recommendation | None:
+        """Read the stored row, check its revision is ``expected_revision`` (else :class:`StaleRecommendation`),
+        apply ``change`` to it and save it, all atomically; None if there is no such row. Anything ``change``
+        raises propagates and nothing is written."""
+        ...
+
+    def transaction(self) -> AbstractContextManager[None]:
+        """A context in which every store call commits together, or not at all."""
         ...
 
     def get_recommendation(self, rec_id: str) -> Recommendation | None: ...

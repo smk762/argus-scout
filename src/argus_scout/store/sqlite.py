@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -182,6 +182,20 @@ MIGRATIONS: tuple[str, ...] = (
     );
     CREATE INDEX IF NOT EXISTS deliveries_report ON deliveries (report_id, channel);
     """,
+    # 9: each recommendation's revision, bumped on every save, so a person's decision (and the engine's
+    # load-then-save) is refused if the row's content changed since it was read, not only its status. A side
+    # table, not a column, so replaying the migration is harmless; a row with no revision yet reads as 0.
+    """
+    CREATE TABLE IF NOT EXISTS recommendation_revisions (
+        rec_id   TEXT PRIMARY KEY REFERENCES recommendations (id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL
+    );
+    """,
+)
+
+_REC_SELECT = (
+    "SELECT r.data, r.status, COALESCE(v.revision, 0) AS revision"
+    " FROM recommendations r LEFT JOIN recommendation_revisions v ON v.rec_id = r.id"
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -241,6 +255,7 @@ class SqliteStore:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._tx_depth = 0  # >0 while this thread (holding the lock) is inside a transaction
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -268,13 +283,30 @@ class SqliteStore:
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            if self._tx_depth:  # inside transaction(): join it, and let the outermost commit or roll back
+                self._tx_depth += 1
+                try:
+                    yield self._conn
+                finally:
+                    self._tx_depth -= 1
+                return
             self._conn.execute("BEGIN IMMEDIATE")
+            self._tx_depth = 1
             try:
                 yield self._conn
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+            finally:
+                self._tx_depth = 0
             self._conn.execute("COMMIT")
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """One ``BEGIN IMMEDIATE`` transaction around every store call made inside it on this thread: all of them
+        commit together, or (on any exception) none do. Other threads wait for it."""
+        with self._tx():
+            yield
 
     def _query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -428,6 +460,12 @@ class SqliteStore:
         return {r["fingerprint"]: r["n"] for r in rows}
 
     # -- recommendations ---------------------------------------------------------
+    @staticmethod
+    def _rec_from_row(row: sqlite3.Row) -> Recommendation:
+        rec = Recommendation.from_dict(json.loads(row["data"]))
+        rec.revision = row["revision"]
+        return rec
+
     def save_recommendation(
         self,
         rec: Recommendation,
@@ -435,96 +473,159 @@ class SqliteStore:
         by: str | None = None,
         reason: str | None = None,
         expected_status: Status | None | Unchecked = UNCHECKED,
+        expected_revision: int | Unchecked = UNCHECKED,
     ) -> None:
-        """Insert or update ``rec``. A new row or a status change appends a transition.
+        """Insert or update ``rec``. A new row or a status change appends a transition. Every save bumps the
+        row's revision, and sets ``rec.revision`` to it.
 
         ``by`` names who made the change (a standing approval defaults to
         ``rule:<id>``); ``reason`` defaults to the rejection reason on a reject.
 
-        The check and the write share one ``BEGIN IMMEDIATE`` transaction, so they can't interleave with
-        another writer: a stored status other than ``expected_status`` raises :class:`StaleRecommendation`,
-        and a status change the lifecycle forbids raises :class:`IllegalTransition`, writing nothing.
+        The checks and the write share one ``BEGIN IMMEDIATE`` transaction, so they can't interleave with
+        another writer: a stored status other than ``expected_status``, or a stored revision other than
+        ``expected_revision`` (or no row, when one is given), raises :class:`StaleRecommendation`; a status
+        change the lifecycle forbids raises :class:`IllegalTransition`. Either way nothing is written.
         """
         with self._tx() as conn:
-            row = conn.execute("SELECT status FROM recommendations WHERE id = ?", (rec.id,)).fetchone()
-            prior = Status(row["status"]) if row else None
-            if not isinstance(expected_status, Unchecked) and prior != expected_status:
-                stored = prior.value if prior else "absent"
-                expected = expected_status.value if expected_status else "absent"
-                raise StaleRecommendation(f"recommendation {rec.id} is {stored}, not {expected} as loaded")
-            if prior is not None and prior != rec.status and rec.status not in TRANSITIONS[prior]:
-                raise IllegalTransition(f"recommendation {rec.id}: {prior.value} -> {rec.status.value} is not allowed")
-            conn.execute(
-                """INSERT INTO recommendations (id, status, analyzer, key, created_at, updated_at, data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT (id) DO UPDATE SET status = excluded.status, analyzer = excluded.analyzer,
-                       key = excluded.key, updated_at = excluded.updated_at, data = excluded.data""",
-                (
-                    rec.id,
-                    rec.status.value,
-                    rec.analyzer,
-                    rec.key,
-                    _ts(rec.created_at),
-                    _ts(rec.updated_at),
-                    json.dumps(rec.to_dict()),
-                ),
+            revision = self._write_recommendation(conn, rec, by, reason, expected_status, expected_revision)
+        rec.revision = revision
+
+    def update_recommendation(
+        self,
+        rec_id: str,
+        change: Callable[[Recommendation], None],
+        *,
+        expected_revision: int,
+        by: str | None = None,
+        reason: str | None = None,
+    ) -> Recommendation | None:
+        """Apply ``change`` to the **stored** row and save it, in one transaction; None if there is no such row.
+
+        The row is read inside the transaction, so the change lands on the current content, never on a copy
+        read earlier. A stored revision other than ``expected_revision`` raises :class:`StaleRecommendation`
+        before ``change`` runs. Anything ``change`` raises rolls the transaction back and propagates.
+        """
+        with self._tx() as conn:
+            row = conn.execute(f"{_REC_SELECT} WHERE r.id = ?", (rec_id,)).fetchone()
+            if row is None:
+                return None
+            rec = self._rec_from_row(row)
+            if rec.revision != expected_revision:
+                raise StaleRecommendation(
+                    f"recommendation {rec_id} is at revision {rec.revision}, not {expected_revision}"
+                )
+            loaded = rec.status
+            change(rec)
+            revision = self._write_recommendation(conn, rec, by, reason, loaded, expected_revision)
+        rec.revision = revision
+        return rec
+
+    @staticmethod
+    def _write_recommendation(
+        conn: sqlite3.Connection,
+        rec: Recommendation,
+        by: str | None,
+        reason: str | None,
+        expected_status: Status | None | Unchecked,
+        expected_revision: int | Unchecked,
+    ) -> int:
+        """The checks and writes of a save, inside the caller's transaction. Returns the new revision."""
+        row = conn.execute(
+            "SELECT r.status, COALESCE(v.revision, 0) AS revision FROM recommendations r"
+            " LEFT JOIN recommendation_revisions v ON v.rec_id = r.id WHERE r.id = ?",
+            (rec.id,),
+        ).fetchone()
+        prior = Status(row["status"]) if row else None
+        stored_revision = row["revision"] if row else None
+        if not isinstance(expected_status, Unchecked) and prior != expected_status:
+            stored = prior.value if prior else "absent"
+            expected = expected_status.value if expected_status else "absent"
+            raise StaleRecommendation(f"recommendation {rec.id} is {stored}, not {expected} as loaded")
+        if not isinstance(expected_revision, Unchecked) and stored_revision != expected_revision:
+            stored = f"at revision {stored_revision}" if row else "absent"
+            raise StaleRecommendation(
+                f"recommendation {rec.id} is {stored}, not revision {expected_revision} as loaded"
             )
-            if prior == rec.status:
-                return
-            approved = rec.status == Status.APPROVED
-            source = rec.approval_source if approved else None
-            rule_id = rec.approved_by_rule if approved else None
-            if by is None and source == "standing" and rule_id:
-                by = f"rule:{rule_id}"
-            if reason is None:
-                reasons = {Status.REJECTED: rec.rejection_reason, Status.RETIRED: rec.retired_reason}
-                reason = reasons.get(rec.status, "")
-            at = (rec.approved_at if approved else None) or rec.updated_at
-            conn.execute(
-                """INSERT INTO recommendation_transitions
-                       (rec_id, from_status, to_status, at, by, source, rule_id, reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (rec.id, prior.value if prior else None, rec.status.value, _ts(at), by, source, rule_id, reason),
-            )
+        if prior is not None and prior != rec.status and rec.status not in TRANSITIONS[prior]:
+            raise IllegalTransition(f"recommendation {rec.id}: {prior.value} -> {rec.status.value} is not allowed")
+        revision = (stored_revision or 0) + 1
+        conn.execute(
+            """INSERT INTO recommendations (id, status, analyzer, key, created_at, updated_at, data)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET status = excluded.status, analyzer = excluded.analyzer,
+                   key = excluded.key, updated_at = excluded.updated_at, data = excluded.data""",
+            (
+                rec.id,
+                rec.status.value,
+                rec.analyzer,
+                rec.key,
+                _ts(rec.created_at),
+                _ts(rec.updated_at),
+                json.dumps(rec.to_dict() | {"revision": revision}),
+            ),
+        )
+        conn.execute(
+            """INSERT INTO recommendation_revisions (rec_id, revision) VALUES (?, ?)
+               ON CONFLICT (rec_id) DO UPDATE SET revision = excluded.revision""",
+            (rec.id, revision),
+        )
+        if prior == rec.status:
+            return revision
+        approved = rec.status == Status.APPROVED
+        source = rec.approval_source if approved else None
+        rule_id = rec.approved_by_rule if approved else None
+        if by is None and source == "standing" and rule_id:
+            by = f"rule:{rule_id}"
+        if reason is None:
+            reasons = {Status.REJECTED: rec.rejection_reason, Status.RETIRED: rec.retired_reason}
+            reason = reasons.get(rec.status, "")
+        at = (rec.approved_at if approved else None) or rec.updated_at
+        conn.execute(
+            """INSERT INTO recommendation_transitions
+                   (rec_id, from_status, to_status, at, by, source, rule_id, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (rec.id, prior.value if prior else None, rec.status.value, _ts(at), by, source, rule_id, reason),
+        )
+        return revision
 
     def get_recommendation(self, rec_id: str) -> Recommendation | None:
-        rows = self._query("SELECT data FROM recommendations WHERE id = ?", (rec_id,))
-        return Recommendation.from_dict(json.loads(rows[0]["data"])) if rows else None
+        rows = self._query(f"{_REC_SELECT} WHERE r.id = ?", (rec_id,))
+        return self._rec_from_row(rows[0]) if rows else None
 
     def list_recommendations(
         self, status: Status | Iterable[Status] | None = None, *, limit: int | None = None
     ) -> list[Recommendation]:
         """Recommendations, oldest first, optionally filtered to one or more statuses."""
-        sql = "SELECT data FROM recommendations"
+        sql = _REC_SELECT
         params: list[Any] = []
         if status is not None:
             statuses = [status] if isinstance(status, str) else list(status)
-            sql += f" WHERE status IN ({', '.join('?' * len(statuses))})"
+            sql += f" WHERE r.status IN ({', '.join('?' * len(statuses))})"
             params.extend(Status(s).value for s in statuses)
-        sql += " ORDER BY created_at, id"
+        sql += " ORDER BY r.created_at, r.id"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(int(limit))
-        return [Recommendation.from_dict(json.loads(r["data"])) for r in self._query(sql, params)]
+        return [self._rec_from_row(r) for r in self._query(sql, params)]
 
     def recommendations_by_key(self, key: str, status: Status | Iterable[Status] | None = None) -> list[Recommendation]:
         """Recommendations with this dedup key, most recently updated first."""
-        sql = "SELECT data FROM recommendations WHERE key = ?"
+        sql = f"{_REC_SELECT} WHERE r.key = ?"
         params: list[Any] = [key]
         if status is not None:
             statuses = [status] if isinstance(status, str) else list(status)
-            sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+            sql += f" AND r.status IN ({', '.join('?' * len(statuses))})"
             params.extend(Status(s).value for s in statuses)
-        sql += " ORDER BY updated_at DESC, id"
-        return [Recommendation.from_dict(json.loads(r["data"])) for r in self._query(sql, params)]
+        sql += " ORDER BY r.updated_at DESC, r.id"
+        return [self._rec_from_row(r) for r in self._query(sql, params)]
 
     def recent_rejections(self, limit: int = 10) -> list[Recommendation]:
         """Rejected recommendations, most recently rejected first (with their reasons)."""
         rows = self._query(
-            "SELECT data FROM recommendations WHERE status = ? ORDER BY updated_at DESC, id LIMIT ?",
+            f"{_REC_SELECT} WHERE r.status = ? ORDER BY r.updated_at DESC, r.id LIMIT ?",
             (Status.REJECTED.value, int(limit)),
         )
-        return [Recommendation.from_dict(json.loads(r["data"])) for r in rows]
+        return [self._rec_from_row(r) for r in rows]
 
     def recommendation_history(self, rec_id: str) -> list[Transition]:
         rows = self._query("SELECT * FROM recommendation_transitions WHERE rec_id = ? ORDER BY id", (rec_id,))

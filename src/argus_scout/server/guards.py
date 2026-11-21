@@ -31,27 +31,45 @@ dependencies, which would let an unauthenticated caller make scout buffer a body
 
 **Reads** are open unless ``server.read_auth`` is set, in which case :func:`read_auth` is the same bearer check
 on the read API. ``/health`` and ``/metrics`` are always open (they hold no event or report content).
+
+**DNS rebinding.** Under an open read API, a page on ``evil.example`` that re-resolves its name to ``127.0.0.1``
+could read ``/wall`` and ``/api/*`` as same-origin. Such a request always carries the attacker's name in ``Host``,
+so :class:`HostGuard` (outermost, every request and websocket) refuses with a ``400`` any ``Host`` that isn't an IP
+literal, ``localhost`` or a ``server.trusted_hosts`` name: the same-host rule argus-cortex's ``cross_site_refuse``
+applies to an ``Origin``, mirrored locally in :func:`host_name` / :func:`rebind_proof` (cortex keeps its own private,
+so scout doesn't import them; a parity test checks the two agree). The same ``trusted_hosts`` go to ``cross_site_refuse``, so a page
+served from a trusted name can write to its own server. Only :data:`HOST_OPEN_PATHS` answer any ``Host``: they hold
+no event or report content and are reached by service names (a Prometheus scrape of ``scout:8400``).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
-from argus_cortex.auth import bearer
+import structlog
+from argus_cortex.auth import bearer, check_bearer
 from argus_cortex.limits import BadInput, TooLarge, read_body
 from argus_cortex.server import UNSAFE_METHODS, WriteGuard, constant_refuse, cross_site_refuse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ValidationError
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
+from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from argus_scout.config import ServerConfig
+from argus_scout.config import ServerConfig, resolve_secret
 from argus_scout.server.deps import get_runtime
 from argus_scout.sources import BoundSource, SourceAuthError
+
+log = structlog.get_logger(__name__)
 
 EVENTS_MAX_BYTES = 256 * 1024
 """Cap on a ``POST /api/events/{source}`` body: room for :data:`~argus_scout.sources.webhook.MAX_EVENTS`
@@ -73,12 +91,81 @@ def _mark(dep: Any, kind: str) -> Any:
     return dep
 
 
+def host_name(hostport: str) -> str | None:
+    """The host of a ``Host`` value (``h``, ``h:80``, ``[::1]:80``), lower-cased; None if it doesn't parse.
+
+    Mirrors argus-cortex's private ``server._host_name`` (``tests/test_api_hardening.py`` checks they agree)."""
+    try:
+        return urlsplit("//" + hostport).hostname
+    except ValueError:
+        return None
+
+
+def rebind_proof(host: str) -> bool:
+    """Whether ``host`` (from :func:`host_name`) can't be a DNS-rebound name: ``localhost`` or an IP literal.
+
+    A rebinding page is loaded from the attacker's own name, so its ``Host`` carries that name; an IP literal or
+    ``localhost`` is only sent by a page loaded from that address. Mirrors argus-cortex's private
+    ``server._rebind_proof``, the rule ``cross_site_refuse`` applies to a same-host ``Origin``."""
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+HOST_OPEN_PATHS = frozenset({"/health", "/metrics"})
+"""Paths :class:`HostGuard` answers for any ``Host``: liveness and the scrape target, which hold no event or report
+content and are reached by service names (Prometheus scrapes ``scout:8400`` in the quickstart)."""
+HOST_REFUSAL = (
+    "Host header is not an IP address, localhost or a server.trusted_hosts name: "
+    "add the name scout is reached by to server.trusted_hosts"
+)
+
+
+class HostGuard:
+    """Pure-ASGI gate refusing (400) any request whose ``Host`` could be a DNS-rebound name.
+
+    Passes an IP literal, ``localhost`` and the ``trusted_hosts`` names (:func:`rebind_proof`, the rule argus-cortex's
+    ``cross_site_refuse`` applies to a same-host ``Origin``), and a request with no ``Host`` at all (no browser sends
+    one). Reads and writes alike: CORS keeps another origin from *reading* a reply, but a rebound page **is** the same
+    origin. A refused websocket is closed before it is accepted. The refusal never echoes the Host back.
+    """
+
+    def __init__(self, app: ASGIApp, trusted_hosts: Iterable[str] = (), open_paths: Iterable[str] = HOST_OPEN_PATHS):
+        self.app = app
+        self.trusted = frozenset(h.strip().lower() for h in trusted_hosts if h.strip())
+        self.open_paths = frozenset(open_paths)
+
+    def allows(self, host: str | None) -> bool:
+        if host is None:
+            return True
+        name = host_name(host)
+        return name is not None and (name in self.trusted or rebind_proof(name))
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket") and scope.get("path") not in self.open_paths:
+            host = Headers(scope=scope).get("host")
+            if not self.allows(host):
+                log.warning("server.host_refused", host=(host or "")[:100], path=scope.get("path"))
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await JSONResponse({"detail": HOST_REFUSAL}, status_code=400)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def install_guards(app: FastAPI, server: ServerConfig) -> None:
-    """Add the WriteGuards. Call once, after any other middleware, so the guards run first."""
-    app.add_middleware(WriteGuard, refuse=cross_site_refuse(server.allowed_origins))
+    """Add the WriteGuards and the HostGuard. Call once, after any other middleware, so the guards run first."""
+    app.add_middleware(WriteGuard, refuse=cross_site_refuse(server.allowed_origins, server.trusted_hosts))
     if server.read_only:
-        # Added last, so outermost: read-only refuses before anything else looks at the request.
+        # Added after the origin guard, so outside it: read-only refuses before the origin check looks.
         app.add_middleware(WriteGuard, refuse=constant_refuse(READ_ONLY_REFUSAL))
+    # Added last, so outermost: a rebinding Host is refused before anything else, reads included.
+    app.add_middleware(HostGuard, trusted_hosts=server.trusted_hosts)
 
 
 def _closed(why: str) -> Dependency:
@@ -105,29 +192,50 @@ def read_auth(server: ServerConfig) -> Dependency | None:
     return bearer_dependency(server) if server.read_auth else None
 
 
+UNAUTHENTICATED = "bearer token required"
+CLOSED = "this source is closed: no token is configured for it"
+
+
+def _refusal(status: int) -> HTTPException:
+    """The push route's auth refusal: the same detail for every source, so it says nothing about which exist."""
+    if status == 401:
+        return HTTPException(status_code=401, detail=UNAUTHENTICATED, headers={"WWW-Authenticate": "Bearer"})
+    return HTTPException(status_code=503, detail=CLOSED)
+
+
 def source_auth(server: ServerConfig) -> Callable[..., Awaitable[BoundSource]]:
     """A dependency resolving ``{source}`` to a push source and checking the caller may push as it.
 
-    Unknown source: 404. A source that doesn't take pushes (a poller): 405. Then the source's ``authorize``,
-    with the server token as the fallback: no token configured is a 503, a wrong one a 401.
+    **Credentials first.** For a push source: its ``authorize``, with the server token as the fallback (no token
+    configured: 503; missing or wrong: 401). For a name that isn't a push source (unknown, or a poller), a caller is
+    told so (404, 405) only if it holds the server token; anyone else gets exactly what a push source falling back to
+    the server token would answer (401, or 503 with no server token configured), with the same detail. So an
+    unauthenticated caller can't enumerate the source inventory. A per-source token still pushes as that source only.
     """
+
+    def check(source: str, authorization: str | None, bound: BoundSource | None) -> BoundSource:
+        if bound is not None and bound.pushes:
+            try:
+                bound.plugin.authorize(bound.config, authorization, fallback_env=server.token_env)  # type: ignore[attr-defined]
+            except SourceAuthError as exc:
+                raise _refusal(exc.status) from None
+            except Exception as exc:  # noqa: BLE001 — a plugin that can't check credentials fails closed
+                log.warning("source.authorize_failed", source=source, error=f"{type(exc).__name__}: {exc}")
+                raise _refusal(401) from None
+            return bound
+        secret = resolve_secret(server.token_env)
+        if secret is None:
+            raise _refusal(503)
+        if not check_bearer(authorization, secret.get_secret_value()):
+            raise _refusal(401)
+        if bound is None:
+            raise HTTPException(status_code=404, detail=f"no source named {source!r}")
+        raise HTTPException(status_code=405, detail=f"source {source!r} is a {bound.kind} source; it takes no pushes")
 
     async def require_source_token(source: str, request: Request) -> BoundSource:
         bound = get_runtime(request).sources.get(source)
-        if bound is None:
-            raise HTTPException(status_code=404, detail=f"no source named {source!r}")
-        if not bound.pushes:
-            raise HTTPException(
-                status_code=405, detail=f"source {source!r} is a {bound.kind} source; it takes no pushes"
-            )
-        try:
-            bound.plugin.authorize(  # type: ignore[attr-defined]
-                bound.config, request.headers.get("authorization"), fallback_env=server.token_env
-            )
-        except SourceAuthError as exc:
-            headers = {"WWW-Authenticate": "Bearer"} if exc.status == 401 else None
-            raise HTTPException(status_code=exc.status, detail=str(exc), headers=headers) from None
-        return bound
+        # authorize is plugin code and synchronous: keep it off the event loop.
+        return await run_in_threadpool(check, source, request.headers.get("authorization"), bound)
 
     return _mark(require_source_token, "source-token")
 
@@ -227,9 +335,15 @@ def unguarded_routes(app: FastAPI, *, read_only: bool | None = None) -> list[str
     A route can change state if it takes any method other than GET/HEAD/OPTIONS, or is a websocket or a
     mount (which this walk can't see into, and WriteGuard doesn't gate). Each such route must be an
     ``APIRoute`` whose methods WriteGuard gates, carrying a dependency marked with :data:`AUTH_MARK`; and the
-    app must have the cross-origin guard (plus the read-only guard when ``read_only``). Empty: all guarded.
+    app must have the cross-origin guard (plus the read-only guard when ``read_only``), and :class:`HostGuard` as its
+    outermost middleware, which covers every route, reads included. Empty: all guarded.
     """
     problems: list[str] = []
+    stack = [mw.cls for mw in app.user_middleware]  # outermost first
+    if HostGuard not in stack:
+        problems.append("app: no HostGuard installed (a rebinding Host could read the API)")
+    elif stack[0] is not HostGuard:
+        problems.append("app: HostGuard is not the outermost middleware")
     guards = _guards(app)
     if "cross_site_refuse" not in guards:
         problems.append("app: no WriteGuard(cross_site_refuse) installed")
@@ -261,6 +375,11 @@ __all__ = [
     "ACTION_MAX_BYTES",
     "AUTH_MARK",
     "EVENTS_MAX_BYTES",
+    "HOST_OPEN_PATHS",
+    "HOST_REFUSAL",
+    "HostGuard",
+    "host_name",
+    "rebind_proof",
     "READ_ONLY_REFUSAL",
     "SAFE_METHODS",
     "RouteView",

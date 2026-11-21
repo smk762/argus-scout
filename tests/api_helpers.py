@@ -32,3 +32,16 @@ def make_config(tmp_path: Path, **server: Any):
 
 def make_app(store: SqliteStore, tmp_path: Path, **server: Any):
     return create_app(make_config(tmp_path, **server), store=store, clock=lambda: NOW, run_scheduler=False)
+
+
+BASE_URL = "http://127.0.0.1:8400"
+"""The host the API tests reach scout by: an IP literal, which the HostGuard lets through (``testserver``, the
+TestClient default, is a DNS name it refuses)."""
+
+
+def scout_client(app, **kw: Any):
+    """A TestClient reaching ``app`` by :data:`BASE_URL` (or the ``base_url`` given)."""
+    from fastapi.testclient import TestClient
+
+    kw.setdefault("base_url", BASE_URL)
+    return TestClient(app, **kw)

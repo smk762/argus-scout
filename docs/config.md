@@ -419,7 +419,8 @@ Guide: [api.md](api.md).
 | `host` | text | `127.0.0.1` |  | Bind address (`serve --host` overrides it). Reads are open unless `read_auth`: keep it on loopback. |
 | `port` | integer | `8400` | >= 1, <= 65535 | TCP port (`serve --port` overrides it). |
 | `read_only` | boolean | `true` |  | Refuse every state-changing route (webhook pushes included). Turn off only once a token is set. |
-| `allowed_origins` | list of text | `[]` |  | Browser origins trusted to make writes (`https://ui.example`). No `Origin` header (curl, scripts) and a same-host IP or `localhost` origin are always allowed; any other cross-origin write is refused. |
+| `allowed_origins` | list of text | `[]` |  | Browser origins on *another* host trusted to make writes (`https://ui.example`). No `Origin` header (curl, scripts) and a same-host origin whose host is an IP, `localhost` or in `trusted_hosts` are always allowed; any other cross-origin write is refused. |
+| `trusted_hosts` | list of text | `[]` |  | Host names (no scheme or port) scout may be reached by, as in `http://scout.lan:8400`. Every request whose `Host` is not an IP address, `localhost` or listed here is refused with a 400, so a DNS-rebinding page can't read the API. A name listed here is also trusted as a same-host `Origin` for writes. `/health` and `/metrics` answer any `Host`. |
 | `token_env` | env var name or null | `SCOUT_API_TOKEN` |  | Env var holding the bearer token for write routes. Unset or empty means every write route is closed. |
 | `read_auth` | boolean | `false` |  | Require the same bearer token on the read API (`/api/*` GETs and `/wall`). Off by default: scout binds to loopback, where reaching the port is already host access. Turn it on before binding anywhere else. `/health` and `/metrics` stay open either way. |
 

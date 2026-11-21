@@ -83,6 +83,9 @@ class Recommendation:
     # When the signal behind it was last seen holding.
     last_seen_at: datetime | None = None
     retired_reason: str = ""
+    # The store's write counter for this row, bumped on every save (0 until first saved). A person's decision names
+    # the revision they viewed, and the store refuses it if the row has changed since.
+    revision: int = 0
 
     def transition(self, new_status: Status, *, now: datetime | None = None) -> bool:
         """Move to ``new_status`` if the lifecycle allows it. Returns whether it moved."""
@@ -139,6 +142,7 @@ class Recommendation:
             expires_at=parse_dt(raw.get("expires_at")),
             last_seen_at=parse_dt(raw.get("last_seen_at")),
             retired_reason=str(raw.get("retired_reason") or ""),
+            revision=int(raw.get("revision") or 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -163,4 +167,5 @@ class Recommendation:
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
             "retired_reason": self.retired_reason,
+            "revision": self.revision,
         }
