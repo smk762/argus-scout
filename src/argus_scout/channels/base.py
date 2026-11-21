@@ -134,7 +134,7 @@ class Delivery:
             kind=EVENT_KIND,
             key=f"event:{event.source}/{event.event_id}:{digest}:{event.broadcast_count}",
             text=text,
-            speakable=event.summary if event.speakable else "",
+            speakable=event.spoken if event.speakable else "",
             severity=event.severity,
             generated_at=event.generated_at,
             title=event.summary,

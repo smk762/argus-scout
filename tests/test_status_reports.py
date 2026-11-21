@@ -200,6 +200,20 @@ async def test_speech_holds_only_the_voice_eligible_items(store, write_file):
     assert "Backup" in result.report.text and "Scrub" in result.report.text  # text still has everything
 
 
+async def test_speech_uses_an_events_own_spoken_text_when_it_has_one(store, write_file):
+    policy = PolicyFile(write_file("hb.yaml", "{}\n"))
+    clock = Clock()
+    inbox = Inbox(store, clock=clock)
+    inbox.ingest({"source": "mon", "event_id": "u1", "severity": "warning", "summary": "UPS: on_batt (load 41%)",
+                  "speech": "The UPS is on battery!"})  # fmt: skip
+    inbox.ingest(ev("d1", "warning", "Disk 90% full"))  # no speech: its summary is said
+    inbox.ingest({"source": "mon", "event_id": "n1", "severity": "warning", "summary": "Router rebooted",
+                  "speech": "The router rebooted", "speakable": False})  # fmt: skip
+    result = await status_cycle(store, policy, clock)()
+    assert result.report.meta["speakable"] == "Status update. The UPS is on battery! Disk 90% full."
+    assert "UPS: on_batt" in result.report.text and "Router rebooted" in result.report.text  # text keeps summaries
+
+
 async def test_unspeakable_report_skips_synthesis_whatever_the_gates_say(store):
     speaker, synth = Speaker(), FakeSynth()
 

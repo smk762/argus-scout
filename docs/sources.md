@@ -29,6 +29,7 @@ Every source produces the same envelope. Only `summary` is required; the source 
 | `generated_at` | ISO 8601 or Unix seconds | now | Naive times are read as UTC. |
 | `expires_at` | ISO 8601 or Unix seconds | none | After this the event no longer counts as open. |
 | `speakable` | boolean | `true` | `false` keeps it off the speakers. |
+| `speech` | text | none | What to say aloud instead of `summary` when the event is spoken (a sentence written for the ear). Control characters stripped, one line, cut to 500 characters at a word. `speakable` still decides whether it is spoken at all. Not part of the event's identity: rewording it is not news. |
 | `requires_ack` | boolean | `false` | Always included in status updates until a person acks it. |
 | `quiet_exempt` | boolean | `false` | Gets through quiet hours. |
 | `link` | text | none | A URL for more detail. |
@@ -43,7 +44,7 @@ it, and unknown keys are ignored.
 | Outcome | Meaning |
 |---|---|
 | `new` | First sighting. |
-| `duplicate` | A new id, but an open event already says the same thing (same source, severity and summary). Both are kept and shown as one group. |
+| `duplicate` | A new id, but an open event already says the same thing (same source, severity and summary; `speech` doesn't count). Both are kept and shown as one group. |
 | `escalated` | A known id whose severity went up. Reopened if it had been acked. |
 | `updated` | A known id whose content changed otherwise. Reopened if it had been acked. |
 | `refreshed` | A known id, unchanged. Ack and announce state are kept. |
@@ -116,6 +117,15 @@ sources:
 
 For a response like `{"jobs": [{"name": "photos", "level": "warning", "message": "Photos backup is 3 days old"}]}`
 that gives one event, `backups:photos`.
+
+A feed that writes a separate sentence for speech maps it onto `speech`, not `speakable` (which is a yes/no flag, so
+mapping text onto it refuses the item):
+
+```yaml
+    fields:
+      summary: title                 # what the text channels and /wall show
+      speech: spoken                 # what a voice channel says instead, when the item is spoken
+```
 
 **Mapping.**
 

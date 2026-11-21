@@ -28,8 +28,8 @@ from argus_scout.channels import (
     SynthesisError,
     build_dispatcher,
 )
-from argus_scout.channels.echo import StreamFormat, build_request, to_s16le
-from argus_scout.config import ConfigError, EchoConfig, TextChannel, parse_config
+from argus_scout.channels.echo import ECHO_VOICE_KEYS, StreamFormat, build_request, to_s16le
+from argus_scout.config import ECHO_REQUEST_FIELDS, ConfigError, EchoConfig, TextChannel, parse_config
 from argus_scout.store import Report, SqliteStore
 
 T0 = datetime(2026, 11, 21, 7, 30, tzinfo=UTC)
@@ -301,6 +301,26 @@ def test_echo_config_and_the_echo_url_break():
     with pytest.raises(ConfigError, match="format"):
         parse_config({"services": {"echo": {"url": "http://echo:8000", "format": "mp3"}}})
     assert parse_config({"services": {"echo": {"url": "http://echo:8000", "extra": None}}}).services.echo.extra == {}
+
+
+def test_every_reserved_request_field_has_its_own_key():
+    # A shared field refused under ``extra`` ("set it as its own key") must be a key, or it can't be set at all:
+    # ``speed`` once was reserved but missing.
+    assert set(ECHO_VOICE_KEYS) | {"text", "language"} == ECHO_REQUEST_FIELDS
+    assert set(ECHO_VOICE_KEYS) <= set(EchoConfig.model_fields)
+    for key in ECHO_REQUEST_FIELDS - {"text"}:
+        with pytest.raises(ConfigError, match=f"set {key} as its own key"):
+            parse_config({"services": {"echo": {"url": "http://echo:8000", "extra": {key: "x"}}}})
+
+
+def test_speed_is_a_key_and_reaches_the_request():
+    echo = parse_config({"services": {"echo": {"url": "http://echo:8000", "speed": 1.2}}}).services.echo
+    assert echo.speed == 1.2
+    assert build_request(echo, "hi") == {"text": "hi", "language": "en", "speed": 1.2}
+    assert "speed" not in build_request(EchoConfig(url="http://echo:8000"), "hi")  # unset: not sent
+    for bad in (0, -1, 10):
+        with pytest.raises(ConfigError, match="speed"):
+            parse_config({"services": {"echo": {"url": "http://echo:8000", "speed": bad}}})
 
 
 # --- what voice channels receive -----------------------------------------------------------------------------

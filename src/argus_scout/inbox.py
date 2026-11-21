@@ -32,7 +32,14 @@ from uuid import uuid4
 
 import structlog
 
-from argus_scout.events import SCHEMA_VERSION, SUMMARY_MAX, StatusEvent, group_duplicates, parse_dt
+from argus_scout.events import (
+    SCHEMA_VERSION,
+    SUMMARY_MAX,
+    StatusEvent,
+    clean_speech,
+    group_duplicates,
+    parse_dt,
+)
 from argus_scout.severity import Severity, coerce_severity, rank
 from argus_scout.store.base import Store
 
@@ -114,6 +121,15 @@ def _text(raw: Mapping[str, Any], key: str, *, limit: int | None = None) -> str 
     return text or None
 
 
+def _speech(raw: Mapping[str, Any]) -> str | None:
+    value = raw.get("speech")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidEvent(f"speech: expected text, got {type(value).__name__}")
+    return clean_speech(value)
+
+
 def _flag(raw: Mapping[str, Any], key: str, default: bool) -> bool:
     value = raw.get(key)
     if value is None:
@@ -182,6 +198,7 @@ def parse_envelope(
         summary=clip_summary(summary),
         body_md=_text(raw, "body_md") or "",
         speakable=_flag(raw, "speakable", True),
+        speech=_speech(raw),
         requires_ack=_flag(raw, "requires_ack", False),
         quiet_exempt=_flag(raw, "quiet_exempt", False),
         expires_at=_when(raw, "expires_at"),
@@ -198,7 +215,7 @@ def _aware(value: datetime | None) -> datetime | None:
 
 
 def normalise(event: StatusEvent, *, now: datetime) -> StatusEvent:
-    """A copy of ``event`` fit for the inbox: trimmed ids, clipped summary, coerced severity, aware
+    """A copy of ``event`` fit for the inbox: trimmed ids, clipped summary and speech, coerced severity, aware
     datetimes, and none of the inbox's own bookkeeping (ack, announce state), which only scout sets."""
     source = str(event.source or "").strip()
     event_id = str(event.event_id or "").strip()
@@ -216,6 +233,7 @@ def normalise(event: StatusEvent, *, now: datetime) -> StatusEvent:
         source=source,
         event_id=event_id,
         summary=summary,
+        speech=clean_speech(event.speech),
         severity=coerce_severity(event.severity),
         generated_at=_aware(event.generated_at) or now,
         expires_at=_aware(event.expires_at),

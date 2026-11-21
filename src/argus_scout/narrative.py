@@ -556,13 +556,15 @@ def build_narrator(
     With ``services.llm.gpu`` each model call holds a GPU lease from ``coordinator`` (default: the host-wide
     ``ARGUS_GPU_*`` environment, see :mod:`argus_scout.gpu`)."""
     llm = config.services.llm
+    memory = Memory(config.files.memory, write_rejections=config.memory.write_rejections)
+    memory.check_writable()  # once, at startup: an unwritable directory is one warning, not one per report
     if generator is None and llm is not None:
         generator = TextGenerator(build_backend(llm), budget, call_guard=narrative_guard(llm, coordinator))
     return Narrator(
         store,
         generator=generator,
         persona=PersonaFile(config.files.persona),
-        memory=Memory(config.files.memory),
+        memory=memory,
         tariff=tariff or TariffFile(config.files.tariff),
         tz=config.schedule.tz,
         clock=clock,

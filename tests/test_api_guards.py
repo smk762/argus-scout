@@ -277,6 +277,15 @@ def test_read_auth_closes_the_read_api(store, tmp_path, monkeypatch):
         assert client.get("/wall", headers=AUTH).status_code == 503  # fails closed
 
 
+def test_read_auth_takes_no_token_in_the_query_string(store, tmp_path):
+    # A kiosk can't send the header, but a URL token leaks into history, logs and Referer: docs/api.md says use
+    # read_auth: false on a trusted network, or a proxy that adds the header.
+    with scout_client(make_app(store, tmp_path, read_auth=True)) as client:
+        for query in (f"token={TOKEN}", f"access_token={TOKEN}", f"authorization=Bearer%20{TOKEN}"):
+            for path in READS:
+                assert client.get(f"{path}?{query}").status_code == 401, (path, query)
+
+
 def test_every_get_route_is_known(store, tmp_path):
     """A new read route must be added to READS (and so to the read_auth test) or to the always-open list."""
     app = make_app(store, tmp_path)

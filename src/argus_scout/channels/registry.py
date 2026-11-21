@@ -11,6 +11,12 @@ and a ``channels:`` entry of ``kind: matrix`` is validated by that class's ``con
 ``MatrixChannel(config)``. The built-in ``text`` and ``webhook`` are registered the same way, and are also
 known without entry points. A plugin can't take over a built-in kind.
 
+**Disabled entries are validated, never built.** An ``enabled: false`` entry is checked against its kind's
+``config_model`` like any other, so a typo in it still fails ``check config``, but its class is never constructed:
+a disabled ``snapcast`` or ``mask`` doesn't need its extra installed. It is listed in :attr:`Channels.disabled` and
+left out of :attr:`Channels.channels`, so the dispatcher never sees it. Config is read once at startup, so there is
+no enabling one at runtime: edit the file and restart.
+
 **Forgiving, per channel**, exactly like sources: a plugin that fails to import, an unknown kind, an entry its
 plugin rejects or a constructor that raises is an error for that one entry; the other channels still load.
 """
@@ -100,10 +106,12 @@ class BoundChannel:
 
 @dataclass
 class Channels:
-    """Every channel that loaded, and an error per entry that didn't (``name -> reason``)."""
+    """Every enabled channel that loaded, an error per entry that didn't (``name -> reason``), and the names of the
+    ``enabled: false`` entries (validated, not built)."""
 
     channels: list[BoundChannel] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
+    disabled: list[str] = field(default_factory=list)
 
     def get(self, name: str) -> BoundChannel | None:
         return next((c for c in self.channels if c.name == name), None)
@@ -157,7 +165,8 @@ def _format(exc: ValidationError) -> str:
 
 
 def build_channels(config: ScoutConfig, registry: Registry | None = None) -> Channels:
-    """Build a channel for every ``channels:`` entry. A bad entry is an error for that entry only."""
+    """Build a channel for every enabled ``channels:`` entry, and validate the disabled ones without building them.
+    A bad entry is an error for that entry only."""
     registry = registry or load_registry()
     built = Channels()
     for entry in config.channels:
@@ -184,6 +193,9 @@ def build_channels(config: ScoutConfig, registry: Registry | None = None) -> Cha
                 continue
         else:
             cfg = entry
+        if not getattr(cfg, "enabled", True):
+            built.disabled.append(entry.name)  # validated above; never constructed, so no extra is imported
+            continue
         try:
             channel = plugin(cfg)
         except Exception as exc:  # noqa: BLE001 — a constructor that fails disables that channel only

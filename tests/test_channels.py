@@ -780,3 +780,61 @@ def test_plain_speech():
     md = "# Morning\n\n- **Disk** is _90%_ full, see [ui](http://x)\n```\ncode\n```\n1. Two `cmd`"
     assert plain_speech(md) == "Morning Disk is 90% full, see ui Two cmd"
     assert Delivery.from_report(report(text="**Hi** there")).speakable == "Hi there"
+
+
+# --- disabled channels ---------------------------------------------------------------------------------------
+
+DISABLED_VOICE = [
+    {"kind": "snapcast", "name": "house", "enabled": False, "fifo": "/run/snapcast/scout.fifo"},
+    {
+        "kind": "mask",
+        "name": "face",
+        "enabled": False,
+        "url": "http://mask:8000",
+        "face": "f",
+        "transport": "websocket",
+    },
+    {"kind": "text", "name": "log"},
+]
+
+
+def _without_extras(monkeypatch):
+    for name in ("numpy", "websockets", "websockets.asyncio", "websockets.asyncio.client"):
+        monkeypatch.setitem(sys.modules, name, None)  # importing it now raises ImportError
+
+
+def test_a_disabled_channel_needs_no_extra_and_is_never_built(tmp_path, monkeypatch):
+    _without_extras(monkeypatch)
+    config = parse_config({"channels": DISABLED_VOICE}, tmp_path)
+    built = build_channels(config)
+    assert built.errors == {}
+    assert built.disabled == ["house", "face"]
+    assert [c.name for c in built.channels] == ["log"]  # the dispatcher only ever sees enabled channels
+    _, dispatcher = build_dispatcher(config, channels=built)
+    assert [c.name for c in dispatcher.channels] == ["log"]
+
+
+def test_a_disabled_channel_is_still_validated(tmp_path, monkeypatch):
+    _without_extras(monkeypatch)
+    bad = [{**DISABLED_VOICE[0], "fifo_typo": "x"}, {**DISABLED_VOICE[1], "url": "not a url"}]
+    built = build_channels(parse_config({"channels": bad}, tmp_path))
+    assert built.disabled == [] and built.channels == []
+    assert "unknown key" in built.errors["house"]
+    assert "url" in built.errors["face"]
+
+
+def test_check_config_passes_with_disabled_channels_and_no_extras(tmp_path, monkeypatch):
+    _without_extras(monkeypatch)
+    path = tmp_path / "scout.yaml"
+    path.write_text(json.dumps({"channels": DISABLED_VOICE}))
+    result = runner.invoke(app, ["check", "config", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "channel house: disabled" in result.output and "install argus-scout" not in result.output
+
+
+def test_deliver_to_a_disabled_channel_says_so(tmp_path, monkeypatch):
+    _without_extras(monkeypatch)
+    path = tmp_path / "scout.yaml"
+    path.write_text(json.dumps({"channels": DISABLED_VOICE}))
+    result = runner.invoke(app, ["deliver", "-c", str(path), "--latest", "--channel", "house"])
+    assert result.exit_code == 1 and "channel house is disabled" in result.output

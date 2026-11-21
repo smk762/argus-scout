@@ -15,7 +15,8 @@ handful of field and header names, argus-echo isn't published to PyPI, and echo'
 the contract, not code. The parts scout uses:
 
 - ``POST /synthesise/stream`` with a ``SynthesiseRequest`` body (``text``, ``voice_clone_id``, ``speaker``,
-  ``language``, and the Qwen-only ``voice_description``, ``instruction``, ``emotion``; an engine ignores the
+  ``language``, the Qwen-only ``voice_description``, ``instruction``, ``emotion``, and ``speed``, reserved and
+  applied by no engine yet; an engine ignores the
   fields it has no use for, and engine-specific extras pass through). It answers ``200`` with raw PCM whose
   layout is in the ``X-Sample-Rate``, ``X-Audio-Format`` (``pcm_f32le`` or ``pcm_s16le``) and ``X-Channels``
   headers, which are read rather than assumed. Scout streams instead of calling ``/synthesise`` because that
@@ -86,6 +87,10 @@ MAX_HEALTH_BYTES = 64 * 1024
 WARM_STATES = frozenset({"cpu", "gpu"})
 COLD_STATES = frozenset({"unloaded", "loading"})
 
+ECHO_VOICE_KEYS = ("voice_clone_id", "speaker", "voice_description", "instruction", "emotion", "speed")
+"""The optional shared request fields, sent when configured. With ``text`` and ``language`` they are every field of
+:data:`~argus_scout.config.ECHO_REQUEST_FIELDS`: a test fails if one is reserved there but has no key here."""
+
 Fetcher = Callable[..., Awaitable[Reply]]
 Readiness = Literal["warm", "cold"]
 
@@ -131,7 +136,7 @@ class StreamFormat:
 def build_request(cfg: EchoConfig, text: str) -> dict[str, Any]:
     """The ``SynthesiseRequest`` body for ``text``: the configured voice fields that are set, plus ``extra``."""
     body: dict[str, Any] = {**cfg.extra, "text": text, "language": cfg.language}
-    for key in ("voice_clone_id", "speaker", "voice_description", "instruction", "emotion"):
+    for key in ECHO_VOICE_KEYS:
         value = getattr(cfg, key)
         if value is not None:
             body[key] = value

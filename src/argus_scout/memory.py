@@ -1,9 +1,15 @@
 """Plain-file memory: a directory of markdown notes folded into briefings.
 
-``files.memory`` names a directory. The operator writes notes in it (``*.md``, one level, any names):
-preferences, standing facts, things to ignore. Scout **reads** those and never edits them. Scout writes one
-file of its own there, :data:`SCOUT_FILE`, a summary of recent rejections and their reasons, rewritten
-whenever a briefing is generated, so the operator can see what scout has been told not to raise again.
+``files.memory`` names a directory. The operator writes notes in it (``*.md``, one level): preferences,
+standing facts, things to ignore. Scout **reads** those and never edits them. Two kinds of ``*.md`` are not
+notes and never reach a prompt: ``README.md`` (any case), which is for people browsing the directory, and any
+name starting with ``_`` (drafts, templates, things set aside). See :func:`is_note`.
+
+Scout writes one file of its own there, :data:`SCOUT_FILE`, a summary of recent rejections and their reasons,
+rewritten whenever a briefing is generated, so the operator can see what scout has been told not to raise
+again. ``memory.write_rejections: false`` turns that off (a read-only mount); the reports still quote the
+rejections, which come from the store, not this file. If the directory can't be written (checked once at
+startup, and on the first write that is refused), scout logs one warning and stops trying.
 
 **Every path stays under the root.** :meth:`Memory.resolve` refuses an absolute name, any ``..`` part,
 and anything whose real path (after following symlinks) lands outside the root's real path, so a symlink
@@ -16,6 +22,7 @@ context windows. A note that can't be read is skipped and logged; it never stops
 
 from __future__ import annotations
 
+import errno
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -32,6 +39,22 @@ SCOUT_FILE = "scout-recent-rejections.md"
 MAX_NOTE_BYTES = 16 * 1024
 """A note larger than this is read only up to here."""
 MAX_NOTES = 50
+
+
+NOT_WRITABLE = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+"""Write errors that mean the directory can't be written at all: retrying each report would only log again."""
+
+
+def is_note(name: str) -> bool:
+    """Whether a ``*.md`` file in the memory directory is an operator note for the prompt: not ``README.md`` (any
+    case), not a name starting with ``_``, and not scout's own :data:`SCOUT_FILE`."""
+    return name.lower() != "readme.md" and not name.startswith("_") and name != SCOUT_FILE
+
+
+def _nearest_existing(path: Path) -> Path:
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return path
 
 
 class MemoryPathError(ValueError):
@@ -52,11 +75,31 @@ def render_rejection(rejection: Rejection) -> str:
 
 
 class Memory:
-    """The memory directory. ``root=None`` means no memory: no notes, nothing written."""
+    """The memory directory. ``root=None`` means no memory: no notes, nothing written.
 
-    def __init__(self, root: str | Path | None, *, max_chars: int = 2000) -> None:
+    ``write_rejections=False`` means :meth:`write_rejections` never writes. It also stops by itself, with one
+    warning, once the directory turns out not to be writable (:meth:`check_writable`, or a refused write)."""
+
+    def __init__(self, root: str | Path | None, *, max_chars: int = 2000, write_rejections: bool = True) -> None:
         self.root = Path(root).expanduser() if root else None
         self.max_chars = max_chars
+        self.writes = write_rejections and self.root is not None
+
+    def _stop_writing(self, error: str) -> None:
+        self.writes = False
+        log.warning("memory.not_writable", root=str(self.root), error=error, file=SCOUT_FILE,
+                    hint="scout won't try to write its rejections file again until restarted; "
+                    "set memory.write_rejections: false to silence this")  # fmt: skip
+
+    def check_writable(self) -> bool:
+        """Whether scout may write its file: probed once (at startup). A directory, or the nearest existing parent
+        it would be created in, that this process can't write turns writing off with one warning."""
+        if not self.writes or self.root is None:
+            return False
+        target = _nearest_existing(self.root)
+        if not os.access(target, os.W_OK | os.X_OK):
+            self._stop_writing(f"{target} is not writable")
+        return self.writes
 
     def resolve(self, name: str) -> Path:
         """The path of ``name`` inside the root, or :class:`MemoryPathError` if it would leave it."""
@@ -77,9 +120,7 @@ class Memory:
         if self.root is None or not self.root.is_dir():
             return []
         out: list[Note] = []
-        for entry in sorted(self.root.glob("*.md"))[: MAX_NOTES + 1]:
-            if entry.name == SCOUT_FILE:
-                continue
+        for entry in [e for e in sorted(self.root.glob("*.md")) if is_note(e.name)][:MAX_NOTES]:
             try:
                 path = self.resolve(entry.name)
                 if not path.is_file():
@@ -95,12 +136,24 @@ class Memory:
         return out[:MAX_NOTES]
 
     def write_rejections(self, rejections: Iterable[Rejection]) -> Path | None:
-        """Rewrite scout's own summary of recent rejections. Returns its path, or None with no root.
+        """Rewrite scout's own summary of recent rejections. Returns its path, or None when nothing was written: no
+        root, ``write_rejections`` off, or the directory not writable (the first refusal is logged, then writing
+        stops). Other errors raise.
 
         Atomic (temp file, then replace), and a symlink at the target is replaced, never written through.
         """
-        if self.root is None:
+        if self.root is None or not self.writes:
             return None
+        try:
+            return self._write(rejections)
+        except OSError as exc:
+            if exc.errno not in NOT_WRITABLE:
+                raise
+            self._stop_writing(str(exc))
+            return None
+
+    def _write(self, rejections: Iterable[Rejection]) -> Path:
+        assert self.root is not None
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.resolve(SCOUT_FILE)
         lines = [
@@ -122,4 +175,4 @@ class Memory:
         return path
 
 
-__all__ = ["MAX_NOTE_BYTES", "SCOUT_FILE", "Memory", "MemoryPathError", "Note", "render_rejection"]
+__all__ = ["MAX_NOTE_BYTES", "SCOUT_FILE", "Memory", "MemoryPathError", "Note", "is_note", "render_rejection"]

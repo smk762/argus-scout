@@ -152,14 +152,19 @@ def check_config(path: Path = ExistingFile) -> None:
         typer.echo("memory: not configured, no notes")
     elif memory.is_dir():
         typer.echo(f"memory: {len(Memory(memory).notes())} notes in {memory}")
-    else:
+    elif config.memory.write_rejections:
         typer.echo(f"memory: {memory} does not exist yet; scout creates it for its rejections summary")
+    else:
+        typer.echo(f"memory: {memory} does not exist; no notes")
     for name, reason in build_sources(config).errors.items():
         typer.echo(f"source {name}: error: {reason}", err=True)
         failed = True
-    for name, reason in build_channels(config).errors.items():
+    channels = build_channels(config)
+    for name, reason in channels.errors.items():
         typer.echo(f"channel {name}: error: {reason}", err=True)
         failed = True
+    for name in channels.disabled:
+        typer.echo(f"channel {name}: disabled (validated, not started)")
     for name in config.secret_env_names():
         typer.echo(f"secret {name}: {'set' if resolve_secret(name) else 'unset'}")
     summary = _config_summary(config)
@@ -400,6 +405,10 @@ def deliver(
         channels, dispatcher = build_dispatcher(config, store=store, budget=budget_from_config(config, counter=store))
         for name, reason in channels.errors.items():
             typer.echo(f"channel {name}: error: {reason}", err=True)
+        off = [name for name in channel or [] if name in channels.disabled]
+        if off:
+            typer.echo(f"error: channel {', '.join(off)} is disabled (enabled: false)", err=True)
+            raise typer.Exit(1)
         unknown = [name for name in channel or [] if channels.get(name) is None]
         if unknown:
             typer.echo(f"error: no channel named {', '.join(unknown)}", err=True)

@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from argus_scout.events import SUMMARY_MAX, StatusEvent
+from argus_scout.events import SPEECH_MAX, SUMMARY_MAX, StatusEvent
 from argus_scout.inbox import Inbox, InvalidEvent, Outcome, parse_envelope
 from argus_scout.severity import Severity
 from argus_scout.store import SqliteStore
@@ -164,3 +164,33 @@ def test_parse_envelope_coerces():
     assert event.generated_at == datetime(1970, 1, 1, tzinfo=UTC)
     assert event.event_id.startswith("ci:")
     assert parse_envelope({"summary": "s"}, default_source="ci", default_event_id="fixed").event_id == "fixed"
+
+
+# --- speech: the spoken form of an event ---------------------------------------------------------------------
+
+
+def test_speech_is_cleaned_capped_and_kept_apart_from_speakable(inbox):
+    event = parse_envelope(env(speech="The disk\x1b[31m is\x00 nearly‮\n full.  "))
+    assert event.speech == "The disk [31m is nearly full."  # control and format characters gone, one line
+    assert event.speakable is True and event.spoken == "The disk [31m is nearly full."
+    long = parse_envelope(env(speech="word " * 400)).speech
+    assert len(long) <= SPEECH_MAX and long.endswith("word")  # cut at a word
+    assert parse_envelope(env(speech=" \x07 ")).speech is None and parse_envelope(env()).speech is None
+    assert parse_envelope(env()).spoken == "Disk 3 is 91% full"  # no speech: the summary
+    quiet = parse_envelope(env(speech="Shh", speakable=False))
+    assert quiet.speech == "Shh" and quiet.speakable is False  # speakable still decides whether it is spoken
+    with pytest.raises(InvalidEvent, match="speech: expected text, got bool"):
+        parse_envelope(env(speech=True))
+
+
+def test_speech_is_not_identity(inbox):
+    # Presentation, not content: rewording what is said aloud is neither a new event nor an update.
+    first = parse_envelope(env(speech="Disk three is nearly full"))
+    assert first.fingerprint == parse_envelope(env()).fingerprint == parse_envelope(env(speech="Other")).fingerprint
+    inbox.ingest(env(speech="Disk three is nearly full"))
+    again = inbox.ingest(env(speech="Disk three is almost full"))
+    assert again.outcome is Outcome.REFRESHED
+    [stored] = inbox.open()
+    assert stored.speech == "Disk three is almost full"  # the latest wording is what gets said
+    assert StatusEvent.from_dict(stored.to_dict()).speech == stored.speech  # survives the store's round trip
+    assert inbox.ingest(env("disk-2", speech="Another phrasing")).outcome is Outcome.DUPLICATE
