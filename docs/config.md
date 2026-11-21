@@ -381,7 +381,7 @@ Daily usage caps (see `argus_scout.budget`). `limits` maps a kind to calls per d
 | Key | Type | Default | Constraints | Description |
 |---|---|---|---|---|
 | `limits` | map of text to integer | `{}` | each value >= 0 | Kind -> calls per day. Scout charges `llm_calls` (each report's model call), `tts` (each speech synthesis) and `speak` (each spoken message). Counts live in the store and reset at midnight in `schedule.timezone`. |
-| `block_manual` | boolean | `false` |  | Refuse over-cap work done while serving an HTTP request too. Off: such work goes through and is logged. Scheduled jobs and the CLI are always held to the caps. |
+| `block_manual` | boolean | `false` |  | Refuse over-cap work done while serving an HTTP request too. Off: such work goes through and is logged. Scheduled jobs, the CLI and reports written or delivered over HTTP are always held to the caps. |
 
 ```yaml
 budget:

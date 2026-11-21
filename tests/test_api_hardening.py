@@ -28,7 +28,7 @@ from argus_scout.sources import BoundSource, SourceError, Sources, build_sources
 from argus_scout.store import SqliteStore, StaleRecommendation
 
 REBOUND = "http://evil.example:8400"
-PARAMS = {"source": "hook", "event_id": "e1", "rec_id": "r1"}
+PARAMS = {"source": "hook", "event_id": "e1", "rec_id": "r1", "report_id": "1"}
 
 
 @pytest.fixture(autouse=True)

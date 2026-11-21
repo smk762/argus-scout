@@ -24,7 +24,11 @@ These are the seams later phases fill in. The structure is already the real one:
   evaluated against the :class:`~argus_scout.tariff.TariffFile` and merged in; no tariff skips just them.
 - :class:`BriefingJob` generates, stores and hands to :func:`deliver` one scheduled report (``morning``,
   ``evening`` or ``status``). With no model, or the model down or over its cap, the report comes from the
-  template: a briefing is never skipped.
+  template: a briefing is never skipped. It writes through :class:`Briefings`, the one path a report written
+  on request (``POST /api/reports``) takes too, so both get the same narrator, caps, GPU lease and template
+  fallback, and **one report of a kind is written at a time**: a scheduled job waits for an on-request report
+  of its kind to finish, and an on-request report is refused (:class:`ReportBusy`) while one of its kind is
+  being written.
 
 Every stored report goes to the ``deliver`` callable :func:`register_jobs` is given: the server passes
 :func:`argus_scout.server.app.deliver_reports`, which sends it through the channels. The module-level
@@ -33,6 +37,7 @@ Every stored report goes to the ``deliver`` callable :func:`register_jobs` is gi
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -42,7 +47,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from argus_scout.approvals import StandingApprovals
-from argus_scout.budget import DailyBudget
+from argus_scout.budget import DailyBudget, reset_manual, set_manual
 from argus_scout.channels.dispatcher import Dispatcher
 from argus_scout.channels.redeliver import JOB_NAME as REDELIVER_JOB
 from argus_scout.channels.redeliver import RedeliveryJob
@@ -64,7 +69,9 @@ log = structlog.get_logger()
 
 DEFAULT_POLL_INTERVAL = 60.0
 
-Deliver = Callable[[Report], Awaitable[None]]
+Deliver = Callable[[Report], Awaitable[object]]
+"""Hands a stored report to the channels; whatever it returns (the server's: the dispatch report) is passed back
+by :meth:`Briefings.write`."""
 
 
 async def deliver(report: Report) -> None:
@@ -254,9 +261,73 @@ class AnalysisCycle:
         return report
 
 
+class ReportBusy(Exception):
+    """A report of this kind is being written right now (scheduled or on request); nothing was written."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"a {kind} report is being written right now; try again when it is done")
+        self.kind = kind
+
+
+@dataclass
+class Written:
+    """What :meth:`Briefings.write` did: the stored report, and what ``deliver`` returned (None if not delivered)."""
+
+    report: Report
+    delivered: bool = False
+    delivery: object = None
+
+
+class Briefings:
+    """The one path a briefing is written by, scheduled (:class:`BriefingJob`) or on request (``POST /api/reports``).
+
+    :meth:`write` has the narrator compose and store the report (the model, charged to its daily cap and under its
+    GPU lease, or the template when the model can't), then hands it to ``deliver``. One report of a kind is written
+    at a time, so two can't race for the model or go out twice: ``wait=True`` (the scheduler) queues behind one in
+    progress; ``wait=False`` (a request) raises :class:`ReportBusy` instead of holding the caller for a model call.
+
+    **Held to the daily caps, whoever asked.** :meth:`write` runs as background work for the budget even while
+    serving an HTTP request (which otherwise counts as manual and may go over a cap): an endpoint anyone with the
+    token can call in a loop is what the caps are for. Over ``llm_calls`` the report comes from the template; over
+    the speech caps, voice is held back. ``budget.block_manual`` doesn't change this."""
+
+    def __init__(self, narrator: Narrator, *, deliver: Deliver | None = None) -> None:
+        self.narrator = narrator
+        self.deliver: Deliver = deliver or _NO_DELIVERY
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._pending: Counter[str] = Counter()
+
+    def busy(self, kind: str) -> bool:
+        """Whether a report of ``kind`` is being written or waiting to be."""
+        return self._pending[kind] > 0
+
+    async def write(
+        self, kind: str, *, use_llm: bool = True, trigger: str = "scheduled", deliver: bool = True, wait: bool = True
+    ) -> Written:
+        if not wait and self.busy(kind):
+            raise ReportBusy(kind)
+        lock = self._locks.setdefault(kind, asyncio.Lock())
+        self._pending[kind] += 1  # before any await, so the check above and this are one step on the loop
+        manual = set_manual(False)
+        try:
+            async with lock:
+                report = await self.narrator.report(kind, use_llm=use_llm, trigger=trigger)
+                log.info(
+                    "briefing.stored", kind=kind, report_id=report.id, path=report.meta.get("path"), trigger=trigger
+                )
+                if not deliver:
+                    return Written(report)
+                return Written(report, delivered=True, delivery=await self.deliver(report))
+        finally:
+            reset_manual(manual)
+            self._pending[kind] -= 1
+
+
 class BriefingJob:
-    """A scheduled briefing of one ``kind``: write it (model, or template when the model can't), store it, and
-    hand it to :func:`deliver`. With no narrator it only records the run."""
+    """A scheduled briefing of one ``kind``: written through :class:`Briefings` (model, or template when the model
+    can't), stored, and handed to :func:`deliver`. With no narrator it only records the run. ``briefings`` is the
+    runtime's shared writer (so on-request reports and this job don't overlap); without one, a private writer is
+    made from ``narrator`` and ``deliver``."""
 
     def __init__(
         self,
@@ -265,12 +336,14 @@ class BriefingJob:
         *,
         narrator: Narrator | None = None,
         deliver: Deliver | None = None,
+        briefings: Briefings | None = None,
         clock: Clock = utc_now,
     ) -> None:
         self.kind = kind
         self.store = store
-        self.narrator = narrator
-        self.deliver: Deliver = deliver or _NO_DELIVERY
+        if briefings is None and narrator is not None:
+            briefings = Briefings(narrator, deliver=deliver)
+        self.briefings = briefings
         self.clock = clock
         self.runs: list[datetime] = []
         self.last: Report | None = None
@@ -279,12 +352,11 @@ class BriefingJob:
         at = self.clock()
         self.runs.append(at)
         log.info("briefing.due", kind=self.kind, at=at.isoformat())
-        if self.narrator is None:
+        if self.briefings is None:
             return None
-        report = self.last = await self.narrator.report(self.kind)
-        log.info("briefing.stored", kind=self.kind, report_id=report.id, path=report.meta.get("path"))
-        await self.deliver(report)
-        return report
+        written = await self.briefings.write(self.kind, trigger="scheduled", wait=True)
+        self.last = written.report
+        return written.report
 
 
 class PollJob:
@@ -339,7 +411,8 @@ def register_jobs(
     narrator: Narrator | None = None,
     deliver: Deliver | None = None,
     dispatcher: Dispatcher | None = None,
-) -> None:
+    briefings: Briefings | None = None,
+) -> Briefings:
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source, and with a
     ``dispatcher``, the redelivery sweep (:class:`~argus_scout.channels.redeliver.RedeliveryJob`).
 
@@ -350,13 +423,19 @@ def register_jobs(
     is the runtime's :class:`TariffFile` (one is made from ``files.tariff`` if not given), shared by the
     analysis cycle and the narrative. ``narrator`` overrides the one built from the config (its model calls
     are charged to ``budget``). ``deliver`` is handed every stored report (default: :func:`deliver`, a no-op).
+    ``briefings`` is the shared report writer (its narrator and ``deliver`` then win); one is made if not given.
+    Returns it, so on-request reports go through the same writer as the scheduled ones.
     """
     schedule = config.schedule
     clock = scheduler.clock
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
     tariff = tariff if tariff is not None else TariffFile(config.files.tariff)
+    if briefings is not None:
+        narrator, deliver = briefings.narrator, briefings.deliver
     narrator = narrator or build_narrator(config, store, budget, tariff=tariff, clock=clock)
+    if briefings is None:
+        briefings = Briefings(narrator, deliver=deliver)
     status = StatusCycle(
         store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock, narrator=narrator, deliver=deliver
     )
@@ -375,7 +454,7 @@ def register_jobs(
     scheduler.add("analysis", analysis, Every(schedule.analysis_interval))
     for briefing in schedule.briefings:
         name = f"briefing:{briefing.kind}@{briefing.at}"
-        job = BriefingJob(briefing.kind, store, narrator=narrator, deliver=deliver, clock=clock)
+        job = BriefingJob(briefing.kind, store, briefings=briefings, clock=clock)
         scheduler.add(name, job, DailyAt(briefing.at_time, schedule.tz))
     for source in sources.polling:
         poll = PollJob(source, inbox)
@@ -383,6 +462,18 @@ def register_jobs(
     if dispatcher is not None:
         redeliver = RedeliveryJob(store, dispatcher, config.delivery, clock=clock)
         scheduler.add(REDELIVER_JOB, redeliver, Every(config.delivery.retry_interval))
+    return briefings
 
 
-__all__ = ["AnalysisCycle", "BriefingJob", "PollJob", "StatusCycle", "StatusResult", "deliver", "register_jobs"]
+__all__ = [
+    "AnalysisCycle",
+    "BriefingJob",
+    "Briefings",
+    "PollJob",
+    "ReportBusy",
+    "StatusCycle",
+    "StatusResult",
+    "Written",
+    "deliver",
+    "register_jobs",
+]

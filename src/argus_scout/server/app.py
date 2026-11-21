@@ -25,7 +25,7 @@ import argus_scout
 from argus_scout.budget import USAGE_STATE_FILE, DailyBudget, ManualOriginMiddleware, budget_from_config
 from argus_scout.channels import Channels, Delivery, Dispatcher, DispatchReport, Synthesiser, build_dispatcher
 from argus_scout.config import ScoutConfig
-from argus_scout.cycles import register_jobs
+from argus_scout.cycles import Briefings, register_jobs
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.inbox import Inbox
 from argus_scout.prometheus import PrometheusClient
@@ -55,6 +55,8 @@ class Runtime:
     sources: Sources = field(default_factory=Sources)
     channels: Channels = field(default_factory=Channels)
     dispatcher: Dispatcher = field(default_factory=lambda: Dispatcher([]))
+    briefings: Briefings | None = None
+    """The report writer the briefing jobs share; ``POST /api/reports`` writes through it too."""
 
     async def deliver(self, report: Report, *, force: bool = False) -> DispatchReport:
         """Send a stored report to every channel that should get it. The scheduler's briefing and status jobs
@@ -64,14 +66,14 @@ class Runtime:
         return await self.dispatcher.deliver(Delivery.from_report(report), force=force)
 
 
-def deliver_reports(dispatcher: Dispatcher) -> Callable[[Report], Awaitable[None]]:
-    """The ``deliver`` callable the cycles take: a report out through ``dispatcher``. A failing channel is
-    logged, counted and recorded by the dispatcher; it never fails the job that wrote the report."""
+def deliver_reports(dispatcher: Dispatcher) -> Callable[[Report], Awaitable[DispatchReport | None]]:
+    """The ``deliver`` callable the cycles take: a report out through ``dispatcher``, returning what it did. A
+    failing channel is logged, counted and recorded by the dispatcher; it never fails the job that wrote the report."""
 
-    async def deliver(report: Report) -> None:
+    async def deliver(report: Report) -> DispatchReport | None:
         if not report.id:  # a dry run's report was never stored: nothing to deliver or record
-            return
-        await dispatcher.deliver(Delivery.from_report(report))
+            return None
+        return await dispatcher.deliver(Delivery.from_report(report))
 
     return deliver
 
@@ -107,7 +109,7 @@ def build_runtime(
         budget=budget,
         clock=clock,
     )
-    register_jobs(
+    briefings = register_jobs(
         scheduler,
         config,
         store,
@@ -136,6 +138,7 @@ def build_runtime(
         sources=sources,
         channels=channels,
         dispatcher=dispatcher,
+        briefings=briefings,
     )
 
 

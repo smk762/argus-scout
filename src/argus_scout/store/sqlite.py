@@ -730,6 +730,10 @@ class SqliteStore:
         params.append(int(limit))
         return [self._report_from_row(r) for r in self._query(sql, params)]
 
+    def get_report(self, report_id: int) -> Report | None:
+        rows = self._query("SELECT * FROM reports WHERE id = ?", [int(report_id)])
+        return self._report_from_row(rows[0]) if rows else None
+
     # -- delivery records -------------------------------------------------------------
     @staticmethod
     def _delivery_from_row(row: sqlite3.Row) -> DeliveryRecord:
