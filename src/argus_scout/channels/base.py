@@ -168,6 +168,10 @@ class SpeechAudio:
     text: str = ""
     """What was said."""
     voice: str | None = None
+    cloned: bool = False
+    """The voice is a clone (possibly of a real person), not a synthetic one. A channel that can't disclose that to
+    its audience refuses such audio unless its config allows it (``mask``: ``allow_cloned_voice``). A synthesiser
+    that can't tell sets it whenever it asked for a clone."""
 
 
 DeliveryStatus = Literal["sent", "failed", "duplicate", "filtered", "disabled", "suppressed", "skipped"]
@@ -195,7 +199,7 @@ class DeliveryResult:
     channel: str = ""
     status: DeliveryStatus | None = None
     permanent: bool = False
-    """A failure retrying can't fix (see :class:`ChannelError`); the redelivery sweep leaves it alone."""
+    """A failure (or a skip) retrying can't fix (see :class:`ChannelError`); the redelivery sweep leaves it alone."""
 
 
 @runtime_checkable

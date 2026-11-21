@@ -33,7 +33,14 @@ the model, and a lease held here as well would block it (see :mod:`argus_scout.l
 
 **Failures** raise :class:`~argus_scout.channels.base.SynthesisError`, which the dispatcher records against
 every voice channel in play while text goes out regardless; ``permanent`` is set only for a refusal that
-retrying can't fix. Speech comes back as 16-bit PCM (converted from float32 when the engine sends that), raw
+retrying can't fix.
+
+**Cloned voices.** Echo's contract carries no clone flag (not in ``/health``, the stream headers or the
+``/synthesise`` reply), so scout decides from its own request: speech made with a ``voice_clone_id`` is
+``SpeechAudio(cloned=True)``. A built-in ``speaker`` or a designed ``voice_description`` is synthetic. Channels
+that can't disclose a clone to their audience (``mask``) refuse cloned audio unless configured to allow it.
+
+Speech comes back as 16-bit PCM (converted from float32 when the engine sends that), raw
 or in a WAV container, and is capped at ``max_seconds``. Echo has no speaker of its own, so there is no
 ``echo`` voice channel: Snapcast and argus-mask channels play what this returns.
 """
@@ -283,6 +290,7 @@ class EchoSynthesiser:
             channels=fmt.channels,
             text=text,
             voice=cfg.voice_clone_id or cfg.speaker,
+            cloned=cfg.voice_clone_id is not None,
         )
 
 

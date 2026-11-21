@@ -70,6 +70,7 @@ sources:
   #   face: <FACE_ID>
   #   wait_ready: 0
   #   token_env: SCOUT_MASK_TOKEN    # optional: for a proxy in front of mask
+  #   allow_cloned_voice: false      # refuse cloned-voice speech: /push can't disclose it to viewers
   #
   # Any other kind comes from an installed plugin (entry-point group argus_scout.sources),
   # which validates its own keys. Try a poll without writing anything:

@@ -93,6 +93,10 @@ How scout uses echo's contracts:
   channel and text channels are unaffected. A `4xx` other than 408 or 429 (a bad voice, say) is permanent.
   Anything else is retried by the redelivery sweep.
 
+Echo's contract has no flag saying a voice is a clone, so scout decides from its own request: speech made with
+a `voice_clone_id` is marked as cloned, and the `mask` channel refuses it unless `allow_cloned_voice` is set
+(see `mask` below).
+
 Echo has no speaker of its own, so there is no `echo` channel. Voice channels such as Snapcast and argus-mask
 play the audio.
 
@@ -240,7 +244,11 @@ WAV or raw PCM. Channel counts are converted (mono is copied to every channel, a
 sample rate is converted by linear interpolation, which is plenty for speech.
 
 A voice channel may answer **skipped** when its device isn't ready, such as no screen watching an argus-mask face.
-A skipped delivery is not a failure and isn't recorded, so a later delivery of the same message tries again.
+A skipped delivery is not a failure and isn't recorded, so a later delivery of the same message (the CLI, say)
+tries again. The redelivery sweep never retries a skip on its own: a skip doesn't count toward `max_attempts`, and a
+channel that only ever skipped has no failure to repair. If a channel failed first and then skipped on a retry,
+the sweep keeps trying it under the usual limits, and never speaks it once the report is older than
+`speak_max_age`.
 
 ## `snapcast`
 
@@ -313,6 +321,7 @@ watching it. It uses mask's published agent contract over HTTP.
 | `seed` | `0` | The idle layer's seed |
 | `token_env` | unset | Env var holding a bearer token, for a reverse proxy in front of mask. If it is set in the config but missing from the environment, nothing is sent. |
 | `timeout` | `120` | Seconds the whole delivery may take. Mask answers a push when the speech ends. |
+| `allow_cloned_voice` | `false` | Push speech in a cloned voice. Off by default: see below. |
 
 **Readiness** comes from `GET /health`. The face is ready when the driver is available, the server isn't
 read-only, no other source is speaking through the face (`live`), and at least one screen watching it reports
@@ -326,8 +335,19 @@ refuse with a 409 if the screen went away after the readiness check, and scout r
 never goes to a face no one can hear. Mask caps a push at 25 MB, about 9 minutes of 24 kHz mono speech.
 
 argus-mask has no authentication of its own. Reaching its port is access, so keep it on a trusted network or behind
-a proxy (`token_env`). Mask takes its own GPU lease (argus-iris) for the stream, and scout takes none. `/push`
-carries no consent-disclosure flag, so use a synthetic voice for this channel.
+a proxy (`token_env`). Mask takes its own GPU lease (argus-iris) for the stream, and scout takes none.
+
+**Cloned voices are refused by default.** argus-echo can speak in a cloned voice (`services.echo.voice_clone_id`),
+which may be a real person's. argus-mask records consent and shows a disclosure label for voices made through
+its own Voices page, but `/push` has no way to carry that label, so a face fed a clone over HTTP would speak in
+someone's voice with nothing telling the viewer. Speech synthesised with a `voice_clone_id` is marked as cloned,
+and the `mask` channel **skips** it (permanently, so it's never retried) with a reason saying why, before
+contacting mask at all. Set `allow_cloned_voice: true` only for a clone whose owner consented and whose disclosure
+your viewers get some other way. Built-in speakers and Qwen's designed voices aren't clones.
+
+The `snapcast` channel plays cloned voices: it is audio-only house playback that you configured for your own
+speakers, and there's no face presenting the voice as a person. If that matters in your house, use a synthetic
+`speaker` for scout.
 
 To play the same speech in the house and on the face, configure both channels and open the face's viewer with
 `audio=external`. Scout synthesises once and both channels get the same audio.

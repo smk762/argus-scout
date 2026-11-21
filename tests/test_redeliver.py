@@ -162,6 +162,48 @@ async def test_speak_max_age_zero_never_respeaks(store):
     assert result.stale_voice == [("report:1", "speaker")] and speaker.played == []
 
 
+class Screen(Speaker):
+    """A voice channel like argus-mask: ``skipped`` while no screen is ready."""
+
+    def __init__(self):
+        super().__init__()
+        self.ready = False
+        self.attempts = 0
+
+    async def play(self, audio, message):
+        self.attempts += 1
+        if not self.ready:
+            return DeliveryResult(ok=True, status="skipped", detail="not ready: no screen")
+        return await super().play(audio, message)
+
+
+async def test_skips_do_not_count_toward_max_attempts_and_are_never_spoken_late(store):
+    screen = Screen()
+    disp, job, clock = setup(store, [("face", screen)], synth=Synth(fails=1), max_attempts=2, speak_max_age=600)
+    report = first(store, clock)
+    await disp.deliver(Delivery.from_report(report))  # synthesis fails: one recorded failure
+    for _ in range(3):  # fresh: retried each sweep, but the screen skips, which writes nothing
+        clock.advance(minutes=2)
+        result = await job()
+        assert [r.get("face").status for r in result.reports] == ["skipped"]
+    assert screen.attempts == 3
+    [row] = store.list_deliveries("report:1")
+    assert not row.ok  # still one failure: three skips didn't use up max_attempts=2
+    clock.advance(minutes=5)  # 11 minutes old, and now a screen is ready
+    screen.ready = True
+    result = await job()
+    assert result.stale_voice == [("report:1", "face")] and screen.attempts == 3 and screen.played == []
+
+
+async def test_a_channel_that_only_skipped_is_not_retried(store):
+    screen = Screen()
+    disp, job, clock = setup(store, [("face", screen)])
+    await disp.deliver(Delivery.from_report(first(store, clock)))
+    assert store.list_deliveries("report:1") == []
+    clock.advance(minutes=2)
+    assert (await job()).reports == [] and screen.attempts == 1
+
+
 async def test_permanent_failures_are_not_retried(store):
     refused = Flaky(fails=1, permanent=True)
     disp, job, clock = setup(store, [("refused", refused)])

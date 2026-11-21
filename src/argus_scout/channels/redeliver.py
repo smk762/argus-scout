@@ -15,6 +15,10 @@ sends each such report again, **to the failed channels only**, through the same
   a retry during quiet hours is held back like any other delivery.
 - **Only what failed.** A channel the report was never tried on (filtered, held back by the voice gate, added to
   the config later, or one that no longer exists) is left alone: the sweep repairs failures, it doesn't backfill.
+- **Skips aren't failures.** A voice channel that answers ``skipped`` (an argus-mask face with no ready screen, or
+  a cloned voice it refuses) writes no row, so a skip never counts toward ``max_attempts``, and a channel that only
+  ever skipped is never retried. One that failed first keeps being retried under the same limits, ``speak_max_age``
+  included, whatever it answers in between.
 
 Reports only: an inbox item is re-announced by the status cycle on its own schedule.
 """

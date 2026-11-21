@@ -6,6 +6,7 @@ import array
 import functools
 import io
 import json
+import math
 import sys
 import wave
 from datetime import UTC, datetime
@@ -300,3 +301,104 @@ def test_echo_config_and_the_echo_url_break():
     with pytest.raises(ConfigError, match="format"):
         parse_config({"services": {"echo": {"url": "http://echo:8000", "format": "mp3"}}})
     assert parse_config({"services": {"echo": {"url": "http://echo:8000", "extra": None}}}).services.echo.extra == {}
+
+
+# --- what voice channels receive -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", ["pcm_s16le", "wav"])
+async def test_echo_output_feeds_the_snapcast_and_mask_conversion(fmt):
+    """Whatever echo sends (float32 here), the audio scout hands on is a format channels/audio.py decodes."""
+    pytest.importorskip("numpy")
+    from argus_scout.channels.audio import SUPPORTED_FORMATS, SampleFormat, decode, encode
+    from argus_scout.channels.audio import to_s16le as audio_to_s16le
+
+    samples = [math.sin(i / 10) * 0.5 for i in range(2400)]  # 0.1 s at 24 kHz
+    cfg = EchoConfig(url="http://echo:8000", format=fmt)
+    audio = await synth(Echo(body=f32(*samples)), cfg).synthesise("hi", message())
+    assert audio.format in SUPPORTED_FORMATS
+    pcm = decode(audio)
+    assert (pcm.sample_rate, pcm.channels, pcm.frames) == (24000, 1, 2400)
+    assert abs(float(pcm.samples[10, 0]) - samples[10]) < 1e-3
+    snap = encode(pcm, SampleFormat(48000, 16, 2))  # Snapcast's default stream format
+    assert len(snap) == 4800 * 2 * 2
+    assert len(audio_to_s16le(pcm)) == 2400 * 2  # what the mask channel pushes
+
+
+async def test_speech_from_a_clone_is_marked_cloned():
+    cloned = await synth(Echo()).synthesise("hi", message())
+    assert cloned.cloned and cloned.voice == "narrator"
+    builtin_cfg = EchoConfig(url="http://echo:8000", speaker="Claribel Dervla")
+    designed_cfg = EchoConfig(url="http://echo:8000", voice_description="warm, low")
+    assert not (await synth(Echo(), builtin_cfg).synthesise("hi", message())).cloned
+    assert not (await synth(Echo(), designed_cfg).synthesise("hi", message())).cloned
+
+
+def mask_health():
+    return {
+        "driver": {"available": True},
+        "read_only": False,
+        "live": [],
+        "screens": {"holly": [{"display": "flat", "audio_ready": True}]},
+        "aliases": {},
+    }
+
+
+class FakeMask:
+    def __init__(self):
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request):
+        self.requests.append(request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json=mask_health())
+        return httpx.Response(200, json={"session_id": "s", "frames": 3, "duration_ms": 100})
+
+    @property
+    def fetcher(self):
+        return functools.partial(afetch, transport=httpx.MockTransport(self.handler), resolve=lambda h, p: ["10.0.0.5"])
+
+
+def mask(fake, **kw):
+    pytest.importorskip("numpy")
+    from argus_scout.channels.mask import MaskChannel, MaskConfig
+
+    cfg = MaskConfig(kind="mask", name="face", url="http://mask:8000", face="holly", **kw)
+    return MaskChannel(cfg, environ={}, fetcher=fake.fetcher)
+
+
+async def test_mask_refuses_a_cloned_voice_unless_allowed():
+    """A cloned voice is never pushed to a face without disclosure: /push can't carry mask's disclosure label."""
+    audio = await synth(Echo()).synthesise("hi", message())
+    fake = FakeMask()
+    refused = await mask(fake).play(audio, message())
+    assert refused.ok and refused.status == "skipped" and refused.permanent
+    assert "cloned voice" in refused.detail and "allow_cloned_voice" in refused.detail
+    assert fake.requests == []  # mask is never even asked
+
+    allowed = FakeMask()
+    result = await mask(allowed, allow_cloned_voice=True).play(audio, message())
+    assert result.ok and result.status is None
+    assert [r.url.path for r in allowed.requests] == ["/health", "/push"]
+
+    synthetic_cfg = EchoConfig(url="http://echo:8000", speaker="0")
+    synthetic = await synth(Echo(), synthetic_cfg).synthesise("hi", message())
+    plain = FakeMask()
+    assert (await mask(plain).play(synthetic, message())).status is None
+    assert len(plain.requests) == 2
+
+
+async def test_a_refused_clone_is_reported_not_recorded_and_never_retried():
+    from argus_scout.channels import RedeliveryJob
+    from argus_scout.config import DeliveryConfig
+
+    store = SqliteStore(":memory:")
+    report = store.add_report("morning", T0, "All quiet.")
+    face = mask(FakeMask())
+    disp = Dispatcher(
+        [BoundChannel(face, face.config)], synthesiser=synth(Echo()), gates=OpenGates(), store=store, clock=lambda: T0
+    )
+    result = await disp.deliver(Delivery.from_report(report))
+    assert result.get("face").status == "skipped" and result.ok
+    assert store.list_deliveries(f"report:{report.id}") == []
+    assert (await RedeliveryJob(store, disp, DeliveryConfig(), clock=lambda: T0)()).reports == []
