@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 import structlog
@@ -128,6 +128,25 @@ class StandingRule:
             raise ValueError("scope 'until' needs expires_at")
         return rule
 
+    @classmethod
+    def from_record(cls, raw: dict[str, Any]) -> StandingRule:
+        """The inverse of :meth:`to_dict`, for rules read back from a store (any origin)."""
+        origin = raw.get("origin")
+        return cls(
+            rule_id=str(raw["rule_id"]),
+            scope=raw.get("scope") or "analyzer",
+            analyzer=str(raw.get("analyzer") or "*"),
+            title_pattern=raw.get("title_pattern") or None,
+            title_exact=raw.get("title_exact") or None,
+            action_pattern=raw.get("action_pattern") or None,
+            max_impact=_level(raw.get("max_impact"), "low", ("low", "medium")),
+            min_confidence=_level(raw.get("min_confidence"), "medium", ("low", "medium", "high")),
+            expires_at=parse_dt(raw.get("expires_at")),
+            origin=origin if origin in ("file", "api") else "api",
+            note=str(raw.get("note") or ""),
+            created_at=parse_dt(raw.get("created_at")) or datetime.now(UTC),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "rule_id": self.rule_id,
@@ -160,15 +179,33 @@ def load_rules(path: str | Path) -> tuple[list[StandingRule], list[str]]:
     return rules, errors
 
 
-class StandingApprovals:
-    """File rules (reloaded on change) plus rules added at runtime."""
+class RuntimeRuleStore(Protocol):
+    """Where runtime rules persist (see :class:`argus_scout.store.Store`)."""
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    def load_runtime_rules(self) -> list[StandingRule]: ...
+
+    def save_runtime_rule(self, rule: StandingRule) -> None: ...
+
+    def delete_runtime_rule(self, rule_id: str) -> bool: ...
+
+
+class StandingApprovals:
+    """File rules (reloaded on change) plus rules added at runtime.
+
+    With a ``store``, runtime rules are loaded from it on construction and
+    written through on :meth:`add_from` / :meth:`remove`, so they survive a
+    restart. File rules always come from the YAML file and are never stored.
+    """
+
+    def __init__(self, path: str | Path | None = None, *, store: RuntimeRuleStore | None = None) -> None:
         self.path = str(path) if path else ""
         self._file_rules: dict[str, StandingRule] = {}
         self._file_mtime: float | None = None
         self._api_rules: dict[str, StandingRule] = {}
         self.match_counts: dict[str, int] = {}
+        self.store = store
+        if store is not None:
+            self._api_rules = {r.rule_id: r for r in store.load_runtime_rules()}
 
     def _reload(self) -> None:
         if not self.path:
@@ -201,7 +238,10 @@ class StandingApprovals:
 
     def remove(self, rule_id: str) -> bool:
         """Remove a runtime rule. File rules are removed by editing the file."""
-        return self._api_rules.pop(rule_id, None) is not None
+        removed = self._api_rules.pop(rule_id, None) is not None
+        if removed and self.store is not None:
+            self.store.delete_runtime_rule(rule_id)
+        return removed
 
     def add_from(
         self,
@@ -237,6 +277,8 @@ class StandingApprovals:
             origin="api",
             note=f"from recommendation {rec.id}",
         )
+        if self.store is not None:
+            self.store.save_runtime_rule(rule)
         self._api_rules[rule.rule_id] = rule
         log.info("standing_approval.rule_added", **rule.to_dict())
         return rule
@@ -284,6 +326,7 @@ def briefing_lines(recs: Iterable[Recommendation], hours: int = 24, now: datetim
 
 
 __all__ = [
+    "RuntimeRuleStore",
     "Scope",
     "StandingApprovals",
     "StandingRule",
