@@ -146,7 +146,7 @@ def test_app_lifespan_runs_the_scheduler(tmp_path):
     with TestClient(create_app(config, sources=Sources())) as client:
         assert client.get("/health").json()["status"] == "ok"
         runtime = client.app.state.runtime
-        assert set(runtime.scheduler.jobs) == {"status", "analysis"}
+        assert set(runtime.scheduler.jobs) == {"status", "analysis", "redeliver"}
     with SqliteStore(tmp_path / "scout.db") as s:
         runs = {r.name: r.run_count for r in s.list_job_runs()}
     assert runs.get("status", 0) >= 1  # the status cycle ran at start-up, through the real loop

@@ -8,6 +8,7 @@
       face: <FACE_ID>                 # a face id or alias it serves
       wait_ready: 0                   # seconds to wait for a screen that can be heard; 0: skip at once
       token_env: SCOUT_MASK_TOKEN     # optional: a bearer token for a proxy in front of mask
+      allow_cloned_voice: false       # refuse speech in a cloned voice: /push cannot disclose it
 
 argus-mask's agent contract (its README, "Agent clients: HTTP push and speak") is used as published:
 
@@ -25,8 +26,12 @@ argus-mask's agent contract (its README, "Agent clients: HTTP push and speak") i
 
 argus-mask has no authentication of its own (reaching its port is access, and its origin guard lets a client
 that sends no ``Origin`` through). ``token_env`` is for a reverse proxy that adds one. Mask takes its own GPU
-lease (argus-iris) for the stream; scout holds none. ``/push`` carries no consent disclosure flag, so use a
-synthetic voice for this channel, or one whose disclosure mask applies itself.
+lease (argus-iris) for the stream; scout holds none.
+
+**Cloned voices are refused by default.** ``/push`` carries no consent or disclosure flag, so a face fed a
+clone would speak in a possibly real person's voice with nothing telling the viewer. Speech marked
+``SpeechAudio.cloned`` (argus-echo with a ``voice_clone_id``) is skipped, permanently and with a reason, unless
+the channel sets ``allow_cloned_voice: true``. Nothing is fetched or pushed for it.
 
 Fetching goes through ``argus_cortex.net.afetch`` with only the configured host allowed and no redirects.
 Needs the ``mask`` extra (numpy, to normalise the audio): ``pip install argus-scout[mask]``.
@@ -80,6 +85,15 @@ class MaskConfig(ChannelSettings):
     token_env: EnvName | None = None
     """Env var holding a bearer token, for a proxy in front of mask. Unset: no Authorization header."""
     timeout: float = Field(default=120.0, gt=0, le=600)
+    allow_cloned_voice: bool = False
+    """Push speech in a cloned voice (``SpeechAudio.cloned``) to this face. Off by default: ``/push`` can't set
+    mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure."""
+
+
+CLONED_REFUSAL = (
+    "refused: the speech is in a cloned voice and argus-mask's /push cannot carry a disclosure; "
+    "set allow_cloned_voice: true on this channel only if the clone is consented and disclosed some other way"
+)
 
 
 def face_keys(face: str, aliases: dict[str, str]) -> set[str]:
@@ -186,6 +200,9 @@ class MaskChannel:
 
     async def play(self, audio: SpeechAudio, message: Delivery) -> DeliveryResult:
         cfg = self.config
+        if audio.cloned and not cfg.allow_cloned_voice:
+            log.warning("channel.mask.cloned_voice_refused", channel=cfg.name, face=cfg.face, voice=audio.voice)
+            return DeliveryResult(ok=True, status="skipped", permanent=True, detail=CLONED_REFUSAL)
         pcm = decode(audio)
         body = to_s16le(pcm)
         if len(body) > MAX_PUSH_BYTES:
@@ -218,4 +235,4 @@ class MaskChannel:
         return DeliveryResult(ok=True, detail=f"face {cfg.face} spoke {spoken} ({why})")
 
 
-__all__ = ["MaskChannel", "MaskConfig", "face_keys", "readiness"]
+__all__ = ["CLONED_REFUSAL", "MaskChannel", "MaskConfig", "face_keys", "readiness"]

@@ -92,6 +92,18 @@ class DeliveryRecord:
     report_id: int | None = None
     event_source: str | None = None
     event_id: str | None = None
+    permanent: bool = False
+    """A failure the channel refused for good: the redelivery sweep never retries it."""
+
+
+@dataclass
+class PendingDelivery:
+    """A report a channel has failed to take, and may be tried on again (see ``Store.undelivered_reports``)."""
+
+    report: Report
+    channel: str
+    failures: int
+    last_at: datetime
 
 
 @dataclass
@@ -204,9 +216,15 @@ class Store(Protocol):
         report_id: int | None = None,
         event_source: str | None = None,
         event_id: str | None = None,
+        permanent: bool = False,
     ) -> bool:
         """Record an attempt. A second successful record for the same ``(delivery_key, channel)`` is
-        ignored and returns False."""
+        ignored and returns False. ``permanent`` marks a failure that is never retried."""
+        ...
+
+    def undelivered_reports(self, since: datetime, *, max_failures: int) -> list[PendingDelivery]:
+        """Reports written since ``since`` that a channel failed to take: no success on it, no permanent refusal,
+        fewer than ``max_failures`` failed attempts. Oldest first."""
         ...
 
     def delivered_channels(self, delivery_key: str) -> set[str]: ...
@@ -253,6 +271,7 @@ __all__ = [
     "IllegalTransition",
     "InboxEntry",
     "JobRun",
+    "PendingDelivery",
     "Report",
     "StaleRecommendation",
     "Store",

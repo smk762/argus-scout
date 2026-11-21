@@ -463,12 +463,79 @@ class LLMConfig(_Section):
         return self
 
 
+ECHO_REQUEST_FIELDS = frozenset(
+    {"text", "voice_clone_id", "speaker", "language", "voice_description", "instruction", "emotion", "speed"}
+)
+"""argus-echo's shared ``SynthesiseRequest`` fields (``argus_echo.contract``)."""
+
+
+class EchoConfig(_Section):
+    """argus-echo, the speech server voice channels play from. See :mod:`argus_scout.channels.echo`.
+
+    The voice keys are argus-echo's shared request fields, sent as they are: ``voice_clone_id`` (a stored clone;
+    wins over ``speaker``), ``speaker`` (a built-in speaker), ``language``, and the Qwen3-TTS-only
+    ``instruction``, ``voice_description`` and ``emotion`` (other engines ignore them). ``extra`` passes
+    engine-specific fields through (Miso's ``temperature``, ``topk``). Scout never holds a GPU lease around a
+    synthesis: echo takes its own.
+    """
+
+    url: HttpUrl
+    """The engine's root, e.g. ``http://echo:8000``: scout calls ``/health`` and ``/synthesise/stream`` under it."""
+    voice_clone_id: str | None = None
+    speaker: str | None = None
+    language: str = "en"
+    instruction: str | None = None
+    voice_description: str | None = None
+    emotion: str | None = None
+    extra: Annotated[dict[str, Any], NullAsEmptyDict] = Field(default_factory=dict)
+    """Engine-specific request fields, passed through (Miso: ``temperature``, ``topk``)."""
+    format: Literal["pcm_s16le", "wav"] = "pcm_s16le"
+    """The audio handed to voice channels: raw 16-bit little-endian PCM, or the same in a WAV container."""
+    timeout: float = Field(default=60.0, gt=0, le=600, description="Seconds one synthesis may take, model warm.")
+    load_timeout: float = Field(
+        default=180.0, gt=0, le=1800, description="Seconds one synthesis may take when the model has to load first."
+    )
+    health_timeout: float = Field(default=5.0, gt=0, le=60, description="Seconds the readiness check may take.")
+    max_seconds: float = Field(default=300.0, gt=0, le=3600, description="The longest speech accepted, in seconds.")
+
+    @field_validator("extra")
+    @classmethod
+    def _no_shadowing(cls, value: dict[str, Any]) -> dict[str, Any]:
+        shadowed = sorted(set(value) & ECHO_REQUEST_FIELDS)
+        if shadowed:
+            raise ValueError(f"set {', '.join(shadowed)} as its own key, not under extra")
+        return value
+
+
 class ServicesConfig(_Section):
     """Services scout talks to. All optional; a missing one turns off what depends on it."""
 
     prometheus_url: HttpUrl | None = None
     llm: LLMConfig | None = None
-    echo_url: HttpUrl | None = None
+    echo: EchoConfig | None = None
+    """argus-echo for speech. Unset: nothing is synthesised, so voice channels stay silent; text still goes out."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _moved_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "echo_url" in data:
+            raise ValueError("echo_url was replaced by echo: {url: ...} (see docs/channels.md)")
+        return data
+
+
+class DeliveryConfig(_Section):
+    """The redelivery sweep (:mod:`argus_scout.channels.redeliver`): a report a channel failed to take is tried
+    again on an interval, until it succeeds, the channel refuses it permanently, or the report is too old."""
+
+    retry_interval: float = Field(default=300.0, gt=0, description="Seconds between redelivery sweeps.")
+    retry_max_age: float = Field(
+        default=6 * 3600.0, gt=0, description="Seconds after a report was written that it is still retried."
+    )
+    max_attempts: int = Field(default=5, ge=1, le=100, description="Failed attempts per channel before giving up.")
+    speak_max_age: float = Field(
+        default=600.0, ge=0, description="Seconds after a report was written that a retry may still speak it."
+    )
+    """Older than this, a retry goes to text channels only: late speech is worse than none. ``0``: never re-speak."""
 
 
 class BudgetConfig(_Section):
@@ -508,6 +575,7 @@ class ScoutConfig(_Section):
     schedule: Annotated[ScheduleConfig, NullAsEmptyDict] = ScheduleConfig()
     services: Annotated[ServicesConfig, NullAsEmptyDict] = ServicesConfig()
     budget: Annotated[BudgetConfig, NullAsEmptyDict] = BudgetConfig()
+    delivery: Annotated[DeliveryConfig, NullAsEmptyDict] = DeliveryConfig()
     server: Annotated[ServerConfig, NullAsEmptyDict] = ServerConfig()
 
     _base_dir: Path | None = PrivateAttr(default=None)

@@ -19,9 +19,19 @@ from argus_scout.channels.base import (
     NullSynthesiser,
     SpeechAudio,
     Synthesiser,
+    SynthesisError,
     VoiceChannel,
 )
-from argus_scout.channels.dispatcher import Dispatcher, DispatchReport, Gates, HeartbeatGates, OpenGates
+from argus_scout.channels.dispatcher import (
+    SYNTHESIS_TIMEOUT_S,
+    Dispatcher,
+    DispatchReport,
+    Gates,
+    HeartbeatGates,
+    OpenGates,
+)
+from argus_scout.channels.echo import EchoSynthesiser
+from argus_scout.channels.redeliver import RedeliveryJob, SweepResult
 from argus_scout.channels.registry import (
     ENTRY_POINT_GROUP,
     BoundChannel,
@@ -47,11 +57,24 @@ def build_dispatcher(
     clock: Clock = utc_now,
 ) -> tuple[Channels, Dispatcher]:
     """The channels a config names and a :class:`Dispatcher` over the ones that loaded, gated by the
-    heartbeat policy (``policy_file``, else the one ``files.heartbeat`` names) in the schedule's timezone."""
+    heartbeat policy (``policy_file``, else the one ``files.heartbeat`` names) in the schedule's timezone.
+
+    Speech comes from ``synthesiser`` if given, else from argus-echo (:class:`EchoSynthesiser`) when
+    ``services.echo`` is set, else from nowhere (:class:`NullSynthesiser`: voice channels stay silent)."""
     channels = channels if channels is not None else build_channels(config)
     gates = HeartbeatGates(policy_file or PolicyFile(config.files.heartbeat), tz=config.schedule.tz)
+    timeout = SYNTHESIS_TIMEOUT_S
+    if synthesiser is None and config.services.echo is not None:
+        echo = EchoSynthesiser(config.services.echo)
+        synthesiser, timeout = echo, max(timeout, echo.max_duration)
     dispatcher = Dispatcher(
-        channels.channels, synthesiser=synthesiser, gates=gates, store=store, budget=budget, clock=clock
+        channels.channels,
+        synthesiser=synthesiser or NullSynthesiser(),
+        gates=gates,
+        store=store,
+        budget=budget,
+        clock=clock,
+        synthesis_timeout=timeout,
     )
     return channels, dispatcher
 
@@ -68,12 +91,16 @@ __all__ = [
     "DeliveryResult",
     "DispatchReport",
     "Dispatcher",
+    "EchoSynthesiser",
     "Gates",
     "HeartbeatGates",
     "NullSynthesiser",
     "OpenGates",
+    "RedeliveryJob",
     "Registry",
     "SpeechAudio",
+    "SweepResult",
+    "SynthesisError",
     "Synthesiser",
     "VoiceChannel",
     "build_channels",

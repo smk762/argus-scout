@@ -70,6 +70,7 @@ sources:
   #   face: <FACE_ID>
   #   wait_ready: 0
   #   token_env: SCOUT_MASK_TOKEN    # optional: for a proxy in front of mask
+  #   allow_cloned_voice: false      # refuse cloned-voice speech: /push can't disclose it to viewers
   #
   # Any other kind comes from an installed plugin (entry-point group argus_scout.sources),
   # which validates its own keys. Try a poll without writing anything:
@@ -91,7 +92,7 @@ channels:
     # keep: 3                   # rotated files to keep
   #
   # POST JSON (schema argus-scout.delivery, see docs/channels.md) to one URL; only
-  # that host is allowed. Retries a connection error, 429 or 5xx with backoff.
+  # that host is allowed. Retries a connection error, 408, 429 or 5xx with backoff.
   # - kind: webhook
   #   name: chat
   #   url: https://<HOOK_HOST>/scout
@@ -134,7 +135,18 @@ services:
   #     model_mb: 5200                       # the part that stays loaded in the model server
   #     priority: background                 # briefings can wait; no grant in time means the template
   #     # target: vllm:<MODEL>               # required for openai: the broker service serving the model
-  # echo_url: http://<TTS_HOST>:8034
+  # argus-echo, for speech on voice channels (Snapcast, argus-mask ...). Leave it out and voice
+  # channels stay silent; text still goes out. Scout synthesises once per message and never holds
+  # a GPU lease for it: echo takes its own. (echo_url was replaced by this block.)
+  # echo:
+  #   url: http://echo:8000                  # an engine's root: Miso, XTTS-v2 or Qwen3-TTS
+  #   voice_clone_id: <CLONE_ID>             # a stored clone; or speaker: <SPEAKER> (a built-in one)
+  #   language: en
+  #   format: pcm_s16le                      # what voice channels get: pcm_s16le or wav
+  #   timeout: 60                            # seconds per synthesis with the model loaded
+  #   load_timeout: 180                      # ... when echo has to load the model first
+  #   max_seconds: 300                       # the longest speech accepted
+  #   extra: {}                              # engine-specific fields, e.g. {temperature: 0.7} for Miso
 
 # Daily usage caps: a ceiling in case a loop misbehaves. 0 or a missing kind is unlimited.
 # Counts reset at local midnight and are kept in the store, shared by the server and the CLI.
@@ -142,6 +154,13 @@ budget:
   limits:
     llm_calls: 48                 # model calls for reports (briefings and status updates)
   block_manual: false             # true: refuse over-cap work started by a person too
+
+# The redelivery sweep: a report a channel failed to take is sent to that channel again.
+delivery:
+  retry_interval: 300             # seconds between sweeps
+  retry_max_age: 21600            # stop retrying a report this many seconds after it was written
+  max_attempts: 5                 # failed attempts per channel before giving up (a 4xx refusal: no retry)
+  speak_max_age: 600              # older than this, a retry is text only: late speech is worse than none
 
 server:
   host: 127.0.0.1                 # reads have no auth unless read_auth: keep scout on loopback

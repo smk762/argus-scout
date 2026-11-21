@@ -40,12 +40,88 @@ Check the file with `argus-scout check config scout.yaml`. Re-send the newest re
   the channels that already have it. `--force` sends again.
 - **Concurrently and in isolation.** Every channel runs at the same time under its own timeout. A channel that
   fails, hangs or raises is logged, counted (`scout_deliveries_total{channel,result}` on `/metrics`) and
-  recorded as a failure. The other channels are unaffected, and the next delivery of that message tries the
-  failed channel again.
+  recorded as a failure. The other channels are unaffected, and the redelivery sweep (below) tries the failed
+  channel again later.
 - **Voice follows the heartbeat policy.** Voice channels are a separate plugin kind. Scout synthesises speech
   once per message and gives the same audio to every voice channel. During rest hours nothing is spoken. During
   quiet hours only critical and `quiet_exempt` messages are spoken. A report is kept off the speakers when
   `sources.scout.channel` in the heartbeat file is `text`. Text channels are never held back by these rules.
+
+## Speech: argus-echo
+
+Voice channels play speech that scout gets from [argus-echo](https://github.com/smk762/argus-echo). Configure
+it under `services`; without it, voice channels stay silent and text still goes out.
+
+```yaml
+services:
+  echo:
+    url: http://echo:8000          # an engine's root: Miso, XTTS-v2 or Qwen3-TTS (same contract)
+    voice_clone_id: <CLONE_ID>     # a stored clone; or speaker: <SPEAKER> for a built-in one
+    language: en
+    format: pcm_s16le              # what voice channels receive: pcm_s16le or wav
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `url` | required | The engine's root URL. Only that host and port are contacted. |
+| `voice_clone_id` | unset | A clone stored on that engine (clones are engine-specific). Wins over `speaker`. |
+| `speaker` | unset | A built-in speaker (`GET /speakers` on the engine). Neither: the engine's default voice. |
+| `language` | `en` | ISO code. Miso speaks English only. |
+| `instruction`, `voice_description`, `emotion` | unset | Qwen3-TTS only; other engines ignore them |
+| `extra` | `{}` | Engine-specific request fields, passed through (Miso: `temperature`, `topk`) |
+| `format` | `pcm_s16le` | The audio voice channels receive: raw 16-bit little-endian PCM, or the same in a WAV container |
+| `timeout` | `60` | Seconds one synthesis may take with the model loaded |
+| `load_timeout` | `180` | Seconds one synthesis may take when echo has to load the model first |
+| `health_timeout` | `5` | Seconds the readiness check may take |
+| `max_seconds` | `300` | The longest speech accepted; the response is capped to match |
+
+**Breaking change:** `services.echo_url` was replaced by `services.echo.url`. A config that still has
+`echo_url` is refused with a message saying so.
+
+How scout uses echo's contracts:
+
+- **Readiness (resident contract).** Before each synthesis scout reads `GET /health` (argus-cortex's
+  `ResidentHealth`). An engine that doesn't answer, or reports `model_state: error`, fails in seconds. One that
+  is `unloaded` or `loading` (or answers `503` while loading) gets `load_timeout`, because echo loads its model
+  on first use. Scout never calls `/admin/*`: placing models on GPUs is argus-iris's job.
+- **Synthesis (shared HTTP contract).** One `POST /synthesise/stream` per message, with the voice fields above.
+  The PCM layout is read from the `X-Sample-Rate`, `X-Audio-Format` and `X-Channels` headers, not assumed, and
+  float32 is converted to 16-bit. A stream that ends mid-frame (the engine failed while speaking) is a failure.
+- **Once per message.** The same audio goes to every voice channel, so three speakers cost one synthesis.
+- **No GPU lease.** Scout never holds a GPU lease around synthesis. Echo takes its own.
+- **Failures.** If echo is down, busy (`503`) or refuses the request, the failure is recorded on every voice
+  channel and text channels are unaffected. A `4xx` other than 408 or 429 (a bad voice, say) is permanent.
+  Anything else is retried by the redelivery sweep.
+
+Echo's contract has no flag saying a voice is a clone, so scout decides from its own request: speech made with
+a `voice_clone_id` is marked as cloned, and the `mask` channel refuses it unless `allow_cloned_voice` is set
+(see `mask` below).
+
+Echo has no speaker of its own, so there is no `echo` channel. Voice channels such as Snapcast and argus-mask
+play the audio.
+
+## Redelivery
+
+A failed delivery is retried later by the `redeliver` job:
+
+```yaml
+delivery:
+  retry_interval: 300      # seconds between sweeps
+  retry_max_age: 21600     # stop retrying a report this many seconds after it was written
+  max_attempts: 5          # failed attempts per channel before giving up
+  speak_max_age: 600       # older than this, a retry goes to text channels only
+```
+
+- Only **reports** are retried, and only on the channels that **failed**. A channel the report was never tried
+  on (filtered, held back by quiet hours, or added to the config later) isn't backfilled.
+- A webhook's own retries count as one attempt. After `max_attempts` failed attempts, or once the report is older
+  than `retry_max_age`, the sweep gives up on that channel.
+- A **permanent** failure is never retried: a `4xx` other than 408 or 429 from a webhook or from echo.
+- **No late speech.** A report older than `speak_max_age` is retried on text channels only, because a briefing
+  spoken an hour late is worse than none. `0` means a retry is never spoken. A voice retry still passes the
+  heartbeat gates, so quiet hours hold it back like any other delivery.
+- A retry goes through the same idempotency as every delivery. A success writes exactly one `ok` row, and a channel
+  that already has the message isn't sent it again.
 
 ## `text`
 
@@ -84,7 +160,7 @@ redirect is never followed.
 | `url` | required | `http(s)://` URL |
 | `token_env` | unset | Env var holding a token, sent as `Authorization: Bearer <token>` |
 | `secret_env` | unset | Env var holding an HMAC-SHA256 key, used for `X-Scout-Signature` |
-| `retries` | `2` | Retries after a connection error, a 429 or a 5xx. Other 4xx responses and redirects are final. |
+| `retries` | `2` | Retries after a connection error, a 408, a 429 or a 5xx. Redirects are final. Any other 4xx is final and **permanent**: the redelivery sweep won't retry it either. |
 | `backoff` | `1.0` | Seconds before the first retry. It doubles each time, up to 60. |
 
 If `token_env` or `secret_env` names a variable that isn't set, nothing is sent and the delivery is recorded as a
@@ -168,7 +244,11 @@ WAV or raw PCM. Channel counts are converted (mono is copied to every channel, a
 sample rate is converted by linear interpolation, which is plenty for speech.
 
 A voice channel may answer **skipped** when its device isn't ready, such as no screen watching an argus-mask face.
-A skipped delivery is not a failure and isn't recorded, so a later delivery of the same message tries again.
+A skipped delivery is not a failure and isn't recorded, so a later delivery of the same message (the CLI, say)
+tries again. The redelivery sweep never retries a skip on its own: a skip doesn't count toward `max_attempts`, and a
+channel that only ever skipped has no failure to repair. If a channel failed first and then skipped on a retry,
+the sweep keeps trying it under the usual limits, and never speaks it once the report is older than
+`speak_max_age`.
 
 ## `snapcast`
 
@@ -241,6 +321,7 @@ watching it. It uses mask's published agent contract over HTTP.
 | `seed` | `0` | The idle layer's seed |
 | `token_env` | unset | Env var holding a bearer token, for a reverse proxy in front of mask. If it is set in the config but missing from the environment, nothing is sent. |
 | `timeout` | `120` | Seconds the whole delivery may take. Mask answers a push when the speech ends. |
+| `allow_cloned_voice` | `false` | Push speech in a cloned voice. Off by default: see below. |
 
 **Readiness** comes from `GET /health`. The face is ready when the driver is available, the server isn't
 read-only, no other source is speaking through the face (`live`), and at least one screen watching it reports
@@ -254,8 +335,19 @@ refuse with a 409 if the screen went away after the readiness check, and scout r
 never goes to a face no one can hear. Mask caps a push at 25 MB, about 9 minutes of 24 kHz mono speech.
 
 argus-mask has no authentication of its own. Reaching its port is access, so keep it on a trusted network or behind
-a proxy (`token_env`). Mask takes its own GPU lease (argus-iris) for the stream, and scout takes none. `/push`
-carries no consent-disclosure flag, so use a synthetic voice for this channel.
+a proxy (`token_env`). Mask takes its own GPU lease (argus-iris) for the stream, and scout takes none.
+
+**Cloned voices are refused by default.** argus-echo can speak in a cloned voice (`services.echo.voice_clone_id`),
+which may be a real person's. argus-mask records consent and shows a disclosure label for voices made through
+its own Voices page, but `/push` has no way to carry that label, so a face fed a clone over HTTP would speak in
+someone's voice with nothing telling the viewer. Speech synthesised with a `voice_clone_id` is marked as cloned,
+and the `mask` channel **skips** it (permanently, so it's never retried) with a reason saying why, before
+contacting mask at all. Set `allow_cloned_voice: true` only for a clone whose owner consented and whose disclosure
+your viewers get some other way. Built-in speakers and Qwen's designed voices aren't clones.
+
+The `snapcast` channel plays cloned voices: it is audio-only house playback that you configured for your own
+speakers, and there's no face presenting the voice as a person. If that matters in your house, use a synthetic
+`speaker` for scout.
 
 To play the same speech in the house and on the face, configure both channels and open the face's viewer with
 `audio=external`. Scout synthesises once and both channels get the same audio.
