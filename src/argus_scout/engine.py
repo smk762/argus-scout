@@ -4,9 +4,12 @@ One :meth:`RecommendationEngine.run_cycle` per analysis cycle. For each hit (see
 :mod:`argus_scout.signals`), keyed by its dedup key (rule + ``labels_key`` values):
 
 - **Dedup.** An open recommendation (draft, proposed or approved) with the same key is *refreshed*:
-  its evidence, ``last_seen_at`` and ``expires_at`` move on, its severity is raised (never lowered), and
-  a proposal's text is re-rendered. An approved one keeps the wording that was approved. Nothing is
-  ever duplicated.
+  its evidence, ``last_seen_at`` and ``expires_at`` move on, its severity is raised (never lowered), its
+  ``peak`` (the most severe reading) is kept, and a proposal's text is re-rendered. The text states the
+  current reading and the threshold of the step that set its (possibly held) severity, with "(peaked at …)"
+  when the severity is held above the current reading (see "Escalation wording" in
+  :mod:`argus_scout.signals`), and the evidence line says the severity was held. An approved one keeps the
+  wording that was approved. Nothing is ever duplicated.
 - **Rejection memory.** If there's no open one, but a person rejected this key before, the hit is
   *suppressed*, unless its severity is above the severity that was rejected (an escalation is new
   news), or the rule sets a ``rejection_ttl`` and that long has passed since the rejection. Without a
@@ -45,7 +48,7 @@ import structlog
 from argus_scout.approvals import StandingApprovals, guardrail_block
 from argus_scout.recommendations import Recommendation, Status
 from argus_scout.severity import Severity, rank
-from argus_scout.signals import Evaluation, SignalHit
+from argus_scout.signals import Evaluation, SignalHit, further
 from argus_scout.store.base import Store, StoreConflict
 
 log = structlog.get_logger()
@@ -221,15 +224,32 @@ class RecommendationEngine:
 
     def _refresh(self, rec: Recommendation, hit: SignalHit, now: datetime) -> bool:
         loaded = rec.status
+        held = rank(rec.severity) > rank(hit.severity)
+        if held and rec.peak is None:
+            peak = None  # raised before scout kept a peak: it isn't known, so don't invent one
+        elif rec.peak is None or further(hit.op, hit.value, rec.peak):
+            peak = hit.value
+        else:
+            peak = rec.peak
         if rec.status in (Status.DRAFT, Status.PROPOSED):
-            rec.title, rec.action, rec.rationale = hit.title, hit.action, hit.rationale
-            rec.impact, rec.confidence = hit.impact, hit.confidence
+            texts = None
+            if hit.rerender is not None and peak is not None and (held or peak != hit.value):
+                texts = hit.rerender(rec.severity, peak)
+            rec.title = texts.title if texts else hit.title
+            rec.action = texts.action if texts else hit.action
+            rec.rationale = texts.rationale if texts else hit.rationale
+            rec.impact = texts.impact if texts else hit.impact
+            rec.confidence = hit.confidence
         if rank(hit.severity) > rank(rec.severity):
             if rec.status == Status.APPROVED:  # a person approved it at the lower severity: keep it, say so
                 note = f"severity raised from {rec.severity.value} to {hit.severity.value} after approval"
                 rec.evidence = [*rec.evidence, f"{note} on {now:%Y-%m-%d %H:%M}Z"]
             rec.severity = hit.severity
-        rec.evidence = [*rec.evidence, hit.evidence][-MAX_EVIDENCE:]
+        evidence = hit.evidence
+        if held:
+            evidence += f"; severity held at {rec.severity.value}" + (f" (peak {peak:g})" if peak is not None else "")
+        rec.peak = peak
+        rec.evidence = [*rec.evidence, evidence][-MAX_EVIDENCE:]
         rec.last_seen_at = now
         rec.expires_at = self._expires_at(hit, now)
         rec.updated_at = now
@@ -269,6 +289,7 @@ class RecommendationEngine:
             updated_at=now,
             last_seen_at=now,
             expires_at=self._expires_at(hit, now),
+            peak=hit.value,
         )
         self.store.save_recommendation(rec, by=ENGINE, expected_status=None)
         rec.transition(Status.PROPOSED, now=now)

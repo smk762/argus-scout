@@ -86,6 +86,9 @@ class Recommendation:
     # The store's write counter for this row, bumped on every save (0 until first saved). A person's decision names
     # the revision they viewed, and the store refuses it if the row has changed since.
     revision: int = 0
+    # The most severe reading of the signal behind it while it has been open (see "Escalation wording" in
+    # :mod:`argus_scout.signals`). None when not raised from a signal, or saved before scout kept it.
+    peak: float | None = None
 
     def transition(self, new_status: Status, *, now: datetime | None = None) -> bool:
         """Move to ``new_status`` if the lifecycle allows it. Returns whether it moved."""
@@ -143,6 +146,7 @@ class Recommendation:
             last_seen_at=parse_dt(raw.get("last_seen_at")),
             retired_reason=str(raw.get("retired_reason") or ""),
             revision=int(raw.get("revision") or 0),
+            peak=_float_or_none(raw.get("peak")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -168,4 +172,12 @@ class Recommendation:
             "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
             "retired_reason": self.retired_reason,
             "revision": self.revision,
+            "peak": self.peak,
         }
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None or isinstance(value, bool) else float(value)
+    except (TypeError, ValueError):
+        return None

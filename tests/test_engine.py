@@ -367,3 +367,59 @@ async def test_analysis_cycle_degrades_without_config_or_with_a_broken_file(stor
     assert await AnalysisCycle(store, clock=clock)() is None
     broken = SignalRulesFile(write_file("signals.yaml", "rules: ["))
     assert await AnalysisCycle(store, rules=broken, client=FakeProm([]), clock=clock)() is None
+
+
+# --- escalation wording ---------------------------------------------------------------------------------------
+
+
+def test_held_severity_and_wording_agree_after_escalation(engine, store, clock):
+    """A cpu-hot proposal escalated to critical at 91°C and refreshed at 78°C keeps critical, and says so: the
+    current value, the peak, and the escalation step's threshold, never "[critical] ... 78°C ... above 75°C"."""
+    from argus_scout.signals import SignalRule, make_hit
+
+    rule = SignalRule.model_validate(
+        {
+            "name": "cpu-hot",
+            "query": "cpu_temp_celsius",
+            "op": ">=",
+            "threshold": 75,
+            "escalate": [{"threshold": 85, "severity": "critical"}],
+            "recommendation": {
+                "title": "CPU on {instance} at {value:.0f}°C",
+                "action": "Check the cooling on {instance}.",
+                "rationale": "At or above {threshold:.0f}°C.",
+            },
+        }
+    )
+
+    def reading(value: float):
+        return make_hit(rule, Sample({"instance": "host-a"}, value, T0), T0)
+
+    [rec] = engine.run_cycle(ran(reading(80.0), rules=("cpu-hot",))).new
+    assert rec.severity == Severity.WARNING and rec.peak == 80.0 and rec.rationale == "At or above 75°C."
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(reading(91.0), rules=("cpu-hot",))).refreshed
+    assert rec.severity == Severity.CRITICAL and rec.peak == 91.0
+    assert rec.title == "CPU on host-a at 91°C" and rec.rationale == "At or above 85°C."
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(reading(78.0), rules=("cpu-hot",))).refreshed
+    assert rec.severity == Severity.CRITICAL and rec.peak == 91.0  # never lowered while open
+    assert rec.title == "CPU on host-a at 78°C (peaked at 91°C)"
+    assert rec.rationale == "At or above 85°C."
+    assert rec.evidence[-1].endswith("; severity held at critical (peak 91)")
+    stored = store.get_recommendation(rec.id)
+    assert stored.peak == 91.0 and stored.title == rec.title
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(reading(88.0), rules=("cpu-hot",))).refreshed
+    assert rec.title == "CPU on host-a at 88°C" and rec.peak == 91.0  # critical on its own again: no suffix
+
+
+def test_a_held_severity_without_a_known_peak_keeps_the_plain_wording(engine, store, clock):
+    """A recommendation raised before scout kept a peak doesn't get one invented."""
+    [rec] = engine.run_cycle(ran(hit(value=97.0, severity=Severity.CRITICAL))).new
+    rec.peak = None
+    store.save_recommendation(rec, by="test")
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(hit(value=90.0))).refreshed
+    assert rec.severity == Severity.CRITICAL and rec.peak is None
+    assert rec.title == "/data on node-a:9100 is 90% full" and rec.evidence[-1].endswith("severity held at critical")

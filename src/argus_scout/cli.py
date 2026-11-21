@@ -212,7 +212,7 @@ def tariff_now(path: Path = ExistingFile) -> None:
     period = current_period(tariff, now)
     name, seconds = next_period_change(tariff, now)
     hours, minutes = divmod(seconds // 60, 60)
-    typer.echo(f"{period.name}: {period.rate:g} per {tariff.unit} ({tariff.currency} minor units)")
+    typer.echo(f"{period.name}: {tariff.format_rate(period.rate)}")
     typer.echo(f"next: {name} in {hours}h{minutes:02d}m")
 
 

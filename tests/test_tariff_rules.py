@@ -233,7 +233,7 @@ async def test_shift_fires_in_an_expensive_period_with_a_cheaper_one_ahead(tarif
     assert hit.title == "Run batch-jobs after 21:00 (off_peak)"
     assert hit.action == "Wait 5h for off_peak."
     # 500 W for 2h = 1 kWh; (48 - 22) minor units per kWh = 26 = 0.26 in major units.
-    assert hit.rationale == "1.00 kWh at 48 not 22 saves 0.26 USD (500 W)."
+    assert hit.rationale == "1.00 kWh at 48 c/kWh not 22 c/kWh saves 0.26 USD (500 W)."
     assert result.evaluated == {"shift-jobs"} and not result.unknown
 
 

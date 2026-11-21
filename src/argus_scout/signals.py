@@ -39,7 +39,18 @@ or index access, no ``!r``/``!s`` conversion, and the only format spec is a prec
 (``{value:.1f}``, ``{value:.0%}``). A template that breaks those rules makes its rule invalid at load
 time. A label missing from a sample renders as ``?``.
 
-Reserved placeholders: ``value``, ``threshold``, ``op``, ``rule``, ``severity``, ``for``.
+Reserved placeholders: ``value``, ``threshold``, ``peak``, ``op``, ``rule``, ``severity``, ``for``.
+
+**Escalation wording.** A recommendation's severity is raised, never lowered, while it is open (see
+:mod:`argus_scout.engine`), so its severity can come from an earlier, worse reading than the current one. Its
+text follows one rule: **it states the current reading, and the threshold of the step that set its severity.**
+``{value}`` is the current reading; ``{severity}`` the recommendation's severity; ``{threshold}`` the threshold
+of the step (the base ``threshold`` or an ``escalate`` step) that sets that severity; ``{peak}`` the most severe
+reading while it has been open (the current one, for a new recommendation). When the severity is held above
+what the current reading would set, the title gets `` (peaked at <peak>)``, the peak formatted like the title's
+``{value}`` and followed by the unit written straight after it (``{value:.0f}°C`` gives ``(peaked at 91°C)``),
+unless the title already uses ``{peak}``. So a cpu rule escalated to critical at 91 °C and refreshed at 78 °C
+reads "[critical] CPU at 78°C (peaked at 91°C) ... at or above 90°C", never "... at or above 75°C".
 
 **Bad rules degrade.** An invalid rule is skipped and reported; the others still load. The file is
 re-read when it changes (:class:`SignalRulesFile`), and a file that won't parse at all gives no rules
@@ -79,8 +90,8 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-RESERVED = frozenset({"value", "threshold", "op", "rule", "severity", "for"})
-NUMERIC = frozenset({"value", "threshold"})
+RESERVED = frozenset({"value", "threshold", "peak", "op", "rule", "severity", "for"})
+NUMERIC = frozenset({"value", "threshold", "peak"})
 MISSING_LABEL = "?"
 MAX_LABEL_CHARS = 200
 MAX_TEMPLATE_CHARS = 2000
@@ -161,7 +172,7 @@ def template_fields(template: str, allowed: Iterable[str]) -> list[str]:
             if "{" in spec:
                 raise ValueError(f"{{{name}}}: nested placeholders are not allowed")
             if name not in NUMERIC or not _SPEC.match(spec):
-                raise ValueError(f"{{{name}:{spec}}}: only a precision on value/threshold, like :.1f or :.0%")
+                raise ValueError(f"{{{name}:{spec}}}: only a precision on value/threshold/peak, like :.1f or :.0%")
         if name not in allowed:
             raise ValueError(f"{{{name}}} is not a reserved name ({', '.join(sorted(RESERVED))}) or a listed label")
         names.append(name)
@@ -179,8 +190,8 @@ def _number(value: float, spec: str) -> str:
 def render(template: str, values: Mapping[str, Any], allowed: Iterable[str]) -> str:
     """Fill ``template`` from ``values``. Validates it first (see :func:`template_fields`).
 
-    Values are inserted as text, never formatted or evaluated themselves; only ``value`` and
-    ``threshold`` take a (precision-only) format spec. A missing name renders as ``?``.
+    Values are inserted as text, never formatted or evaluated themselves; only ``value``, ``threshold``
+    and ``peak`` take a (precision-only) format spec. A missing name renders as ``?``.
     """
     template_fields(template, allowed)
     out = []
@@ -340,6 +351,25 @@ class SignalRule(RuleBase):
             if OPS[self.op](value, step.threshold):
                 severity = step.severity
         return severity
+
+    def threshold_for(self, severity: Severity) -> float:
+        """The threshold of the step that sets ``severity``: an ``escalate`` step's, else the base ``threshold``."""
+        for step in self.escalate:
+            if step.severity == severity:
+                return step.threshold
+        return self.threshold
+
+
+def further(op: str, value: float, than: float) -> bool:
+    """Whether ``value`` is further past the threshold than ``than`` for ``op`` (higher for ``>``, lower for
+    ``<``). Never, for ``==`` and ``!=``, which have no direction."""
+    if math.isnan(value):
+        return False
+    if op.startswith(">"):
+        return value > than
+    if op.startswith("<"):
+        return value < than
+    return False
 
 
 def dedup_key(rule: str, labels: Mapping[str, str], labels_key: Iterable[str]) -> str:
@@ -524,6 +554,11 @@ class SignalHit:
     confidence: Confidence = Confidence.MEDIUM
     rejection_ttl: timedelta | None = None
     expires_after: timedelta | None = None
+    op: str = ">"
+    """The rule's comparison, so the engine can tell which of two readings is the more severe (:func:`further`)."""
+    rerender: Callable[[Severity, float], Texts] | None = field(default=None, compare=False, repr=False)
+    """Re-render the text for a held severity and peak (see "Escalation wording" in the module docstring); None
+    for a hit whose text doesn't depend on them."""
 
     @property
     def evidence(self) -> str:
@@ -531,13 +566,38 @@ class SignalHit:
         return f"{self.key} = {value} (threshold {threshold}) since {self.since.astimezone(UTC):%Y-%m-%d %H:%M}Z"
 
 
-def make_hit(rule: SignalRule, sample: Sample, since: datetime) -> SignalHit:
-    """Render ``rule``'s recommendation for one sample."""
+@dataclass(frozen=True)
+class Texts:
+    """A recommendation's rendered wording."""
+
+    title: str
+    action: str
+    rationale: str
+    impact: str
+
+
+def _value_unit(template: str) -> tuple[str, str]:
+    """The format spec of the first ``{value}`` in ``template`` and the unit written straight after it, so a
+    peak can be shown the same way: ``"at {value:.0f}°C now"`` -> ``(".0f", "°C")``."""
+    for literal_after, (_, name, spec, _) in _pairs(template):
+        if name == "value":
+            unit = re.match(r"[^\s]*", literal_after)
+            return spec or "", (unit.group(0) if unit else "").rstrip(",.;:)!?")
+    return "", ""
+
+
+def _pairs(template: str) -> list[tuple[str, tuple[str, str | None, str | None, str | None]]]:
+    parsed = list(string.Formatter().parse(template))
+    return [(parsed[i + 1][0] if i + 1 < len(parsed) else "", part) for i, part in enumerate(parsed)]
+
+
+def render_texts(rule: SignalRule, sample: Sample, severity: Severity, peak: float) -> Texts:
+    """``rule``'s recommendation for ``sample`` at ``severity`` (the reading's own, or a held one) and ``peak``."""
     values: dict[str, Any] = {name: sample.labels.get(name) for name in set(rule.labels_key) | set(rule.labels)}
-    severity = rule.severity_for(sample.value)
     values.update(
         value=sample.value,
-        threshold=rule.threshold,
+        threshold=rule.threshold_for(severity),
+        peak=peak,
         op=rule.op,
         rule=rule.name,
         severity=severity.value,
@@ -545,21 +605,44 @@ def make_hit(rule: SignalRule, sample: Sample, since: datetime) -> SignalHit:
     )
     allowed = rule.placeholders
     tpl = rule.recommendation
+    title = render(tpl.title, values, allowed)
+    held = rank(severity) > rank(rule.severity_for(sample.value)) and further(rule.op, peak, sample.value)
+    if held and "{peak" not in tpl.title:
+        spec, unit = _value_unit(tpl.title)
+        title += f" (peaked at {_number(peak, spec)}{unit})"
+    return Texts(
+        title=title,
+        action=render(tpl.action, values, allowed),
+        rationale=render(tpl.rationale, values, allowed),
+        impact=render(tpl.impact, values, allowed),
+    )
+
+
+def make_hit(rule: SignalRule, sample: Sample, since: datetime) -> SignalHit:
+    """Render ``rule``'s recommendation for one sample: the reading's own severity, and its step's threshold."""
+    severity = rule.severity_for(sample.value)
+    texts = render_texts(rule, sample, severity, sample.value)
+
+    def rerender(held: Severity, peak: float) -> Texts:
+        return render_texts(rule, sample, held, peak)
+
     return SignalHit(
         rule=rule.name,
         key=dedup_key(rule.name, sample.labels, rule.labels_key),
         labels=dict(sample.labels),
         value=sample.value,
-        threshold=rule.threshold,
+        threshold=rule.threshold_for(severity),
         severity=severity,
         since=since,
-        title=render(tpl.title, values, allowed),
-        action=render(tpl.action, values, allowed),
-        rationale=render(tpl.rationale, values, allowed),
-        impact=render(tpl.impact, values, allowed),
-        confidence=tpl.confidence,
+        title=texts.title,
+        action=texts.action,
+        rationale=texts.rationale,
+        impact=texts.impact,
+        confidence=rule.recommendation.confidence,
         rejection_ttl=rule.rejection_ttl,
         expires_after=rule.expires_after,
+        op=rule.op,
+        rerender=rerender,
     )
 
 
@@ -646,15 +729,18 @@ __all__ = [
     "SignalRule",
     "SignalRulesFile",
     "SignalState",
+    "Texts",
     "check_label_names",
     "dedup_key",
     "evaluate",
     "format_duration",
+    "further",
     "load_signal_rules",
     "make_hit",
     "parse_duration",
     "parse_rules",
     "render",
+    "render_texts",
     "rule_kinds",
     "template_fields",
 ]

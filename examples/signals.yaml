@@ -273,7 +273,8 @@ rules:
   #   min_saving     optional, minor units: smaller savings aren't raised
   # Saving = energy (kWh) x (current rate - cheapest rate starting within horizon).
   # Extra placeholders: {period} {rate} {cheaper_period} {cheaper_rate}
-  # {starts_at} {starts_in} {energy} {saving} {currency} {unit}.
+  # {starts_at} {starts_in} {energy} {saving} {currency} {unit}. {rate} and
+  # {cheaper_rate} carry their unit, rounded: "23.7 c/kWh" (see docs/signals.md).
   # Rename the metric to whatever your power meters export.
   - name: shift-heavy-loads
     kind: tariff_shift
@@ -292,7 +293,7 @@ rules:
       action: Pause or reschedule {load} until {cheaper_period} starts in {starts_in}.
       rationale: >-
         {load} is drawing {value:.0f} W in {period}. {energy} kWh at {rate} rather
-        than {cheaper_rate} per kWh saves about {saving} {currency}.
+        than {cheaper_rate} saves about {saving} {currency}.
       impact: low
       confidence: medium
 

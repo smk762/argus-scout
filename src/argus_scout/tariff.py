@@ -3,6 +3,13 @@
 A tariff names its periods by local wall-clock time. Prices are per ``unit``
 (usually kWh) in the currency's minor unit (cents, pence), so the engine works
 for any currency. See ``examples/tariff.yaml``.
+
+**Showing a rate.** People and the model never see raw minor units: :func:`format_rate` rounds a rate and
+shows it in the unit people quote it in. A currency with a common minor-unit sign (cents, pence) is shown in
+it (``23.7 c/kWh``); a zero-decimal currency (JPY, KRW) has no minor unit, so its rate is already in major
+units (``31.5 JPY/kWh``); any other currency is shown in major units (``0.237 CHF/kWh``). How many decimals
+the minor unit has comes from the ISO 4217 currency code (:func:`minor_digits`), or the tariff file's
+``minor_digits`` for a currency this module doesn't list.
 """
 
 from __future__ import annotations
@@ -18,6 +25,64 @@ import yaml
 log = structlog.get_logger()
 
 _MINUTES_PER_DAY = 24 * 60
+
+ZERO_DECIMAL_CURRENCIES = frozenset(
+    {"BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"}
+)
+"""ISO 4217 currencies with no minor unit: a rate in them is already in major units."""
+THREE_DECIMAL_CURRENCIES = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
+MINOR_SIGNS: dict[str, str] = {
+    "AUD": "c",
+    "CAD": "c",
+    "EUR": "c",
+    "HKD": "c",
+    "NZD": "c",
+    "SGD": "c",
+    "USD": "c",
+    "ZAR": "c",
+    "GBP": "p",
+}
+"""Currencies whose minor unit people quote energy prices in, and its sign (``23.7 c/kWh``, ``24.5 p/kWh``)."""
+
+
+def minor_digits(currency: str, override: int | None = None) -> int:
+    """Decimal places of ``currency``'s minor unit: 2 by default, 0 for JPY and the like, 3 for KWD and the like."""
+    if override is not None:
+        return override
+    code = currency.strip().upper()
+    if code in ZERO_DECIMAL_CURRENCIES:
+        return 0
+    if code in THREE_DECIMAL_CURRENCIES:
+        return 3
+    return 2
+
+
+def _trim(value: float, places: int) -> str:
+    """``value`` rounded to ``places`` decimals, without trailing zeros: 23.6916 -> ``23.7``, 48.0 -> ``48``."""
+    text = f"{value:.{places}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def format_money(minor: float, currency: str = "", digits: int | None = None) -> str:
+    """An amount in the currency's minor unit, in major units: ``125`` -> ``"1.25"`` (``"125"`` for JPY)."""
+    places = minor_digits(currency, digits)
+    return f"{minor / 10**places:.{places}f}"
+
+
+def format_rate(rate: float, currency: str = "", unit: str = "kWh", digits: int | None = None) -> str:
+    """A rate in minor units per ``unit``, rounded and in the unit people quote it in (see the module docstring).
+
+    ``23.6916`` AUD -> ``23.7 c/kWh``; ``48`` USD -> ``48 c/kWh``; ``31.5`` JPY -> ``31.5 JPY/kWh``;
+    ``23.7`` CHF -> ``0.237 CHF/kWh``; no currency -> ``23.7/kWh``.
+    """
+    code = currency.strip().upper()
+    places = minor_digits(code, digits)
+    sign = MINOR_SIGNS.get(code) if places == 2 else None
+    if sign or places == 0 or not code:
+        amount = _trim(rate, 1 if abs(rate) >= 1 else 3)
+        suffix = f" {sign}" if sign else (f" {code}" if code else "")
+        return f"{amount}{suffix}/{unit}"
+    return f"{_trim(rate / 10**places, places + 1)} {code}/{unit}"
 
 
 def _parse_time(value: Any) -> time:
@@ -69,6 +134,12 @@ class Tariff:
     currency: str
     unit: str
     comparison_plans: tuple[Plan, ...] = ()
+    minor_digits: int | None = None
+    """Decimal places of the currency's minor unit, when the file sets them; else from the currency code."""
+
+    def format_rate(self, rate: float) -> str:
+        """``rate`` (minor units per :attr:`unit`) as people read it: see :func:`format_rate`."""
+        return format_rate(rate, self.currency, self.unit, self.minor_digits)
 
     @property
     def periods(self) -> tuple[TariffPeriod, ...]:
@@ -116,7 +187,16 @@ def tariff_from_dict(raw: dict[str, Any]) -> Tariff:
         currency=str(raw.get("currency", "")),
         unit=str(raw.get("unit", "kWh")),
         comparison_plans=tuple(_plan(str(n), p) for n, p in (raw.get("comparison_plans") or {}).items()),
+        minor_digits=_digits(raw.get("minor_digits")),
     )
+
+
+def _digits(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 4:
+        raise ValueError("minor_digits must be a whole number from 0 to 4")
+    return value
 
 
 def load_tariff(path: str | Path) -> Tariff:

@@ -22,7 +22,7 @@ rejection memory all apply unchanged. They recommend; they never act. ::
         recommendation:
           title: "Run {load} after {starts_at} ({cheaper_period})"
           action: Pause or reschedule {load} until {cheaper_period} starts in {starts_in}.
-          rationale: "{energy} kWh at {rate} instead of {cheaper_rate} per kWh saves about {saving} {currency}."
+          rationale: "{energy} kWh at {rate} instead of {cheaper_rate} saves about {saving} {currency}."
 
       - name: cheaper-plan
         kind: tariff_plan
@@ -66,7 +66,8 @@ unknown: it can't tell, so it doesn't clear anything, and nothing crashes.
 **Placeholders.** On top of the reserved ones (``value`` is the sample for a shift and the saving in minor
 units for a plan; ``threshold`` is ``min_shiftable`` or ``min_saving``):
 
-- shift: ``period``, ``rate``, ``cheaper_period``, ``cheaper_rate``, ``starts_at`` (local HH:MM),
+- shift: ``period``, ``rate``, ``cheaper_period``, ``cheaper_rate`` (rates as people read them, unit included:
+  ``23.7 c/kWh``, see :func:`~argus_scout.tariff.format_rate`), ``starts_at`` (local HH:MM),
   ``starts_in``, ``energy`` (kWh), ``saving`` (major units, e.g. ``1.25``), ``currency``, ``unit``, and the
   rule's ``labels_key`` and ``labels``;
 - plan: ``plan``, ``current_plan``, ``plan_cost``, ``current_cost``, ``saving`` (all major units),
@@ -98,13 +99,20 @@ from argus_scout.signals import (
     parse_duration,
     render,
 )
-from argus_scout.tariff import Plan, Tariff, TariffPeriod, coverage_gaps, current_period, tiered_cost
+from argus_scout.tariff import (
+    Plan,
+    Tariff,
+    TariffPeriod,
+    coverage_gaps,
+    current_period,
+    format_money,
+    tiered_cost,
+)
 
 log = structlog.get_logger()
 
 EnergyUnit = Literal["W", "kW", "kWh"]
 _KW_PER_UNIT = {"W": 0.001, "kW": 1.0}
-ZERO_DECIMAL_CURRENCIES = frozenset({"CLP", "ISK", "JPY", "KRW", "PYG", "UGX", "VND"})
 MAX_RANGE_POINTS = 11_000
 """Prometheus refuses a range query with more points per series than this."""
 LAST_RUN = "last_run"
@@ -130,13 +138,6 @@ PLAN_FIELDS = frozenset(
 
 
 # --- money and energy -----------------------------------------------------------------------------------------
-
-
-def format_money(minor: float, currency: str = "") -> str:
-    """An amount in the currency's minor unit, in major units: ``125`` -> ``"1.25"`` (``"125"`` for JPY)."""
-    if currency.upper() in ZERO_DECIMAL_CURRENCIES:
-        return f"{minor:.0f}"
-    return f"{minor / 100:.2f}"
 
 
 def energy_kwh(value: float, unit: EnergyUnit, duration: timedelta) -> float:
@@ -366,7 +367,7 @@ def _hit(
     fields: Mapping[str, Any],
 ) -> SignalHit:
     values: dict[str, Any] = dict(fields)
-    values.update(value=value, threshold=threshold, op=">=", rule=rule.name, severity=rule.severity.value)
+    values.update(value=value, threshold=threshold, peak=value, op=">=", rule=rule.name, severity=rule.severity.value)
     values.setdefault("for", format_duration(getattr(rule, "for_", timedelta(0))))
     allowed = rule.placeholders
     tpl = rule.recommendation
@@ -385,6 +386,7 @@ def _hit(
         confidence=tpl.confidence,
         rejection_ttl=rule.rejection_ttl,
         expires_after=rule.expires_after,
+        op=">=",
     )
 
 
@@ -443,13 +445,13 @@ async def _shift(
         fields: dict[str, Any] = {name: sample.labels.get(name) for name in set(rule.labels_key) | set(rule.labels)}
         fields.update(
             period=active.name,
-            rate=f"{active.rate:g}",
+            rate=tariff.format_rate(active.rate),
             cheaper_period=cheaper.name,
-            cheaper_rate=f"{cheaper.rate:g}",
+            cheaper_rate=tariff.format_rate(cheaper.rate),
             starts_at=f"{starts_at:%H:%M}",
             starts_in=format_duration(starts_in),
             energy=f"{kwh:.2f}",
-            saving=format_money(saving, tariff.currency),
+            saving=format_money(saving, tariff.currency, tariff.minor_digits),
             currency=tariff.currency,
             unit=rule.unit,
         )
@@ -502,13 +504,13 @@ async def _plan(
     if best.plan == tariff.plan.name or saving <= 0 or saving < rule.min_saving:
         return
     labels = {"plan": best.plan}
-    money = tariff.currency
+    money, digits = tariff.currency, tariff.minor_digits
     fields = {
         "plan": best.plan,
         "current_plan": tariff.plan.name,
-        "plan_cost": format_money(best.total, money),
-        "current_cost": format_money(current.total, money),
-        "saving": format_money(saving, money),
+        "plan_cost": format_money(best.total, money, digits),
+        "current_cost": format_money(current.total, money, digits),
+        "saving": format_money(saving, money, digits),
         "usage": f"{sum(units for _, units in usage):.1f}",
         "window": format_duration(rule.window),
         "days": f"{days:.1f}",

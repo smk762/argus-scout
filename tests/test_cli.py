@@ -42,6 +42,7 @@ def test_tariff_now():
     result = runner.invoke(app, ["tariff", "now", str(EXAMPLES / "tariff.yaml")])
     assert result.exit_code == 0, result.output
     assert "next:" in result.output
+    assert "c/kWh" in result.output and "minor units" not in result.output  # the example tariff is in USD
 
 
 def test_health():

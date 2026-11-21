@@ -114,3 +114,39 @@ def test_tiered_cost(tariff: Tariff):
     assert tiered_cost(100, tiers) == 20 * 32.0 + 80 * 30.0
     assert tiered_cost(2000, tiers) == 20 * 32.0 + 1480 * 30.0 + 500 * 34.0
     assert tiered_cost(0, (TariffTier(None, 5.0),)) == 0
+
+
+# --- showing rates --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rate", "currency", "shown"),
+    [
+        (23.6916, "AUD", "23.7 c/kWh"),
+        (48.0, "USD", "48 c/kWh"),
+        (9.04, "usd", "9 c/kWh"),
+        (0.25, "USD", "0.25 c/kWh"),
+        (31.46, "JPY", "31.5 JPY/kWh"),  # no minor unit: the rate is already in yen
+        (24.5, "GBP", "24.5 p/kWh"),
+        (23.7, "CHF", "0.237 CHF/kWh"),  # no common minor-unit sign: major units
+        (24.0, "KWD", "0.024 KWD/kWh"),  # three-decimal currency
+        (23.6916, "", "23.7/kWh"),
+    ],
+)
+def test_format_rate(rate, currency, shown):
+    from argus_scout.tariff import format_rate
+
+    assert format_rate(rate, currency) == shown
+
+
+def test_minor_digits_from_the_currency_or_the_file():
+    from argus_scout.tariff import format_money, minor_digits
+
+    assert (minor_digits("AUD"), minor_digits("JPY"), minor_digits("KWD")) == (2, 0, 3)
+    assert format_money(13260, "AUD") == "132.60" and format_money(260, "JPY") == "260"
+    raw = {"plan": "p", "currency": "XTS", "minor_digits": 0, "periods": {"a": {"start": "00:00", "end": "00:00",
+                                                                            "rate": 12.34}}}  # fmt: skip
+    tariff = tariff_from_dict(raw)
+    assert tariff.format_rate(12.34) == "12.3 XTS/kWh"
+    with pytest.raises(ValueError, match="minor_digits"):
+        tariff_from_dict({**raw, "minor_digits": "two"})

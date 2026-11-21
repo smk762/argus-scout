@@ -3,7 +3,8 @@
 # end exclusive, and a period may cross midnight. Check a file with:
 #   argus-scout check tariff examples/tariff.yaml
 plan: time_of_use
-currency: USD
+currency: USD        # ISO 4217; rates are shown as "48 c/kWh". For a currency
+                     # scout does not know, set minor_digits (0 for none).
 unit: kWh
 daily_charge: 110.0
 
