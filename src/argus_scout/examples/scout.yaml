@@ -1,0 +1,71 @@
+# argus-scout config: names every other file scout reads and every service it talks to.
+#
+# Relative paths resolve against this file's directory. Secrets never go here:
+# name the environment variable instead (token_env, auth_env, api_key_env) and put
+# the value in .env beside this file (see .env.example) or in the real environment,
+# which wins over .env. Unknown keys are rejected. Check with:
+#   argus-scout check config scout.yaml
+#
+# Scout refuses to start on an invalid config. The policy files below are different:
+# they reload while scout runs, and a bad edit to one falls back to defaults.
+
+# Policy files. Each is optional; leave one out to use built-in defaults.
+# Commented examples of each are in the repo's examples/ directory.
+files:
+  # heartbeat: heartbeat.yaml   # what is worth interrupting for
+  # approvals: approvals.yaml   # standing approvals (approve only, never deploy)
+  # tariff: tariff.yaml         # time-of-use energy tariff
+
+# Where scout keeps events, recommendations, approvals and reports.
+store:
+  path: scout.db
+
+# Where status events come from. Each source needs a unique name.
+sources:
+  # Producers POST events to scout. token_env names the env var holding the bearer
+  # token this source must send; leave it out to use the server-wide token.
+  # - kind: webhook
+  #   name: ci
+  #   token_env: SCOUT_CI_TOKEN
+  #
+  # Scout polls a JSON endpoint and maps its fields onto status events.
+  # items is the dotted path to the list in the response (leave it out if the
+  # response is one item); fields maps status event fields to dotted paths.
+  # - kind: json_poll
+  #   name: backups
+  #   url: http://backups:8080/status
+  #   interval: 300               # seconds
+  #   items: jobs
+  #   fields:
+  #     event_id: id
+  #     summary: message
+  #     severity: level
+  #   auth_header: Authorization
+  #   auth_env: SCOUT_BACKUPS_AUTH  # value sent in auth_header, e.g. "Bearer ..."
+
+schedule:
+  analysis_interval: 900          # seconds between analysis cycles
+  status_interval: 300            # seconds between status cycles
+  timezone: UTC                   # IANA name, e.g. Europe/London
+  briefings:
+    - kind: morning
+      at: "07:30"
+    - kind: evening
+      at: "19:00"
+
+# Services scout talks to. All optional: leave one out and what depends on it is off.
+services:
+  # prometheus_url: http://prometheus:9090   # read-only PromQL; scout never scrapes hosts
+  # llm:
+  #   backend: ollama
+  #   base_url: http://ollama:11434
+  #   model: <MODEL>
+  #   api_key_env: SCOUT_LLM_API_KEY         # hosted backends only
+  # echo_url: http://<TTS_HOST>:8034
+
+server:
+  host: 127.0.0.1                 # reads have no auth: keep scout on loopback
+  port: 8400
+  read_only: true                 # refuse every state-changing route
+  allowed_origins: []             # browser origins trusted for writes
+  token_env: SCOUT_API_TOKEN      # bearer token for write routes

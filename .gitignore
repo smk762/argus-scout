@@ -8,3 +8,5 @@ build/
 .ruff_cache/
 # hatch-vcs writes this at build time (version derived from git tags)
 src/argus_scout/_version.py
+# secrets: init writes .env.example, the real .env stays local
+.env

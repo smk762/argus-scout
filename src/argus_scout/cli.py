@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
+from importlib.resources import files as package_files
 from pathlib import Path
 
 import typer
 
 import argus_scout
 from argus_scout.approvals import load_rules
+from argus_scout.config import CONFIG_FILE, ENV_FILE, ConfigError, ScoutConfig, load_config, resolve_secret
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.tariff import coverage_gaps, current_period, load_tariff, next_period_change
 
@@ -72,6 +75,73 @@ def check_approvals(path: Path = ExistingFile) -> None:
         raise typer.Exit(1)
 
 
+@check_app.command("config")
+def check_config(path: Path = ExistingFile) -> None:
+    """Check scout.yaml and every policy file it names. Secrets are reported as set or unset, never shown."""
+    try:
+        config = load_config(path)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    failed = False
+    checks: dict[str, Callable[[Path], None]] = {
+        "heartbeat": check_heartbeat,
+        "approvals": check_approvals,
+        "tariff": check_tariff,
+    }
+    for kind, check in checks.items():
+        named = getattr(config.files, kind)
+        if named is None:
+            typer.echo(f"{kind}: not configured, using defaults")
+            continue
+        if not named.is_file():
+            typer.echo(f"{kind}: error: {named} does not exist", err=True)
+            failed = True
+            continue
+        typer.echo(f"{kind}: ", nl=False)
+        try:
+            check(named)
+        except typer.Exit as exc:
+            failed = failed or bool(exc.exit_code)
+    for name in config.secret_env_names():
+        typer.echo(f"secret {name}: {'set' if resolve_secret(name) else 'unset'}")
+    summary = _config_summary(config)
+    typer.echo(f"failed: {summary}" if failed else f"ok: {summary}")
+    if failed:
+        raise typer.Exit(1)
+
+
+def _config_summary(config: ScoutConfig) -> str:
+    return (
+        f"{len(config.sources)} sources, {len(config.schedule.briefings)} briefings, "
+        f"store {config.store.path}, server {config.server.host}:{config.server.port}"
+    )
+
+
+@app.command()
+def init(
+    path: Path = typer.Argument(
+        Path(CONFIG_FILE), help="Config file (.yaml/.yml) to write, or a directory to write scout.yaml in."
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing files."),
+) -> None:
+    """Write a commented starter scout.yaml and a .env.example beside it."""
+    if path.is_dir() or (not path.exists() and path.suffix not in (".yaml", ".yml")):
+        path = path / CONFIG_FILE
+    env_example = path.parent / f"{ENV_FILE}.example"
+    targets = {path: "scout.yaml", env_example: "env.example"}
+    existing = [str(target) for target in targets if target.exists()]
+    if existing and not force:
+        typer.echo(f"error: {', '.join(existing)} already exists; pass --force to overwrite", err=True)
+        raise typer.Exit(1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    templates = package_files("argus_scout") / "examples"
+    for target, template in targets.items():
+        target.write_text((templates / template).read_text())
+        typer.echo(f"wrote {target}")
+    typer.echo(f"next: copy {env_example.name} to {ENV_FILE}, edit both, then: argus-scout check config {path}")
+
+
 @tariff_app.command("now")
 def tariff_now(path: Path = ExistingFile) -> None:
     """Show the active period and when it next changes."""
@@ -86,10 +156,24 @@ def tariff_now(path: Path = ExistingFile) -> None:
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", help="Bind address. Scout has no auth yet: keep it on loopback."),
-    port: int = typer.Option(8400),
+    config_path: Path | None = typer.Option(
+        None, "--config", "-c", exists=True, dir_okay=False, help="scout.yaml; refuses to start if it is invalid."
+    ),
+    host: str | None = typer.Option(
+        None, help="Bind address [default: server.host, else 127.0.0.1]. Scout has no auth yet: keep it on loopback."
+    ),
+    port: int | None = typer.Option(None, help="[default: server.port, else 8400]"),
 ) -> None:
     """Run the HTTP server (needs the [server] extra)."""
+    config = ScoutConfig()
+    if config_path is not None:
+        try:
+            config = load_config(config_path)
+        except ConfigError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+    host = host or config.server.host
+    port = port or config.server.port
     try:
         import uvicorn
     except ImportError as exc:

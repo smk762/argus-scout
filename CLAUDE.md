@@ -39,6 +39,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A standing approval for a high-impact or critical proposal, whatever the rules say | `tests/test_approvals.py` (`test_guardrails_override_permissive_rules`, `test_runtime_rule_refused_for_guarded_proposal`) |
 | A bad edit to a policy or approvals file stopping status updates | `tests/test_heartbeat.py` (`test_bad_file_falls_back_to_defaults`), `tests/test_approvals.py` (`test_bad_rules_skipped_others_kept`) |
 | A crash loop resetting the daily usage caps | `tests/test_budget.py` (`test_counts_survive_restart`) |
+| Scout starting on an invalid top-level config (unlike the policy files, which degrade to defaults) | `tests/test_config.py` (`test_invalid_config_raises`, `test_serve_refuses_invalid_config`) |
+| A secret value in the config model's repr or dumps (the YAML holds env-var names, not values) | `tests/test_config.py` (`test_secrets_resolve_from_dotenv_and_never_appear`); the model holds env-var names only, validated as names |
 | Scout querying a host directly instead of Prometheus | **UNENFORCED**: no ingestion yet; add a check when signals land |
 | A deployment's hostnames, IPs or persona in this repo | CI `docs` job (private IPs/paths/emails in published docs); examples use placeholders |
 
@@ -47,7 +49,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 `src/argus_scout/` — the package. Key modules:
 
 - `__init__.py` — version shim (`__version__` from `hatch-vcs`).
-- `cli.py` — Typer app; entry point `argus-scout` (`[project.scripts]`). `check` validates config files; `tariff now`; `serve`.
+- `cli.py` — Typer app; entry point `argus-scout` (`[project.scripts]`). `init` writes a starter config; `check` validates config files (`check config` covers scout.yaml and every file it names); `tariff now`; `serve --config`.
+- `config.py` — `ScoutConfig`, the one config file (`scout.yaml`): `files`, `store`, `sources` (discriminated on `kind`), `schedule`, `services`, `server`. Pydantic v2, `extra="forbid"`, frozen. `load_config` resolves relative paths against the config's directory, loads `.env` beside it (never overriding the real env) and raises `ConfigError` on anything invalid. Secrets are env-var *names* (`token_env`, `auth_env`, `api_key_env`), read with `resolve_secret` as `SecretStr`.
 - `severity.py` — `Severity` (info < notice < warning < critical), `coerce_severity`, `rank`.
 - `events.py` — `StatusEvent`, the envelope every source sends; `fingerprint` (content identity) and `group_duplicates`.
 - `heartbeat.py` — `HeartbeatPolicy` (defaults + YAML overrides, `origin` per key), `PolicyFile` (mtime reload), the `broadcast_gate` / `report_gate` / `voice_gate` chain and `explain()`, `reannounce_due`.
@@ -56,7 +59,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `budget.py` — `DailyBudget` (per-kind daily caps, optional persisted state, `on_change` hook for gauges), `ManualOriginMiddleware`.
 - `tariff.py` — `Tariff` / `Plan` / `TariffPeriod` / `TariffTier`; `current_period`, `next_period_change`, `coverage_gaps`, `tiered_cost`. Rates are in the currency's minor unit.
 - `server/app.py` — FastAPI app (`[server]` extra); `/health` only until auth lands. Every state-changing route goes behind argus-cortex's `auth.bearer` + `WriteGuard`.
-- `examples/` — commented config for each file scout reads; tests load them, so they must stay valid.
+- `examples/` (repo root) — commented config for each policy file scout reads; tests load them, so they must stay valid.
+- `src/argus_scout/examples/` — packaged templates `argus-scout init` writes (`scout.yaml`, `env.example` → `.env.example`); tests validate them.
 
 ## Commands
 

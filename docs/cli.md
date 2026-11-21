@@ -17,6 +17,7 @@ $ argus-scout [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `version`: Print the installed version.
+* `init`: Write a commented starter scout.yaml and a...
 * `serve`: Run the HTTP server (needs the ...
 * `check`: Validate config files before scout loads...
 * `tariff`: Inspect a time-of-use tariff.
@@ -35,6 +36,25 @@ $ argus-scout version [OPTIONS]
 
 * `--help`: Show this message and exit.
 
+## `argus-scout init`
+
+Write a commented starter scout.yaml and a .env.example beside it.
+
+**Usage**:
+
+```console
+$ argus-scout init [OPTIONS] [path]
+```
+
+**Arguments**:
+
+* `path <path>`: Config file (.yaml/.yml) to write, or a directory to write scout.yaml in.  [default: scout.yaml]
+
+**Options**:
+
+* `--force`: Overwrite existing files.
+* `--help`: Show this message and exit.
+
 ## `argus-scout serve`
 
 Run the HTTP server (needs the  extra).
@@ -47,8 +67,9 @@ $ argus-scout serve [OPTIONS]
 
 **Options**:
 
-* `--host <str>`: Bind address. Scout has no auth yet: keep it on loopback.  [default: 127.0.0.1]
-* `--port <int>`: [default: 8400]
+* `-c, --config <file>`: scout.yaml; refuses to start if it is invalid.
+* `--host <str>`: Bind address . Scout has no auth yet: keep it on loopback.
+* `--port <int>`: 
 * `--help`: Show this message and exit.
 
 ## `argus-scout check`
@@ -70,6 +91,7 @@ $ argus-scout check [OPTIONS] COMMAND [ARGS]...
 * `tariff`: Check a tariff file loads and its periods...
 * `heartbeat`: Check a heartbeat policy file parses, and...
 * `approvals`: Check a standing-approvals file: every...
+* `config`: Check scout.yaml and every policy file it...
 
 ### `argus-scout check tariff`
 
@@ -115,6 +137,24 @@ Check a standing-approvals file: every rule must parse.
 
 ```console
 $ argus-scout check approvals [OPTIONS] {path}
+```
+
+**Arguments**:
+
+* `path <file>`: [required]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+### `argus-scout check config`
+
+Check scout.yaml and every policy file it names. Secrets are reported as set or unset, never shown.
+
+**Usage**:
+
+```console
+$ argus-scout check config [OPTIONS] {path}
 ```
 
 **Arguments**:
