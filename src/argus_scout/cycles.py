@@ -14,7 +14,8 @@ These are the seams later phases fill in. The structure is already the real one:
   evaluates them against Prometheus and hands the hits to the
   :class:`~argus_scout.engine.RecommendationEngine`. A bad rule is skipped; a file that won't parse skips
   the cycle (keeping the pending ``for`` clocks); a Prometheus outage makes rules *unknown*, which the
-  engine never reads as cleared.
+  engine never reads as cleared. Tariff-aware rules (:mod:`~argus_scout.tariff_rules`) in the same file are
+  evaluated against the :class:`~argus_scout.tariff.TariffFile` and merged in; no tariff skips just them.
 - :class:`BriefingJob` will generate a scheduled report (phase 3); for now it only records that it ran.
 """
 
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, tzinfo
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -37,6 +38,8 @@ from argus_scout.scheduler import Clock, DailyAt, Every, Scheduler, utc_now
 from argus_scout.signals import SignalRulesFile, SignalState, evaluate
 from argus_scout.sources import BoundSource, Sources, build_sources
 from argus_scout.store.base import Store
+from argus_scout.tariff import TariffFile
+from argus_scout.tariff_rules import evaluate_tariff
 
 log = structlog.get_logger()
 
@@ -122,11 +125,15 @@ class AnalysisCycle:
         rules: SignalRulesFile | None = None,
         client: PrometheusClient | None = None,
         approvals: StandingApprovals | None = None,
+        tariff: TariffFile | None = None,
+        tz: tzinfo | None = None,
         clock: Clock = utc_now,
     ) -> None:
         self.store = store
         self.rules = rules or SignalRulesFile(None)
         self.client = client
+        self.tariff = tariff or TariffFile(None)
+        self.tz = tz or ZoneInfo("UTC")
         self.clock = clock
         self.state = SignalState(store)
         self.engine = RecommendationEngine(store, approvals, clock=clock)
@@ -143,6 +150,12 @@ class AnalysisCycle:
             log.warning("analysis.rules_unreadable", path=self.rules.path, error=ruleset.file_error)
             return None
         hits = await evaluate(ruleset.rules, self.client, now, state=self.state)
+        tariff = self.tariff.get()
+        hits = hits.merge(
+            await evaluate_tariff(
+                ruleset.rules, self.client, tariff, now, tz=self.tz, state=self.state, tariff_error=self.tariff.error
+            )
+        )
         report = self.engine.run_cycle(hits)
         if report.unknown:
             log.warning("analysis.rules_unknown", rules=sorted(report.unknown))
@@ -200,13 +213,15 @@ def register_jobs(
     inbox: Inbox | None = None,
     sources: Sources | None = None,
     prometheus: PrometheusClient | None = None,
+    tariff: TariffFile | None = None,
 ) -> None:
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source.
 
     Job names are ``status``, ``analysis``, ``briefing:<kind>`` (``briefing:<kind>@HH:MM`` when a kind is
     scheduled more than once) and ``poll:<source>``. The name keys the persisted bookkeeping, so keep it
     stable. A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
-    ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests).
+    ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests); ``tariff``
+    is the runtime's :class:`TariffFile` (one is made from ``files.tariff`` if not given).
     """
     schedule = config.schedule
     clock = scheduler.clock
@@ -221,6 +236,8 @@ def register_jobs(
         rules=SignalRulesFile(config.files.signals),
         client=prometheus,
         approvals=StandingApprovals(config.files.approvals, store=store),
+        tariff=tariff if tariff is not None else TariffFile(config.files.tariff),
+        tz=schedule.tz,
         clock=clock,
     )
     scheduler.add("analysis", analysis, Every(schedule.analysis_interval))
