@@ -14,7 +14,8 @@ Three steps, each its own function so it can be tested and explained:
    taken in priority order until the next one doesn't fit; every line not taken is counted, and the
    prompt says how many were left out per section. So the cut always falls on the least severe facts.
 3. **Text.** The prompt goes to the model through :class:`~argus_scout.llm.TextGenerator` (charged to
-   the ``llm_calls`` daily cap). **If there is no model, it is over its cap, or it fails, the report is
+   the ``llm_calls`` daily cap, under a GPU lease when ``services.llm.gpu`` is set). **If there is no model,
+   it is over its cap, no GPU lease was granted in time, or it fails, the report is
    written from a deterministic template** (:func:`render_template`) from the same facts, so a briefing
    is never silently skipped. The report's ``meta.path`` says which ran (``llm`` or ``template``) and
    ``meta.fallback_reason`` why.
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -38,6 +39,7 @@ import structlog
 from argus_scout.budget import DailyBudget
 from argus_scout.config import ScoutConfig
 from argus_scout.engine import RecommendationEngine, Rejection
+from argus_scout.gpu import narrative_guard
 from argus_scout.inbox import EventGroup, Inbox
 from argus_scout.llm import (
     CHARS_PER_TOKEN,
@@ -55,6 +57,9 @@ from argus_scout.scheduler import Clock, utc_now
 from argus_scout.severity import Severity, rank
 from argus_scout.store.base import Report, Store
 from argus_scout.tariff import TariffFile, current_period, next_period_change
+
+if TYPE_CHECKING:
+    from argus_cortex.gpu import GpuCoordinator
 
 log = structlog.get_logger()
 
@@ -325,6 +330,7 @@ def render_template(facts: Facts, persona: Persona, *, reason: str = "") -> str:
 
 _REASON_TEXT = {
     "budget": "today's model budget is spent",
+    "gpu_unavailable": "no GPU was free for the model in time",
     "error": "the model was unavailable",
     "disabled": "the model was turned off for this run",
     "no_llm": "no model is configured",
@@ -507,11 +513,15 @@ def build_narrator(
     tariff: TariffFile | None = None,
     clock: Clock = utc_now,
     generator: TextGenerator | None = None,
+    coordinator: GpuCoordinator | None = None,
 ) -> Narrator:
-    """The narrator ``config`` describes. With no ``services.llm`` every report uses the template."""
+    """The narrator ``config`` describes. With no ``services.llm`` every report uses the template.
+
+    With ``services.llm.gpu`` each model call holds a GPU lease from ``coordinator`` (default: the host-wide
+    ``ARGUS_GPU_*`` environment, see :mod:`argus_scout.gpu`)."""
     llm = config.services.llm
     if generator is None and llm is not None:
-        generator = TextGenerator(build_backend(llm), budget)
+        generator = TextGenerator(build_backend(llm), budget, call_guard=narrative_guard(llm, coordinator))
     return Narrator(
         store,
         generator=generator,

@@ -352,7 +352,7 @@ def brief(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1) from exc
     store = SqliteStore.copy_of(config.store.path) if dry_run else SqliteStore(config.store.path)
-    narrator = build_narrator(config, store, budget_from_config(config, persist=not dry_run))
+    narrator = build_narrator(config, store, budget_from_config(config, counter=store, persist=not dry_run))
     try:
         groups = None
         if kind == "status":
