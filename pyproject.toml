@@ -43,6 +43,11 @@ argus-scout = "argus_scout.cli:app"
 webhook = "argus_scout.sources.webhook:plugin"
 json_poll = "argus_scout.sources.json_poll:plugin"
 
+# Delivery channel kinds. A third-party package adds a kind by registering in this group.
+[project.entry-points."argus_scout.channels"]
+text = "argus_scout.channels.text:TextChannel"
+webhook = "argus_scout.channels.webhook:WebhookChannel"
+
 [project.urls]
 Repository = "https://github.com/smk762/argus-scout"
 

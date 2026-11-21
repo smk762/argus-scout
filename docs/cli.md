@@ -21,6 +21,7 @@ $ argus-scout [OPTIONS] COMMAND [ARGS]...
 * `poll`: Poll sources once and print the events...
 * `analyze`: Run one signal evaluation and engine cycle...
 * `brief`: Write one report now and print it (the...
+* `deliver`: Send a stored report to the configured...
 * `serve`: Run the HTTP server and the scheduler...
 * `check`: Validate config files before scout loads...
 * `tariff`: Inspect a time-of-use tariff.
@@ -114,6 +115,28 @@ $ argus-scout brief [OPTIONS]
 * `-k, --kind <str>`: Report kind: morning, evening, status.  [default: morning]
 * `--dry-run`: Store nothing: no report, no usage count, no memory file. The model is still asked.
 * `--no-llm`: Skip the model and write the report from the template.
+* `--help`: Show this message and exit.
+
+## `argus-scout deliver`
+
+Send a stored report to the configured channels.
+
+Idempotent: a channel that already has the report is skipped (shown as duplicate) unless --force. Voice
+channels follow the heartbeat policy (quiet hours, rest hours) the same as the server does.
+
+**Usage**:
+
+```console
+$ argus-scout deliver [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <file>`: scout.yaml  [required]
+* `--latest`: Send the newest stored report (the only mode for now).
+* `-k, --kind <str>`: The newest report of this kind .
+* `--channel <list[str]>`: Send only to this channel (repeatable) .
+* `--force`: Send again to channels that already have it.
 * `--help`: Show this message and exit.
 
 ## `argus-scout serve`
