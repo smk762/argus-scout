@@ -151,7 +151,8 @@ Each analysis cycle hands the rules' hits to the recommendation engine. For each
 
 - **Dedup.** An open recommendation (draft, proposed or approved) with the same key is refreshed: its evidence,
   last-seen time and expiry move on, its severity goes up if the hit's did, and a proposal's text is re-rendered.
-  An approved one keeps the wording that was approved. Nothing is ever duplicated.
+  An approved one keeps the wording that was approved; if a person approved it, a severity rise is noted in its
+  evidence. Nothing is ever duplicated.
 - **Rejection memory.** If a person rejected this key before, the hit is suppressed, unless it is now more severe
   than what was rejected (an escalation is new news), or the rule's `rejection_ttl` has passed since the
   rejection. Without a `rejection_ttl`, a rejection holds until the signal escalates. Rejections and their reasons
@@ -179,7 +180,9 @@ Two guardrails no rule can override, both enforced by tests:
   executes a recommendation, and there is no route that marks one deployed. Carrying it out is a person's job.
 - **Never high-impact or critical.** A proposal whose `impact` reads as high (`high`, `critical`, `major`,
   `significant`, `severe`), or that was raised from a critical signal, is never auto-approved, whatever the rules
-  say. It waits for a person.
+  say. It waits for a person. That holds after approval too: when a standing-approved recommendation escalates to
+  where a guardrail applies, the engine retires it ("escalated past standing approval: critical signal") and
+  raises a fresh `proposed` one for the same key at the new severity, which no rule can approve.
 
 People approve and reject through the API (`POST /api/recommendations/{id}/approve` or `/reject`, with `by` and
 an optional `reason`); see [api.md](api.md). The lifecycle is draft, then proposed, then approved, rejected or

@@ -197,6 +197,78 @@ def test_guardrails_refuse_auto_approval(store, clock, write_file, guarded):
     assert report.new[0].status == Status.PROPOSED
 
 
+DISKS_RULE = "rules:\n  - id: disks\n    analyzer: disk-filling\n    max_impact: low\n"
+
+
+def test_standing_approval_does_not_survive_escalation_past_a_guardrail(store, clock, write_file):
+    engine = RecommendationEngine(store, StandingApprovals(write_file("approvals.yaml", DISKS_RULE)), clock=clock)
+    [standing] = engine.run_cycle(ran(hit())).auto_approved
+    clock.advance(minutes=5)
+    report = engine.run_cycle(ran(hit(severity=Severity.CRITICAL, value=99)))
+
+    [retired] = report.retired
+    assert retired.id == standing.id
+    old = store.get_recommendation(standing.id)
+    assert old.status == Status.RETIRED and old.severity == Severity.WARNING
+    assert old.retired_reason == "escalated past standing approval: critical signal"
+    last = store.recommendation_history(standing.id)[-1]
+    assert (last.from_status, last.to_status, last.by) == (Status.APPROVED, Status.RETIRED, "engine")
+
+    [fresh] = report.new
+    assert report.auto_approved == [] and report.refreshed == []
+    assert fresh.id != standing.id and fresh.key == KEY
+    assert fresh.status == Status.PROPOSED and fresh.severity == Severity.CRITICAL
+    assert fresh.approval_source is None and standing.id in fresh.evidence[0]
+    assert [r.id for r in store.recommendations_by_key(KEY, (Status.PROPOSED, Status.APPROVED))] == [fresh.id]
+
+    clock.advance(minutes=5)  # the next cycle refreshes the new proposal: no duplicate, no second retirement
+    again = engine.run_cycle(ran(hit(severity=Severity.CRITICAL, value=99)))
+    assert [r.id for r in again.refreshed] == [fresh.id] and again.new == [] and again.retired == []
+
+
+def test_escalated_standing_approval_is_reproposed_despite_an_old_rejection(store, clock, write_file):
+    engine = RecommendationEngine(store, StandingApprovals(write_file("approvals.yaml", DISKS_RULE)), clock=clock)
+    rejected = Recommendation(id="r1", key=KEY, title="old", severity=Severity.CRITICAL, status=Status.PROPOSED)
+    store.save_recommendation(rejected)
+    assert rejected.reject("not now", now=T0)
+    store.save_recommendation(rejected)
+    store.save_recommendation(
+        Recommendation(
+            id="s1",
+            key=KEY,
+            title="t",
+            severity=Severity.WARNING,
+            status=Status.APPROVED,
+            approval_source="standing",
+            approved_by_rule="disks",
+            impact="low",
+        )  # fmt: skip
+    )
+    report = engine.run_cycle(ran(hit(severity=Severity.CRITICAL, value=99)))
+    assert [r.id for r in report.retired] == ["s1"] and report.suppressed == []
+    assert report.new[0].status == Status.PROPOSED
+
+
+def test_manual_approval_survives_escalation_with_a_note(engine, store, clock):
+    [rec] = engine.run_cycle(ran(hit())).new
+    assert rec.approve(now=T0)
+    store.save_recommendation(rec)
+    clock.advance(minutes=5)
+    report = engine.run_cycle(ran(hit(severity=Severity.CRITICAL, value=99)))
+    assert report.retired == [] and report.new == []
+    got = store.get_recommendation(rec.id)
+    assert got.status == Status.APPROVED and got.approval_source == "manual" and got.severity == Severity.CRITICAL
+    assert "severity raised from warning to critical after approval" in got.evidence[-2]
+
+
+def test_standing_approval_below_the_guardrail_keeps_its_approval(store, clock, write_file):
+    engine = RecommendationEngine(store, StandingApprovals(write_file("approvals.yaml", DISKS_RULE)), clock=clock)
+    [standing] = engine.run_cycle(ran(hit(severity=Severity.NOTICE))).auto_approved
+    report = engine.run_cycle(ran(hit(severity=Severity.WARNING)))
+    assert [r.id for r in report.refreshed] == [standing.id] and report.retired == []
+    assert store.get_recommendation(standing.id).status == Status.APPROVED
+
+
 # --- rejection memory -----------------------------------------------------------------------------------------
 
 

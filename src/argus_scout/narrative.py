@@ -435,6 +435,7 @@ class Narrator:
             "prompt_tokens_est": estimate_tokens(prompt.system + prompt.user),
             "context_tokens": self.context_tokens,
             "fingerprints": sorted(g.fingerprint for g in facts.groups),
+            **delivery_meta(facts),
         }
         reason, error = "", None
         if not use_llm:
@@ -477,16 +478,51 @@ class Narrator:
         use_llm: bool = True,
         dry_run: bool = False,
         trigger: str = "scheduled",
+        meta: dict[str, Any] | None = None,
     ) -> Report:
-        """Compose and store a report (``dry_run``: compose only; the returned report has id 0)."""
+        """Compose and store a report (``dry_run``: compose only; the returned report has id 0). ``meta`` is
+        merged into the stored meta last (the status cycle passes the report's ``speakable`` this way)."""
         draft = await self.compose(kind, groups=groups, use_llm=use_llm, write_memory=not dry_run)
         draft.meta["trigger"] = trigger
+        draft.meta |= meta or {}
         at = self.clock()
         if dry_run:
             return Report(id=0, kind=kind, generated_at=at, text=draft.text, meta=draft.meta)
         report = self.store.add_report(kind, at, draft.text, draft.meta)
         log.info("narrative.stored", kind=kind, report_id=report.id, path=draft.meta["path"])
         return report
+
+
+def _worst_severity(facts: Facts) -> Severity:
+    """The most severe thing a report is about: its items, and for a briefing its proposed and approved
+    recommendations. ``info`` when there is nothing (rejections, the tariff and notes never count)."""
+    found = [g.latest.severity for g in facts.groups]
+    if facts.kind != "status":
+        found += [r.severity for r in (*facts.proposed, *facts.approved)]
+    return max(found, key=rank, default=Severity.INFO)
+
+
+def delivery_meta(facts: Facts) -> dict[str, Any]:
+    """What the channels read from a report's meta (:meth:`Delivery.from_report
+    <argus_scout.channels.base.Delivery.from_report>`):
+
+    - ``severity``: the worst item (:func:`_worst_severity`), so ``min_severity`` filters, text headers and
+      webhook payloads match what the report is about. A briefing with nothing open is ``info``.
+    - ``quiet_exempt``: true when any item in it is ``quiet_exempt``, so quiet hours treat the report the way
+      the status cycle treated its items.
+    - ``title``: the report's title; a status report's names its worst item.
+    """
+    severity = _worst_severity(facts)
+    title = TITLES.get(facts.kind, "Report")
+    if facts.kind == "status" and facts.groups:
+        worst = max(facts.groups, key=lambda g: (rank(g.latest.severity), g.latest.generated_at)).latest
+        more = len(facts.groups) - 1
+        title = f"{title}: {_clip(worst.summary, 120)}" + (f" (and {more} more)" if more else "")
+    return {
+        "severity": severity.value,
+        "quiet_exempt": any(g.latest.quiet_exempt for g in facts.groups),
+        "title": title,
+    }
 
 
 def _facts_meta(facts: Facts, lines: list[Line], omitted: dict[str, int]) -> dict[str, Any]:
@@ -547,6 +583,7 @@ __all__ = [
     "TariffFact",
     "build_narrator",
     "build_prompt",
+    "delivery_meta",
     "fact_lines",
     "render_facts",
     "render_template",

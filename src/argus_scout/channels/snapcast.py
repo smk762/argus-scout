@@ -109,7 +109,11 @@ class SnapcastConfig(ChannelSettings):
     def _control(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        parts = urlsplit(value)
+        try:
+            parts = urlsplit(value)
+            _ = parts.port  # raises ValueError for a non-numeric or out-of-range port
+        except ValueError as exc:
+            raise ValueError(f"{value!r} is not a valid control address: {exc}") from None
         if parts.scheme not in ("tcp", "http", "https") or not parts.hostname:
             raise ValueError(f"{value!r} is not tcp://host:port or http(s)://host:port/jsonrpc")
         if parts.scheme == "tcp" and (parts.path not in ("", "/") or parts.query):

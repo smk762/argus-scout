@@ -132,3 +132,47 @@ def test_usage_json_is_imported_once(tmp_path):
         budget.consume("llm_calls")
         legacy.write_text(json.dumps({"day": today, "counts": {"llm_calls": 4}}))  # a stale copy reappears
         assert budget_from_config(config, counter=store).used("llm_calls") == 5  # merged by max, never added
+
+
+def test_caps_reset_at_midnight_in_the_schedule_timezone(tmp_path):
+    """The day rolls over at midnight in schedule.timezone, not at the host's (or UTC) midnight."""
+    from datetime import UTC, datetime, timedelta
+
+    config = ScoutConfig.model_validate(
+        {
+            "store": {"path": str(tmp_path / "scout.db")},
+            "schedule": {"timezone": "Pacific/Auckland"},
+            "budget": {"limits": {"tts": 1}},
+        }  # fmt: skip
+    )
+    now = [datetime(2026, 6, 1, 11, 30, tzinfo=UTC)]  # 23:30 in Auckland (UTC+12), still 1 June there
+    with SqliteStore(config.store.path) as store:
+        budget = budget_from_config(config, counter=store, clock=lambda: now[0])
+        assert budget.try_consume("tts") and not budget.try_consume("tts")
+        now[0] += timedelta(minutes=20)  # 23:50 Auckland, 11:50 UTC: same day in both
+        assert not budget.try_consume("tts")
+        now[0] += timedelta(minutes=20)  # 00:10 on 2 June in Auckland, still 1 June in UTC
+        assert budget.try_consume("tts"), "the cap must reset at Auckland midnight"
+        assert store.usage_counts("2026-06-02") == {"tts": 1}
+
+
+def test_caps_follow_the_schedule_timezone_on_the_wall_clock(tmp_path, monkeypatch):
+    """Without a clock seam the wall clock is read in schedule.timezone, never the host's local zone."""
+    from datetime import UTC, datetime
+
+    import argus_scout.budget as budget_module
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            moment = datetime(2026, 6, 1, 23, 30, tzinfo=UTC)  # 2 June 11:30 in Auckland
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(budget_module, "datetime", Frozen)
+    config = ScoutConfig.model_validate(
+        {"store": {"path": str(tmp_path / "scout.db")}, "schedule": {"timezone": "Pacific/Auckland"}}
+    )
+    with SqliteStore(config.store.path) as store:
+        budget = budget_from_config(config, counter=store)
+        budget.consume("tts")
+        assert store.usage_counts("2026-06-02") == {"tts": 1}

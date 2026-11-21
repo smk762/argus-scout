@@ -138,7 +138,7 @@ A list. Every entry has these keys; each kind adds its own below. A bad entry fa
 | `kind` | text | required |  | `text`, `webhook`, `snapcast`, `mask`, or a kind an installed plugin provides. |
 | `name` | text | required |  | Unique among channels. Delivery records are keyed by it, so renaming a channel makes it a new one. |
 | `enabled` | boolean | `true` |  | `false` keeps the entry but sends nothing. |
-| `min_severity` | `info` \| `notice` \| `warning` \| `critical` | `info` |  | Deliver only messages at or above this severity. Reports are delivered as `info` in this version, so anything above `info` keeps every report off this channel. |
+| `min_severity` | `info` \| `notice` \| `warning` \| `critical` | `info` |  | Deliver only messages at or above this severity. A report's severity is that of the worst item in it (a briefing also counts its open recommendations); a report with nothing open is `info`. |
 | `kinds` | list of text | `[]` |  | Deliver only these kinds (report kinds such as `morning`, or `event` for an inbox item). Empty: all. |
 | `timeout` | number | `30.0` | > 0, <= 600 | Seconds one delivery may take, retries included. |
 
@@ -378,7 +378,7 @@ Daily usage caps (see `argus_scout.budget`). `limits` maps a kind to calls per d
 
 | Key | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `limits` | map of text to integer | `{}` | each value >= 0 | Kind -> calls per day. Scout charges `llm_calls` (each report's model call), `tts` (each speech synthesis) and `speak` (each spoken message). Counts live in the store and reset at local midnight. |
+| `limits` | map of text to integer | `{}` | each value >= 0 | Kind -> calls per day. Scout charges `llm_calls` (each report's model call), `tts` (each speech synthesis) and `speak` (each spoken message). Counts live in the store and reset at midnight in `schedule.timezone`. |
 | `block_manual` | boolean | `false` |  | Refuse over-cap work done while serving an HTTP request too. Off: such work goes through and is logged. Scheduled jobs and the CLI are always held to the caps. |
 
 ```yaml

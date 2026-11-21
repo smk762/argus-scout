@@ -12,11 +12,12 @@ report:
   # min_severity: notice
   # max_items: 4
 
-# Which items are spoken. Everything else in the update is text only.
+# Which items in a status update are spoken: those at or above min_severity
+# whose source routes to voice and that are speakable. Everything else in the
+# update is text only, and an update with nothing to say aloud is not spoken.
 voice:
   # min_severity: warning
-  # on_change_only: true          # repeats stay text-only
-  # backoff_max_seconds: 21600    # after a failed voice delivery
+  # on_change_only: true          # speak only items that are news; repeats stay text-only
 
 # Overnight rest: no scheduled status updates at all. Empty disables it.
 rest_hours:
@@ -30,9 +31,10 @@ quiet_hours:
   # end: "07:00"
   # min_severity: critical
 
-# Re-announce an unchanged, still-unacked item once this many seconds have
-# passed since it was last reported. Without an entry, unchanged items are
-# never repeated.
+# A status update goes out when an item is news: new, escalated or otherwise
+# changed, or cleared at its source and back again. Re-announce an unchanged,
+# still-open item once this many seconds have passed since it was last
+# reported. Without an entry, unchanged items are never repeated.
 reannounce:
   # critical: 3600
 

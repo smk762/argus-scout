@@ -22,21 +22,27 @@ rule was evaluated and the instance has been absent for longer than ``clear_grac
 last seen). A rule that couldn't be evaluated (Prometheus unknown) never clears anything; only
 ``expires_at`` can retire its proposals, so a long outage can't keep stale ones open forever.
 Approved recommendations are left alone: a person (or a standing rule) said yes, and only a person
-moves one further.
+moves one further. The one exception is **escalation past a standing approval**: when a hit would raise a
+*standing*-approved recommendation to a severity the guardrails (:func:`~argus_scout.approvals.guardrail_block`)
+refuse to auto-approve, the engine retires it ("escalated past standing approval: <guardrail>") and raises a
+fresh ``proposed`` one for the same key at the new severity, bypassing the rejection memory. No standing rule
+can approve that one, so a person decides. A manually approved recommendation keeps its approval; its severity
+is raised and the evidence notes it.
 
 **Advisory only.** The engine moves recommendations to ``proposed``, to ``approved`` (by standing
-rule only), and from ``proposed`` to ``retired``. It never sets ``deployed`` and never acts.
+rule only), from ``proposed`` to ``retired``, and a standing-approved one to ``retired`` when it escalates
+past the guardrails. It never sets ``deployed`` and never acts.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 import structlog
 
-from argus_scout.approvals import StandingApprovals
+from argus_scout.approvals import StandingApprovals, guardrail_block
 from argus_scout.recommendations import Recommendation, Status
 from argus_scout.severity import Severity, rank
 from argus_scout.signals import Evaluation, SignalHit
@@ -155,14 +161,24 @@ class RecommendationEngine:
 
         for key, hit in by_key.items():
             open_recs = self.store.recommendations_by_key(key, OPEN)
+            note: str | None = None  # set when an escalated standing approval was retired: re-propose regardless
             if open_recs:
-                if self._refresh(open_recs[0], hit, now):
-                    report.refreshed.append(open_recs[0])
-                continue
-            if self._suppressed(hit, now):
+                rec = open_recs[0]
+                block = self._escalated_past_standing(rec, hit)
+                if block is None:
+                    if self._refresh(rec, hit, now):
+                        report.refreshed.append(rec)
+                    continue
+                reason = f"escalated past standing approval: {block}"
+                if not (rec.retire(reason, now=now) and self._save(rec, Status.APPROVED, by=ENGINE, reason=reason)):
+                    continue  # a person moved it first; the next cycle sees their decision
+                log.info("engine.standing_revoked", key=key, rec_id=rec.id, reason=reason)
+                report.retired.append(rec)
+                note = f"replaces {rec.id}, approved by standing rule {rec.approved_by_rule}: {reason}"
+            if note is None and self._suppressed(hit, now):
                 report.suppressed.append(hit)
                 continue
-            rec = self._propose(hit, now)
+            rec = self._propose(hit, now, note=note)
             report.new.append(rec)
             if rec.status == Status.APPROVED and rec.approval_source == "standing":
                 report.auto_approved.append(rec)
@@ -191,12 +207,25 @@ class RecommendationEngine:
             return False
         return True
 
+    @staticmethod
+    def _escalated_past_standing(rec: Recommendation, hit: SignalHit) -> str | None:
+        """The guardrail a refresh by ``hit`` would make a *standing*-approved ``rec`` fail, or None. A standing
+        rule could never have approved it at the new severity, so the approval must not outlive the escalation."""
+        if rec.status != Status.APPROVED or rec.approval_source != "standing":
+            return None
+        if rank(hit.severity) <= rank(rec.severity):
+            return None
+        return guardrail_block(replace(rec, severity=hit.severity))
+
     def _refresh(self, rec: Recommendation, hit: SignalHit, now: datetime) -> bool:
         loaded = rec.status
         if rec.status in (Status.DRAFT, Status.PROPOSED):
             rec.title, rec.action, rec.rationale = hit.title, hit.action, hit.rationale
             rec.impact, rec.confidence = hit.impact, hit.confidence
         if rank(hit.severity) > rank(rec.severity):
+            if rec.status == Status.APPROVED:  # a person approved it at the lower severity: keep it, say so
+                note = f"severity raised from {rec.severity.value} to {hit.severity.value} after approval"
+                rec.evidence = [*rec.evidence, f"{note} on {now:%Y-%m-%d %H:%M}Z"]
             rec.severity = hit.severity
         rec.evidence = [*rec.evidence, hit.evidence][-MAX_EVIDENCE:]
         rec.last_seen_at = now
@@ -217,8 +246,8 @@ class RecommendationEngine:
             return False
         return True
 
-    def _propose(self, hit: SignalHit, now: datetime) -> Recommendation:
-        evidence = [hit.evidence]
+    def _propose(self, hit: SignalHit, now: datetime, *, note: str | None = None) -> Recommendation:
+        evidence = [hit.evidence] if note is None else [note, hit.evidence]
         rejected = self.store.recommendations_by_key(hit.key, Status.REJECTED)
         if rejected:
             last = rejected[0]

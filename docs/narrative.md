@@ -8,7 +8,7 @@ and shown, never parsed: a report that says "approve X" approves nothing.
 |---|---|---|
 | `morning` | at each `schedule.briefings` slot of that kind | open items, recommendations awaiting a decision and approved ones, rejections, the tariff period ahead, your notes. Under 150 words. |
 | `evening` | the same | what's still open, what was approved, what to watch overnight. Under 150 words. |
-| `status` | by the status cycle, when open items pass the heartbeat policy's report rules and differ from the last status update (or a re-announce interval passed); or at a briefing slot | only the reportable items, most severe first, and rejections. Under 80 words. |
+| `status` | by the status cycle, when open items pass the heartbeat policy's report rules and at least one is news: not yet announced in its current form (new, escalated or changed, or cleared and back), or its re-announce interval passed; or at a briefing slot | only the reportable items, most severe first, and rejections. Under 80 words. |
 
 Rest hours (heartbeat policy) skip the status cycle entirely; briefings still run. Write one now:
 

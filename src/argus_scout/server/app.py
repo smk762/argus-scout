@@ -24,7 +24,6 @@ from argus_scout.budget import USAGE_STATE_FILE, DailyBudget, ManualOriginMiddle
 from argus_scout.channels import Channels, Delivery, Dispatcher, DispatchReport, Synthesiser, build_dispatcher
 from argus_scout.config import ScoutConfig
 from argus_scout.cycles import register_jobs
-from argus_scout.events import StatusEvent
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.inbox import Inbox
 from argus_scout.prometheus import PrometheusClient
@@ -62,10 +61,6 @@ class Runtime:
         Idempotent: a report already sent on a channel isn't sent there again, even after a restart."""
         return await self.dispatcher.deliver(Delivery.from_report(report), force=force)
 
-    async def deliver_event(self, event: StatusEvent) -> DispatchReport:
-        """Send one inbox status item (the latest event of a group) to the channels."""
-        return await self.dispatcher.deliver(Delivery.from_event(event))
-
 
 def deliver_reports(dispatcher: Dispatcher) -> Callable[[Report], Awaitable[None]]:
     """The ``deliver`` callable the cycles take: a report out through ``dispatcher``. A failing channel is
@@ -95,7 +90,7 @@ def build_runtime(
     if store is None:
         store = SqliteStore(config.store.path)
     if budget is None:
-        budget = budget_from_config(config, counter=store)
+        budget = budget_from_config(config, counter=store, clock=clock)
     policy_file = PolicyFile(config.files.heartbeat)
     tariff = TariffFile(config.files.tariff)
     scheduler = Scheduler(store, clock=clock, **({"sleep": sleep} if sleep else {}))

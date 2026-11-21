@@ -263,7 +263,11 @@ def import_usage_file(path: Path, counter: UsageCounter, *, rename: bool = True)
 
 
 def budget_from_config(
-    config: ScoutConfig, *, counter: UsageCounter | None = None, persist: bool = True
+    config: ScoutConfig,
+    *,
+    counter: UsageCounter | None = None,
+    persist: bool = True,
+    clock: Callable[[], datetime] | None = None,
 ) -> DailyBudget:
     """The budget ``budget:`` in scout.yaml describes.
 
@@ -271,16 +275,24 @@ def budget_from_config(
     processes; a :data:`USAGE_STATE_FILE` an older scout left beside the store is imported into it once. Without
     one they are kept in :data:`USAGE_STATE_FILE`, which only one process may write.
 
+    The day rolls over at midnight in ``schedule.timezone`` (the briefings' clock), whatever the host's zone;
+    ``clock`` (aware UTC "now", default the wall clock) is a seam for tests and the runtime's clock.
+
     ``persist=False`` reads today's counts but never writes them (a dry run: pass the dry run's in-memory copy of
     the store as ``counter``, and the old file is read into the copy but left in place)."""
     db = str(config.store.path)
     state = None if db == ":memory:" else Path(db).parent / USAGE_STATE_FILE
     limits, block = config.budget.limits, config.budget.block_manual
+    tz = config.schedule.tz
+
+    def today() -> date:  # the caps reset at midnight in schedule.timezone, not the host's
+        return (clock() if clock is not None else datetime.now(tz)).astimezone(tz).date()
+
     if counter is not None:
         if state is not None:
             import_usage_file(state, counter, rename=persist)
-        return DailyBudget(limits, counter=counter, block_manual=block)
-    budget = DailyBudget(limits, state_path=state, block_manual=block)
+        return DailyBudget(limits, counter=counter, block_manual=block, today=today)
+    budget = DailyBudget(limits, state_path=state, block_manual=block, today=today)
     if not persist:
         budget.state_path = None
     return budget

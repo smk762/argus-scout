@@ -67,7 +67,7 @@ can no longer be redelivered, which doesn't matter past `delivery.retry_max_age`
 | `speak` | each message spoken on the voice channels |
 
 Counts live in the store, so a crash loop can't reset them and the server and the CLI share them: each charge is
-one atomic check-and-increment. They reset at local midnight (the host's clock). At the cap, a report comes from
+one atomic check-and-increment. They reset at midnight in `schedule.timezone`, whatever the host's clock says. At the cap, a report comes from
 its template (`fallback_reason: budget`) and speech is held back; text still goes out. Work done while serving an
 HTTP request goes over the cap and is logged, unless `budget.block_manual: true`; scheduled jobs and the CLI are
 always held to it. Watch `scout_usage_used` and `scout_usage_limit` on `/metrics`. An older scout's `usage.json`
@@ -120,9 +120,9 @@ argus-scout poll --config scout.yaml                # poll every polling source 
 |---|---|
 | No briefings at all | `schedule.briefings` and `schedule.timezone`; `scout_job_last_success_timestamp_seconds{job=~"briefing.*"}`; the log's `briefing.due`. |
 | Briefings say "Written from a template" | The reason on the last line (and `meta.fallback_reason` in `GET /api/reports/latest`): no model configured, the daily cap, no GPU lease, or the model failed. `brief --dry-run` shows the model's error. |
-| No status updates | `GET /api/policy/explain`: each open item's `rule` says why it isn't reported (below `report.min_severity`, routed to `briefing`, acked, quiet or rest hours). An unchanged set of items isn't reported twice unless `reannounce` says so. |
-| A channel gets nothing | `deliver --latest --channel <NAME>`; its `kinds`, `enabled`, and `min_severity` (reports go out as `info`, so anything higher filters them all); `scout_deliveries_total{result="failed"}`. A channel that already has a report shows `duplicate`; `--force` sends again. |
-| Nothing is spoken | `services.echo` set? Rest or quiet hours, `sources.scout.channel` in the heartbeat policy, the `tts` and `speak` caps, and the voice channel's own outcome in `deliver --latest`. |
+| No status updates | `GET /api/policy/explain`: each open item's `rule` says why it isn't reported (below `report.min_severity`, routed to `briefing`, acked, quiet or rest hours). A status update goes out only when an item is news (new, escalated or otherwise changed, or cleared and back); items already announced are repeated only when their `reannounce` interval has passed. |
+| A channel gets nothing | `deliver --latest --channel <NAME>`; its `kinds`, `enabled`, and `min_severity` (a report's severity is its worst item's; one with nothing open is `info`); `scout_deliveries_total{result="failed"}`. A channel that already has a report shows `duplicate`; `--force` sends again. |
+| Nothing is spoken | `services.echo` set? Rest or quiet hours, `sources.scout.channel` in the heartbeat policy, the status update's items' own voice rules (`voice.min_severity`, `speakable`, source routing, `on_change_only`), the `tts` and `speak` caps, and the voice channel's own outcome in `deliver --latest`. |
 | Signals never fire | `analyze --dry-run`: "pending" means a rule is waiting out its `for`, "unknown" means Prometheus couldn't answer the query (try it in Prometheus's UI). A rejected proposal isn't raised again until it escalates or its `rejection_ttl` passes. |
 | Pushes are refused | 403: `server.read_only` or an untrusted `Origin`; 503: no token set; 401: wrong token. See [api.md](api.md#auth-model). |
 | A policy edit had no effect | `check heartbeat` (or `approvals`, `signals`, `tariff`, `persona`) on the file: a bad file falls back to defaults and the log says why. |

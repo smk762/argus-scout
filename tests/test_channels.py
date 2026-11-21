@@ -681,8 +681,6 @@ async def test_runtime_deliver_writes_the_text_channel(tmp_path):
     assert result.sent == ["log"]
     assert "Morning, all quiet." in (tmp_path / "scout-reports.log").read_text()
     assert (await runtime.deliver(stored)).get("log").status == "duplicate"
-    result = await runtime.deliver_event(event(severity="critical"))
-    assert result.sent == ["log"]
 
 
 def test_cli_deliver_latest(tmp_path):
@@ -704,6 +702,33 @@ def test_cli_deliver_latest(tmp_path):
     result = runner.invoke(app, ["deliver", "--config", str(path), "--latest", "--channel", "nope"])
     assert result.exit_code == 1 and "no channel named nope" in result.output
     assert runner.invoke(app, ["deliver", "--config", str(path)]).exit_code == 2
+
+
+def test_cli_deliver_charges_the_speech_caps(tmp_path, monkeypatch):
+    """`deliver` builds its dispatcher with the store-backed daily caps, so speech it sends counts against tts/speak
+    and stops at the cap, the same as the server's."""
+    import argus_scout.cli as cli_module
+
+    path = tmp_path / "scout.yaml"
+    path.write_text("channels:\n  - kind: text\n    name: log\nbudget:\n  limits:\n    tts: 1\n")
+    with SqliteStore(tmp_path / "scout.db") as store:
+        store.add_report("status", T0, "UPS on battery", {"severity": "critical"})
+        store.consume_usage(datetime.now(UTC).date().isoformat(), "tts", 0)  # today's tts is already spent
+    seen = {}
+    real = cli_module.build_dispatcher
+
+    def spy(config, **kw):
+        channels, dispatcher = real(config, **kw)
+        seen["budget"] = dispatcher.budget
+        seen["tts_available"] = dispatcher.budget is not None and dispatcher.budget.available("tts")
+        return channels, dispatcher
+
+    monkeypatch.setattr(cli_module, "build_dispatcher", spy)
+    result = runner.invoke(app, ["deliver", "--config", str(path), "--latest"])
+    assert result.exit_code == 0, result.output
+    budget = seen["budget"]
+    assert budget is not None and budget.limit_for("tts") == 1
+    assert seen["tts_available"] is False  # counted in the store: the earlier charge is seen
 
 
 def test_check_config_reports_a_bad_channel(tmp_path):

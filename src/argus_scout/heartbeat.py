@@ -28,7 +28,6 @@ ORIGIN_KEYS = (
     "report.max_items",
     "voice.min_severity",
     "voice.on_change_only",
-    "voice.backoff_max_seconds",
     "rest_hours",
     "quiet_hours",
     "quiet_hours.min_severity",
@@ -95,11 +94,12 @@ class HeartbeatPolicy:
     report_max_items: int = 4
     voice_min_severity: str = Severity.WARNING.value
     voice_on_change_only: bool = True
-    voice_backoff_max_seconds: int = 21600
+    """A status report speaks only the items that are news (new, changed, recurred, or due a re-announce);
+    items already announced stay text-only. False speaks every voice-eligible item in the report."""
     rest_hours: Window = field(default_factory=Window)
     quiet_hours: Window = field(default_factory=Window)
     quiet_min_severity: str = Severity.CRITICAL.value
-    # severity → seconds: re-announce an unchanged, still-unacked item after this long
+    # severity → seconds: an unchanged, still-open item is news again this long after it was last announced
     reannounce_after: dict[str, int] = field(default_factory=dict)
     sources: dict[str, SourceRule] = field(default_factory=dict)
     path: str = ""
@@ -129,7 +129,6 @@ class HeartbeatPolicy:
             "voice": {
                 "min_severity": self.voice_min_severity,
                 "on_change_only": self.voice_on_change_only,
-                "backoff_max_seconds": self.voice_backoff_max_seconds,
             },
             "rest_hours": self.rest_hours.to_dict(),
             "quiet_hours": {
@@ -174,9 +173,8 @@ def apply_overrides(base: HeartbeatPolicy, data: dict[str, Any]) -> HeartbeatPol
     if "on_change_only" in voice:
         policy.voice_on_change_only = bool(voice["on_change_only"])
         mark("voice.on_change_only")
-    if "backoff_max_seconds" in voice:
-        policy.voice_backoff_max_seconds = max(0, int(voice["backoff_max_seconds"]))
-        mark("voice.backoff_max_seconds")
+    if "backoff_max_seconds" in voice:  # never implemented; failed voice is retried by the redelivery sweep
+        log.warning("heartbeat.policy_key_ignored", key="voice.backoff_max_seconds", see="delivery.retry_interval")
     if "start" in rest or "end" in rest:
         policy.rest_hours = Window(str(rest.get("start") or ""), str(rest.get("end") or ""))
         mark("rest_hours")
@@ -319,7 +317,9 @@ def explain(event: StatusEvent, policy: HeartbeatPolicy, *, now: datetime, quiet
 
 
 def reannounce_due(group: list[StatusEvent], policy: HeartbeatPolicy, now: datetime | None = None) -> bool:
-    """An unchanged item is news again once its severity's re-announce interval passes."""
+    """An unchanged item is news again once its severity's re-announce interval passes since it was last
+    announced (``last_broadcast_at``, set when a status report includes it). The status cycle asks this per
+    group (:meth:`StatusCycle.is_news <argus_scout.cycles.StatusCycle.is_news>`)."""
     if not group:
         return False
     interval = policy.reannounce_after.get(group[0].severity.value)
