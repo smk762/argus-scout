@@ -76,12 +76,12 @@ def test_image_config_env_matches_the_serve_option():
 
 
 def _image_extras() -> set[str]:
-    """The extras the image's ``pip install`` of the project names (``".[a,b]"`` -> ``{"a", "b"}``)."""
+    """The extras the image's ``pip install`` of the project names (``".[a,b]"`` or ``"<wheel>.whl)[a,b]"``)."""
     text = re.sub(r"\\\n", " ", (ROOT / "Dockerfile").read_text())
     found: set[str] = set()
     for line in text.splitlines():
         if re.match(r"\s*RUN\s", line) and "pip install" in line:
-            for group in re.findall(r"""["']?\.\[([^\]]*)\]""", line):
+            for group in re.findall(r"""(?:\.|\.whl\))\[([^\]]*)\]""", line):
                 found |= {extra.strip() for extra in group.split(",") if extra.strip()}
     assert found, "the Dockerfile installs the project with no extras (no `.[...]` in a pip install)"
     return found
