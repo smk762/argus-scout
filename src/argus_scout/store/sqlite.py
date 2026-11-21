@@ -138,6 +138,11 @@ MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (rule, key)
     );
     """,
+    # 5: a system-side "cleared" for status events (a polled condition that disappeared), distinct from a
+    # person's ack: resolved_at is set by scout, acked_at/acked_by only by a person.
+    """
+    ALTER TABLE events ADD COLUMN resolved_at TEXT;
+    """,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -256,6 +261,7 @@ class SqliteStore:
             last_seen=_dt(row["last_seen"]),  # type: ignore[arg-type]
             seen_count=row["seen_count"],
             acked_by=row["acked_by"],
+            resolved_at=_dt(row["resolved_at"]),
         )
 
     def upsert_event(self, event: StatusEvent, *, now: datetime | None = None) -> bool:
@@ -265,13 +271,15 @@ class SqliteStore:
         The ack and announce bookkeeping are kept while the fingerprint is
         unchanged; a changed fingerprint (e.g. a severity change under the same
         id) is new news, so it reopens the event and clears its announce state.
+        So does seeing a *resolved* event again: the condition cleared and came back.
         """
         seen = _ts(_now(now))
         data = json.dumps(event.to_dict())
         fp = event.fingerprint
         with self._tx() as conn:
             row = conn.execute(
-                "SELECT fingerprint FROM events WHERE source = ? AND event_id = ?", (event.source, event.event_id)
+                "SELECT fingerprint, resolved_at FROM events WHERE source = ? AND event_id = ?",
+                (event.source, event.event_id),
             ).fetchone()
             if row is None:
                 conn.execute(
@@ -296,11 +304,11 @@ class SqliteStore:
                 )
                 return True
             reset = ""
-            if row["fingerprint"] != fp:
+            if row["fingerprint"] != fp or row["resolved_at"] is not None:
                 reset = ", acked_at = NULL, acked_by = NULL, last_announced_at = NULL, broadcast_count = 0"
             conn.execute(
                 f"""UPDATE events SET fingerprint = ?, severity = ?, generated_at = ?, expires_at = ?,
-                        last_seen = ?, seen_count = seen_count + 1, data = ?{reset}
+                        last_seen = ?, seen_count = seen_count + 1, data = ?, resolved_at = NULL{reset}
                     WHERE source = ? AND event_id = ?""",
                 (
                     fp,
@@ -342,9 +350,23 @@ class SqliteStore:
             )
             return cur.rowcount > 0
 
+    def resolve_missing(self, source: str, keep: Iterable[str], *, at: datetime | None = None) -> list[str]:
+        """Mark every unresolved event of ``source`` whose id is not in ``keep`` resolved (cleared at the source).
+
+        A system-side close: ``acked_at``/``acked_by`` are left alone, so a person's ack audit stays theirs.
+        Seeing the event again reopens it (see :meth:`upsert_event`). Returns the ids it resolved."""
+        keep = list(dict.fromkeys(keep))
+        marks = ", ".join("?" * len(keep))
+        where = "source = ? AND resolved_at IS NULL" + (f" AND event_id NOT IN ({marks})" if keep else "")
+        with self._tx() as conn:
+            ids = [r["event_id"] for r in conn.execute(f"SELECT event_id FROM events WHERE {where}", [source, *keep])]
+            if ids:
+                conn.execute(f"UPDATE events SET resolved_at = ? WHERE {where}", [_ts(_now(at)), source, *keep])
+        return ids
+
     def open_events(self, *, now: datetime | None = None, include_expired: bool = False) -> list[StatusEvent]:
-        """Unacked events, oldest first; expired ones are left out unless asked for."""
-        sql = "SELECT * FROM events WHERE acked_at IS NULL"
+        """Unacked, unresolved events, oldest first; expired ones are left out unless asked for."""
+        sql = "SELECT * FROM events WHERE acked_at IS NULL AND resolved_at IS NULL"
         params: list[Any] = []
         if not include_expired:
             sql += " AND (expires_at IS NULL OR expires_at > ?)"
@@ -355,12 +377,15 @@ class SqliteStore:
         """Every event with this content identity (see :attr:`StatusEvent.fingerprint`), oldest first."""
         sql = "SELECT * FROM events WHERE fingerprint = ?"
         if open_only:
-            sql += " AND acked_at IS NULL"
+            sql += " AND acked_at IS NULL AND resolved_at IS NULL"
         return [self._event_from_row(r) for r in self._query(sql + " ORDER BY first_seen, rowid", (fingerprint,))]
 
     def open_fingerprints(self) -> dict[str, int]:
         """Open events counted per fingerprint: the cheap duplicate check."""
-        rows = self._query("SELECT fingerprint, COUNT(*) AS n FROM events WHERE acked_at IS NULL GROUP BY fingerprint")
+        rows = self._query(
+            "SELECT fingerprint, COUNT(*) AS n FROM events WHERE acked_at IS NULL AND resolved_at IS NULL"
+            " GROUP BY fingerprint"
+        )
         return {r["fingerprint"]: r["n"] for r in rows}
 
     # -- recommendations ---------------------------------------------------------
@@ -636,10 +661,10 @@ class SqliteStore:
         return counts
 
     def open_event_counts(self, *, now: datetime | None = None) -> dict[str, int]:
-        """Open (unacked, unexpired) events per severity; every severity is present."""
+        """Open (unacked, unresolved, unexpired) events per severity; every severity is present."""
         counts = {sev.value: 0 for sev in Severity}
         rows = self._query(
-            "SELECT severity, COUNT(*) AS n FROM events WHERE acked_at IS NULL"
+            "SELECT severity, COUNT(*) AS n FROM events WHERE acked_at IS NULL AND resolved_at IS NULL"
             " AND (expires_at IS NULL OR expires_at > ?) GROUP BY severity",
             (_ts(_now(now)),),
         )
@@ -649,7 +674,7 @@ class SqliteStore:
 
     # -- retention -------------------------------------------------------------------
     def prune(self, older_than: datetime) -> dict[str, int]:
-        """Delete events acked (or expired) before ``older_than`` and reports generated before it.
+        """Delete events acked, resolved or expired before ``older_than`` and reports generated before it.
 
         Open events, recommendations and their audit trail are never pruned.
         """
@@ -657,8 +682,9 @@ class SqliteStore:
         with self._tx() as conn:
             events = conn.execute(
                 """DELETE FROM events WHERE (acked_at IS NOT NULL AND acked_at < ?)
+                       OR (resolved_at IS NOT NULL AND resolved_at < ?)
                        OR (expires_at IS NOT NULL AND expires_at < ?)""",
-                (cutoff, cutoff),
+                (cutoff, cutoff, cutoff),
             ).rowcount
             reports = conn.execute("DELETE FROM reports WHERE generated_at < ?", (cutoff,)).rowcount
         if events or reports:

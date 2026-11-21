@@ -433,9 +433,9 @@ async def test_register_jobs_from_config(store):
     clock = FakeClock(local(2026, 6, 1, 7, 29))
     sched = make_scheduler(clock, store)
     register_jobs(sched, config, store, PolicyFile(None), sources=Sources())
-    assert set(sched.jobs) == {"status", "analysis", "briefing:morning", "briefing:evening"}
+    assert set(sched.jobs) == {"status", "analysis", "briefing:morning@07:30", "briefing:evening@19:00"}
     assert sorted(await sched.tick(wait=True)) == ["analysis", "status"]
     clock.set(local(2026, 6, 1, 7, 30))
-    assert await sched.tick(wait=True) == ["briefing:morning"]
-    briefing = sched.jobs["briefing:morning"].func
+    assert await sched.tick(wait=True) == ["briefing:morning@07:30"]
+    briefing = sched.jobs["briefing:morning@07:30"].func
     assert isinstance(briefing, BriefingJob) and briefing.runs == [clock()]

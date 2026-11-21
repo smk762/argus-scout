@@ -51,6 +51,8 @@ class InboxEntry:
     last_seen: datetime
     seen_count: int = 1
     acked_by: str | None = None
+    resolved_at: datetime | None = None
+    """When scout saw the condition clear at its source (a poll stopped listing it). Not an ack: nobody ``acked_by``."""
 
 
 @dataclass
@@ -109,6 +111,10 @@ class Store(Protocol):
     def ack_event(self, source: str, event_id: str, by: str, *, at: datetime | None = None) -> bool: ...
 
     def mark_announced(self, source: str, event_id: str, *, at: datetime | None = None) -> bool: ...
+
+    def resolve_missing(self, source: str, keep: Iterable[str], *, at: datetime | None = None) -> list[str]:
+        """Resolve ``source``'s unresolved events not in ``keep`` (a system-side close, never an ack)."""
+        ...
 
     def open_events(self, *, now: datetime | None = None, include_expired: bool = False) -> list[StatusEvent]: ...
 

@@ -35,6 +35,7 @@ import yaml
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Discriminator,
     Field,
@@ -105,6 +106,18 @@ def _check_name(value: str) -> str:
     return value
 
 
+def _null_as(empty: type) -> BeforeValidator:
+    def coerce(value: Any) -> Any:
+        return empty() if value is None else value
+
+    return BeforeValidator(coerce)
+
+
+NullAsEmptyList = _null_as(list)
+"""Annotate a list field with this so a key whose entries are all commented out (YAML null) reads as ``[]``."""
+NullAsEmptyDict = _null_as(dict)
+"""The same for a mapping or a section: a null value reads as ``{}`` (a section's defaults)."""
+
 ConfigPath = Annotated[Path, AfterValidator(_resolve_path)]
 """A path; relative ones resolve against the config file's directory."""
 EnvName = Annotated[str, AfterValidator(_check_env_name)]
@@ -165,8 +178,16 @@ class JsonPollSource(SourceSettings):
     interval: float = Field(default=60.0, gt=0, description="Seconds between polls.")
     items: str | None = None
     """Dotted path to the list of items in the response (``data.alerts``). Unset: the response is one item."""
-    fields: dict[str, str] = Field(default_factory=dict)
-    """StatusEvent field -> dotted path within an item, e.g. ``{summary: labels.alertname}``."""
+    fields: Annotated[dict[str, str], NullAsEmptyDict] = Field(default_factory=dict)
+    """StatusEvent field -> dotted path within an item, e.g. ``{summary: labels.alertname}``. ``source`` can't be
+    mapped: a polled source's events are always its own."""
+    id: str | list[str] | None = None
+    """Dotted path (or a list of them) to what identifies an item, e.g. ``[labels.alertname, labels.instance]``. The
+    event id is derived from those values, so set it whenever two items can share a summary. Unset: see
+    :mod:`argus_scout.sources.json_poll` for the default rule."""
+    resolve_missing: bool = True
+    """Close (``resolved``) this source's open events that a successful poll no longer lists. Turn it off for an
+    endpoint that reports only changes rather than the full current state."""
     auth_header: str = "Authorization"
     auth_env: EnvName | None = None
     """Env var holding the value sent in ``auth_header`` (for example ``Bearer abc...``)."""
@@ -174,12 +195,27 @@ class JsonPollSource(SourceSettings):
     @field_validator("fields")
     @classmethod
     def _known_fields(cls, value: dict[str, str]) -> dict[str, str]:
-        unknown = sorted(set(value) - EVENT_FIELDS)
+        mappable = EVENT_FIELDS - {"source"}
+        if "source" in value:
+            raise ValueError("source can't be mapped: a polled source's events are always its own (its name)")
+        unknown = sorted(set(value) - mappable)
         if unknown:
-            raise ValueError(
-                f"not status event fields: {', '.join(unknown)} (known: {', '.join(sorted(EVENT_FIELDS))})"
-            )
+            raise ValueError(f"not status event fields: {', '.join(unknown)} (known: {', '.join(sorted(mappable))})")
         return value
+
+    @field_validator("id")
+    @classmethod
+    def _id_paths(cls, value: str | list[str] | None) -> str | list[str] | None:
+        paths = [value] if isinstance(value, str) else value or []
+        if value is not None and (not paths or any(not p.strip() for p in paths)):
+            raise ValueError("must be a dotted path or a non-empty list of them")
+        return value
+
+    @model_validator(mode="after")
+    def _one_identity(self) -> JsonPollSource:
+        if self.id is not None and "event_id" in self.fields:
+            raise ValueError("set id or fields.event_id, not both")
+        return self
 
 
 class PluginSource(BaseModel):
@@ -202,7 +238,8 @@ BUILTIN_SOURCE_KINDS = frozenset({"webhook", "json_poll"})
 
 def _source_tag(value: Any) -> str:
     kind = value.get("kind") if isinstance(value, dict) else getattr(value, "kind", None)
-    return kind if kind in BUILTIN_SOURCE_KINDS else "plugin"
+    # A list or mapping kind is unhashable: send it to the plugin model, which reports ``kind`` as not text.
+    return kind if isinstance(kind, str) and kind in BUILTIN_SOURCE_KINDS else "plugin"
 
 
 SourceConfig = Annotated[
@@ -237,7 +274,17 @@ class ScheduleConfig(_Section):
     analysis_interval: float = Field(default=900.0, gt=0, description="Seconds between analysis cycles.")
     status_interval: float = Field(default=300.0, gt=0, description="Seconds between status cycles.")
     timezone: str = "UTC"
-    briefings: list[Briefing] = Field(default_factory=list)
+    briefings: Annotated[list[Briefing], NullAsEmptyList] = Field(default_factory=list)
+
+    @field_validator("briefings")
+    @classmethod
+    def _one_briefing_per_slot(cls, value: list[Briefing]) -> list[Briefing]:
+        seen: set[tuple[str, str]] = set()
+        for briefing in value:
+            if (briefing.kind, briefing.at) in seen:
+                raise ValueError(f"duplicate briefing: {briefing.kind} at {briefing.at}")
+            seen.add((briefing.kind, briefing.at))
+        return value
 
     @field_validator("timezone")
     @classmethod
@@ -285,7 +332,7 @@ class BudgetConfig(_Section):
     """Daily usage caps (see :mod:`argus_scout.budget`). ``limits`` maps a kind to calls per day; a missing kind
     or ``0`` is unlimited. The narrative charges each model call to ``llm_calls``."""
 
-    limits: dict[Name, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    limits: Annotated[dict[Name, Annotated[int, Field(ge=0)]], NullAsEmptyDict] = Field(default_factory=dict)
     block_manual: bool = False
     """Refuse over-cap work started by a person too (HTTP requests, the CLI), not only scheduled work."""
 
@@ -295,7 +342,7 @@ class ServerConfig(_Section):
     port: int = Field(default=8400, ge=1, le=65535)
     read_only: bool = True
     """Refuse every state-changing route (webhook pushes included). Turn off only once a token is set."""
-    allowed_origins: list[str] = Field(default_factory=list)
+    allowed_origins: Annotated[list[str], NullAsEmptyList] = Field(default_factory=list)
     """Browser origins trusted to make writes (``https://ui.example``). No ``Origin`` header (curl, scripts) and
     a same-host IP or ``localhost`` origin are always allowed; any other cross-origin write is refused."""
     token_env: EnvName | None = "SCOUT_API_TOKEN"
@@ -309,14 +356,15 @@ class ServerConfig(_Section):
 class ScoutConfig(_Section):
     """The whole of ``scout.yaml``."""
 
-    files: FilesConfig = FilesConfig()
+    # A section whose keys are all commented out parses as null: NullAsEmpty* reads it as empty (defaults).
+    files: Annotated[FilesConfig, NullAsEmptyDict] = FilesConfig()
     # A dict default is validated like file input, so the default store path resolves beside the config too.
-    store: StoreConfig = Field(default={}, validate_default=True)
-    sources: list[SourceConfig] = Field(default_factory=list)
-    schedule: ScheduleConfig = ScheduleConfig()
-    services: ServicesConfig = ServicesConfig()
-    budget: BudgetConfig = BudgetConfig()
-    server: ServerConfig = ServerConfig()
+    store: Annotated[StoreConfig, NullAsEmptyDict] = Field(default={}, validate_default=True)
+    sources: Annotated[list[SourceConfig], NullAsEmptyList] = Field(default_factory=list)
+    schedule: Annotated[ScheduleConfig, NullAsEmptyDict] = ScheduleConfig()
+    services: Annotated[ServicesConfig, NullAsEmptyDict] = ServicesConfig()
+    budget: Annotated[BudgetConfig, NullAsEmptyDict] = BudgetConfig()
+    server: Annotated[ServerConfig, NullAsEmptyDict] = ServerConfig()
 
     _base_dir: Path | None = PrivateAttr(default=None)
 
@@ -326,14 +374,6 @@ class ScoutConfig(_Section):
 
         Plugin source configs are validated after loading, so they need it to resolve their paths."""
         return self._base_dir
-
-    @model_validator(mode="before")
-    @classmethod
-    def _empty_sections(cls, data: Any) -> Any:
-        # A section whose keys are all commented out parses as null: treat it as empty.
-        if isinstance(data, dict):
-            data = {k: ([] if k == "sources" else {}) if v is None else v for k, v in data.items()}
-        return data
 
     @model_validator(mode="after")
     def _unique_source_names(self) -> ScoutConfig:

@@ -14,8 +14,9 @@ entry points (a source checkout that was never installed still works). A plugin 
 built-in kind.
 
 **Forgiving, per source.** A plugin that fails to import, an unknown kind or a ``sources:`` entry its
-plugin rejects is reported as an error for that one entry; the other sources still load. Scout
-refuses to start only on a broken ``scout.yaml`` itself (see :mod:`argus_scout.config`).
+plugin rejects (a validation error, or *any* exception its model raises) is reported as an error for that
+one entry; the other sources still load. Scout refuses to start only on a broken ``scout.yaml`` itself (see
+:mod:`argus_scout.config`).
 """
 
 from __future__ import annotations
@@ -143,6 +144,17 @@ def _format(exc: ValidationError) -> str:
     return "; ".join(parts)
 
 
+def _check_bound(name: str, plugin: Source, cfg: Any) -> None:
+    """What the rest of scout reads from a plugin's validated config without guarding: its ``name`` and, for a
+    poller, a usable ``interval``. Checked here so a bad plugin model fails its own entry, not server startup."""
+    if getattr(cfg, "name", None) != name:
+        raise TypeError(f"the plugin's config model must keep name {name!r} (got {getattr(cfg, 'name', None)!r})")
+    interval = getattr(cfg, "interval", None)
+    if isinstance(plugin, PollingSource) and interval is not None:
+        if isinstance(interval, bool) or not isinstance(interval, int | float) or not interval > 0:
+            raise TypeError(f"interval must be a positive number of seconds, got {interval!r}")
+
+
 def build_sources(config: ScoutConfig, registry: Registry | None = None) -> Sources:
     """Bind every ``sources:`` entry to its plugin. A bad entry is an error for that entry only."""
     registry = registry or load_registry()
@@ -161,8 +173,12 @@ def build_sources(config: ScoutConfig, registry: Registry | None = None) -> Sour
         if isinstance(entry, PluginSource):
             try:
                 cfg = plugin.config_model.model_validate(entry.model_dump(), context={"base_dir": config.base_dir})
+                _check_bound(entry.name, plugin, cfg)
             except ValidationError as exc:
                 built.errors[entry.name] = f"{entry.kind}: {_format(exc)}"
+                continue
+            except Exception as exc:  # noqa: BLE001 — a plugin's own validator may raise anything; it fails only itself
+                built.errors[entry.name] = f"{entry.kind}: {type(exc).__name__}: {exc}"
                 continue
         else:
             cfg = entry
