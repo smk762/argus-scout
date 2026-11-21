@@ -7,8 +7,8 @@ touches the hosts it reports on. Anything it recommends is carried out by a pers
 Part of the [Argus suite](https://github.com/smk762/argus-cortex/blob/dev/SUITE.md). Where
 [argus-herald](https://github.com/smk762/argus-herald) broadcasts out to the public, scout reports in to you.
 
-> **Status: pre-alpha.** The policy core, signals and the HTTP API are here. LLM briefings and delivery channels are
-> being built in phases; see the development epic in this repo's issues.
+> **Status: pre-alpha.** The policy core, signals, the HTTP API and the narrative (briefings) are here. Delivery
+> channels are being built in phases; see the development epic in this repo's issues.
 
 ## What's here
 
@@ -21,6 +21,9 @@ Part of the [Argus suite](https://github.com/smk762/argus-cortex/blob/dev/SUITE.
 | `argus_scout.tariff` | Time-of-use energy tariffs in any currency: the active period, the next change, block-rate tiers, and gaps in coverage. |
 | `argus_scout.events` | The status-event envelope any source sends to scout. |
 | `argus_scout.signals` | Declarative signal rules in YAML: a PromQL query, a threshold, how long it must hold, a severity and a recommendation template. They replace hard-coded analyzers. Try them once with `argus-scout analyze --config scout.yaml --dry-run`. |
+| `argus_scout.narrative` | Morning, evening and status reports written from structured facts (open items, recommendations, rejections and their reasons, the tariff, your notes), with prompts sized for small local models. If the model is down, over its daily cap or not configured, the report comes from a plain template instead: a briefing is never skipped. Try one with `argus-scout brief --config scout.yaml --kind morning --dry-run`. |
+| `argus_scout.llm` | The model call, through argus-cortex's remote backends: Ollama, or any OpenAI-compatible API (local or hosted). Every call is charged to a daily cap, and the model's output is only ever text: nothing parses it into an action. |
+| `argus_scout.persona` / `argus_scout.memory` | How reports sound (a neutral default persona; bring your own YAML) and a directory of your own markdown notes folded into briefings. Scout only reads your notes and writes just its own rejections summary there. |
 | `argus_scout.engine` | Turns signal hits into recommendations: one per instance (refreshed, never duplicated), retired when the signal clears or goes stale, standing approvals applied when proposed, and a rejected proposal isn't raised again unless it gets worse. If Prometheus can't answer, the result is "unknown", never "all clear". |
 
 ## Install

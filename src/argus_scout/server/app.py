@@ -15,13 +15,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
 import argus_scout
-from argus_scout.budget import DailyBudget, ManualOriginMiddleware
+from argus_scout.budget import USAGE_STATE_FILE, DailyBudget, ManualOriginMiddleware, budget_from_config
 from argus_scout.config import ScoutConfig
 from argus_scout.cycles import register_jobs
 from argus_scout.heartbeat import PolicyFile
@@ -36,9 +35,6 @@ from argus_scout.sources import Sources, build_sources
 from argus_scout.store.base import Store
 from argus_scout.store.sqlite import SqliteStore
 from argus_scout.tariff import TariffFile
-
-USAGE_STATE_FILE = "usage.json"
-"""Daily usage counts, kept beside the store so a crash loop can't reset the caps."""
 
 
 @dataclass
@@ -70,15 +66,22 @@ def build_runtime(
     if store is None:
         store = SqliteStore(config.store.path)
     if budget is None:
-        db = str(config.store.path)
-        budget = DailyBudget(state_path=None if db == ":memory:" else Path(db).parent / USAGE_STATE_FILE)
+        budget = budget_from_config(config)
     policy_file = PolicyFile(config.files.heartbeat)
     tariff = TariffFile(config.files.tariff)
     scheduler = Scheduler(store, clock=clock, **({"sleep": sleep} if sleep else {}))
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
     register_jobs(
-        scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus, tariff=tariff
+        scheduler,
+        config,
+        store,
+        policy_file,
+        inbox=inbox,
+        sources=sources,
+        prometheus=prometheus,
+        tariff=tariff,
+        budget=budget,
     )
     collector = ScoutCollector(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
@@ -137,4 +140,4 @@ def create_app(
     return app
 
 
-__all__ = ["Runtime", "build_runtime", "create_app", "get_runtime"]
+__all__ = ["USAGE_STATE_FILE", "Runtime", "build_runtime", "create_app", "get_runtime"]

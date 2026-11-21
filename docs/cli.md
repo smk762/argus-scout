@@ -20,6 +20,7 @@ $ argus-scout [OPTIONS] COMMAND [ARGS]...
 * `init`: Write a commented starter scout.yaml and a...
 * `poll`: Poll sources once and print the events...
 * `analyze`: Run one signal evaluation and engine cycle...
+* `brief`: Write one report now and print it (the...
 * `serve`: Run the HTTP server and the scheduler...
 * `check`: Validate config files before scout loads...
 * `tariff`: Inspect a time-of-use tariff.
@@ -93,6 +94,28 @@ $ argus-scout analyze [OPTIONS]
 * `--dry-run`: Work on an in-memory copy of the store: show what would change, write nothing.
 * `--help`: Show this message and exit.
 
+## `argus-scout brief`
+
+Write one report now and print it (the server writes the scheduled ones).
+
+The model&#x27;s daily cap applies; over it, or with the model unreachable, the report comes from the template.
+A status report covers the open items the heartbeat policy&#x27;s report rules allow (rest and quiet hours
+aside). The report only describes and recommends: nothing here acts.
+
+**Usage**:
+
+```console
+$ argus-scout brief [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <file>`: scout.yaml  [required]
+* `-k, --kind <str>`: Report kind: morning, evening, status.  [default: morning]
+* `--dry-run`: Store nothing: no report, no usage count, no memory file. The model is still asked.
+* `--no-llm`: Skip the model and write the report from the template.
+* `--help`: Show this message and exit.
+
 ## `argus-scout serve`
 
 Run the HTTP server and the scheduler (needs the  extra).
@@ -130,6 +153,7 @@ $ argus-scout check [OPTIONS] COMMAND [ARGS]...
 * `heartbeat`: Check a heartbeat policy file parses, and...
 * `approvals`: Check a standing-approvals file: every...
 * `signals`: Check a signal rules file: every rule...
+* `persona`: Check a persona file.
 * `config`: Check scout.yaml and every policy file it...
 
 ### `argus-scout check tariff`
@@ -195,6 +219,24 @@ use only allowed placeholders.
 
 ```console
 $ argus-scout check signals [OPTIONS] {path}
+```
+
+**Arguments**:
+
+* `path <file>`: [required]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+### `argus-scout check persona`
+
+Check a persona file. Scout falls back to the neutral default persona when one is invalid.
+
+**Usage**:
+
+```console
+$ argus-scout check persona [OPTIONS] {path}
 ```
 
 **Arguments**:

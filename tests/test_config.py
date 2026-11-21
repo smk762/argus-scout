@@ -128,7 +128,8 @@ def test_empty_config_is_all_defaults(write_file):
 def test_secrets_resolve_from_dotenv_and_never_appear(write_file, unset_env, monkeypatch):
     unset_env("SCOUT_API_TOKEN", "SCOUT_LLM_KEY", "SCOUT_ALREADY_SET")
     monkeypatch.setenv("SCOUT_ALREADY_SET", "from-environment")
-    path = write_file("scout.yaml", "services:\n  llm: {backend: openai, model: m, api_key_env: SCOUT_LLM_KEY}\n")
+    llm = '{backend: openai, base_url: "https://llm/v1", model: m, api_key_env: SCOUT_LLM_KEY}'
+    path = write_file("scout.yaml", f"services:\n  llm: {llm}\n")
     write_file(
         ".env",
         f"# comment\nSCOUT_API_TOKEN={SECRET}\nexport SCOUT_LLM_KEY='quoted value'\nSCOUT_ALREADY_SET=from-file\n",

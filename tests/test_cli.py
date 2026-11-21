@@ -17,7 +17,7 @@ runner = CliRunner()
 
 
 def test_check_examples_pass():
-    for kind in ("tariff", "heartbeat", "approvals", "signals"):
+    for kind in ("tariff", "heartbeat", "approvals", "signals", "persona"):
         result = runner.invoke(app, ["check", kind, str(EXAMPLES / f"{kind}.yaml")])
         assert result.exit_code == 0, result.output
         assert "ok:" in result.output
