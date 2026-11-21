@@ -39,6 +39,9 @@ import structlog
 
 from argus_scout.approvals import StandingApprovals
 from argus_scout.budget import DailyBudget
+from argus_scout.channels.dispatcher import Dispatcher
+from argus_scout.channels.redeliver import JOB_NAME as REDELIVER_JOB
+from argus_scout.channels.redeliver import RedeliveryJob
 from argus_scout.config import ScoutConfig
 from argus_scout.engine import CycleReport, RecommendationEngine
 from argus_scout.heartbeat import Decision, HeartbeatPolicy, PolicyFile, explain
@@ -292,10 +295,12 @@ def register_jobs(
     budget: DailyBudget | None = None,
     narrator: Narrator | None = None,
     deliver: Deliver | None = None,
+    dispatcher: Dispatcher | None = None,
 ) -> None:
-    """Register the status cycle, the analysis cycle, one job per briefing and one per polling source.
+    """Register the status cycle, the analysis cycle, one job per briefing and one per polling source, and with a
+    ``dispatcher``, the redelivery sweep (:class:`~argus_scout.channels.redeliver.RedeliveryJob`).
 
-    Job names are ``status``, ``analysis``, ``briefing:<kind>`` (``briefing:<kind>@HH:MM`` when a kind is
+    Job names are ``status``, ``analysis``, ``redeliver``, ``briefing:<kind>`` (``briefing:<kind>@HH:MM`` when a kind is
     scheduled more than once) and ``poll:<source>``. The name keys the persisted bookkeeping, so keep it
     stable. A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
     ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests); ``tariff``
@@ -334,6 +339,9 @@ def register_jobs(
     for source in sources.polling:
         poll = PollJob(source, inbox)
         scheduler.add(f"poll:{source.name}", poll, Every(poll.interval), retry_delay=min(60.0, poll.interval))
+    if dispatcher is not None:
+        redeliver = RedeliveryJob(store, dispatcher, config.delivery, clock=clock)
+        scheduler.add(REDELIVER_JOB, redeliver, Every(config.delivery.retry_interval))
 
 
 __all__ = ["AnalysisCycle", "BriefingJob", "PollJob", "StatusCycle", "StatusResult", "deliver", "register_jobs"]
