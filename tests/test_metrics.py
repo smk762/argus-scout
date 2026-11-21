@@ -103,13 +103,13 @@ def test_metrics_families_from_a_seeded_store(store, tmp_path):
         (("severity", "critical"),): 1,
     }
 
-    job = (("job", "status"),)
+    job = (("job_name", "status"),)
     assert m["scout_job_runs_total"][job] == 2
     assert m["scout_job_errors_total"][job] == 1
     assert m["scout_job_last_success_timestamp_seconds"][job] == (NOW + timedelta(seconds=2)).timestamp()
     # Registered jobs that never ran still show up, with zero counts and no success timestamp.
-    assert m["scout_job_runs_total"][(("job", "analysis"),)] == 0
-    assert (("job", "analysis"),) not in m["scout_job_last_success_timestamp_seconds"]
+    assert m["scout_job_runs_total"][(("job_name", "analysis"),)] == 0
+    assert (("job_name", "analysis"),) not in m["scout_job_last_success_timestamp_seconds"]
     assert m["scout_job_running"][job] == 0
 
 
@@ -129,7 +129,7 @@ def test_metrics_survive_restart(tmp_path):
         s.record_job_run("analysis", started_at=NOW, finished_at=NOW)
     with SqliteStore(db) as s:
         m = scrape(make_app(s, tmp_path))
-    assert m["scout_job_runs_total"][(("job", "analysis"),)] == 1
+    assert m["scout_job_runs_total"][(("job_name", "analysis"),)] == 1
 
 
 def test_metrics_registry_is_not_the_global_one(store, tmp_path):
@@ -150,3 +150,31 @@ def test_app_lifespan_runs_the_scheduler(tmp_path):
     with SqliteStore(tmp_path / "scout.db") as s:
         runs = {r.name: r.run_count for r in s.list_job_runs()}
     assert runs.get("status", 0) >= 1  # the status cycle ran at start-up, through the real loop
+
+
+TARGET_LABELS = {"job", "instance"}  # Prometheus sets these from the scrape target; a clash becomes exported_*
+
+
+def test_no_family_uses_a_prometheus_target_label(store, tmp_path):
+    store.record_delivery("report:1", "text", ok=True, at=NOW)
+    with TestClient(make_app(store, tmp_path)) as client:
+        registry = client.app.state.runtime.registry
+        families = list(registry.collect())
+        text = client.get("/metrics").text
+    assert {f.name for f in families} >= {"scout_job_runs", "scout_deliveries", "scout_tariff_rate", "scout_usage_used"}
+    for family in families:
+        declared = set(getattr(family, "_labelnames", ()))  # the label names, even for a family with no samples
+        sampled = {name for sample in family.samples for name in sample.labels}
+        assert not (declared | sampled) & TARGET_LABELS, family.name
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            assert not set(sample.labels) & TARGET_LABELS, sample.name
+
+
+def test_target_label_check_bites():
+    from prometheus_client.core import GaugeMetricFamily
+
+    family = GaugeMetricFamily("scout_x", "x", labels=["job"])
+    family.add_metric(["status"], 1)
+    assert set(family._labelnames) & TARGET_LABELS
+    assert {n for s in family.samples for n in s.labels} & TARGET_LABELS

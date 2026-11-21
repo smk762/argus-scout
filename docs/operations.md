@@ -119,7 +119,7 @@ argus-scout poll --config scout.yaml                # poll every polling source 
 
 | Symptom | Look at |
 |---|---|
-| No briefings at all | `schedule.briefings` and `schedule.timezone`; `scout_job_last_success_timestamp_seconds{job=~"briefing.*"}`; the log's `briefing.due`. |
+| No briefings at all | `schedule.briefings` and `schedule.timezone`; `scout_job_last_success_timestamp_seconds{job_name=~"briefing.*"}`; the log's `briefing.due`. |
 | Briefings say "Written from a template" | The reason on the last line (and `meta.fallback_reason` in `GET /api/reports/latest`): no model configured, the daily cap, no GPU lease, or the model failed. `brief --dry-run` shows the model's error. |
 | No status updates | `GET /api/policy/explain`: each open item's `rule` says why it isn't reported (below `report.min_severity`, routed to `briefing`, acked, quiet or rest hours). A status update goes out only when an item is news (new, escalated or otherwise changed, or cleared and back); items already announced are repeated only when their `reannounce` interval has passed. |
 | A channel gets nothing | `deliver --latest --channel <NAME>`; its `kinds`, `enabled`, and `min_severity` (a report's severity is its worst item's; one with nothing open is `info`); `scout_deliveries_total{result="failed"}`. A channel that already has a report shows `duplicate`; `--force` sends again. |
