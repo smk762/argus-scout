@@ -5,8 +5,11 @@ These are the seams later phases fill in. The structure is already the real one:
 - :class:`StatusCycle` reloads the heartbeat policy through :class:`~argus_scout.heartbeat.PolicyFile` on
   every run, so a policy edit applies on the next tick and **a bad edit degrades to defaults while the
   cycle keeps running**. It reads open events from :meth:`Inbox.open_grouped <argus_scout.inbox.Inbox.open_grouped>`,
-  skips rest hours, and decides each group through :func:`~argus_scout.heartbeat.explain`. Composing and
-  delivering the update comes later.
+  skips rest hours, and decides each group through :func:`~argus_scout.heartbeat.explain`. When groups pass
+  :func:`~argus_scout.heartbeat.report_gate` (capped at ``report.max_items``, most severe first) and they
+  differ from the last status report's, or the most severe one's ``reannounce_after`` has passed, it has
+  the :class:`~argus_scout.narrative.Narrator` write a ``status`` report, stores it and hands it to
+  :func:`deliver`.
 - :class:`PollJob` polls one polling source and ingests what it returns through
   :meth:`Inbox.ingest <argus_scout.inbox.Inbox.ingest>`. Each source is its own job, so one failing source
   never affects another.
@@ -15,12 +18,18 @@ These are the seams later phases fill in. The structure is already the real one:
   :class:`~argus_scout.engine.RecommendationEngine`. A bad rule is skipped; a file that won't parse skips
   the cycle (keeping the pending ``for`` clocks); a Prometheus outage makes rules *unknown*, which the
   engine never reads as cleared.
-- :class:`BriefingJob` will generate a scheduled report (phase 3); for now it only records that it ran.
+- :class:`BriefingJob` generates, stores and hands to :func:`deliver` one scheduled report (``morning``,
+  ``evening`` or ``status``). With no model, or the model down or over its cap, the report comes from the
+  template: a briefing is never skipped.
+
+:func:`deliver` is the seam delivery channels (phase 5) plug into; for now it does nothing, so reports are
+stored and logged only.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -28,19 +37,29 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from argus_scout.approvals import StandingApprovals
+from argus_scout.budget import DailyBudget
 from argus_scout.config import ScoutConfig
 from argus_scout.engine import CycleReport, RecommendationEngine
 from argus_scout.heartbeat import Decision, HeartbeatPolicy, PolicyFile, explain
 from argus_scout.inbox import EventGroup, Inbox, InvalidEvent
+from argus_scout.narrative import Narrator, build_narrator
 from argus_scout.prometheus import PrometheusClient
 from argus_scout.scheduler import Clock, DailyAt, Every, Scheduler, utc_now
+from argus_scout.severity import rank
 from argus_scout.signals import SignalRulesFile, SignalState, evaluate
 from argus_scout.sources import BoundSource, Sources, build_sources
-from argus_scout.store.base import Store
+from argus_scout.store.base import Report, Store
 
 log = structlog.get_logger()
 
 DEFAULT_POLL_INTERVAL = 60.0
+
+Deliver = Callable[[Report], Awaitable[None]]
+
+
+async def deliver(report: Report) -> None:
+    """Hand a stored report to the delivery channels. A no-op until channels land (phase 5): reports are
+    stored and logged, and read from the store."""
 
 
 @dataclass
@@ -54,6 +73,8 @@ class StatusResult:
     groups: list[EventGroup] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)
     """One per group, decided on the group's latest event."""
+    report: Report | None = None
+    """The status report written this cycle, if one was due."""
 
     @property
     def reportable(self) -> list[Decision]:
@@ -71,12 +92,16 @@ class StatusCycle:
         inbox: Inbox | None = None,
         tz: ZoneInfo | None = None,
         clock: Clock = utc_now,
+        narrator: Narrator | None = None,
+        deliver: Deliver = deliver,
     ) -> None:
         self.store = store
         self.policy_file = policy_file
         self.inbox = inbox or Inbox(store, clock=clock)
         self.tz = tz or ZoneInfo("UTC")
         self.clock = clock
+        self.narrator = narrator
+        self.deliver = deliver
         self.last: StatusResult | None = None
 
     def load_policy(self) -> HeartbeatPolicy:
@@ -102,9 +127,37 @@ class StatusCycle:
             result.groups = self.inbox.open_grouped()
             result.decisions = [explain(g.latest, policy, now=now, quiet=result.quiet) for g in result.groups]
             log.info("status.cycle", groups=len(result.groups), reportable=len(result.reportable), quiet=result.quiet)
-            # Composing and delivering the update arrives with the narrative and channels phases.
+            if self.narrator is not None:
+                result.report = await self._report(result, policy, now)
         self.last = result
         return result
+
+    def reportable_groups(self, result: StatusResult, policy: HeartbeatPolicy) -> list[EventGroup]:
+        """The groups the report gate let through, most severe first, at most ``report.max_items``."""
+        groups = [g for g, d in zip(result.groups, result.decisions, strict=True) if d.report]
+        groups.sort(key=lambda g: (-rank(g.latest.severity), -g.latest.generated_at.timestamp()))
+        return groups[: policy.report_max_items] if policy.report_max_items > 0 else groups
+
+    def report_due(self, groups: list[EventGroup], policy: HeartbeatPolicy, now: datetime) -> bool:
+        """Whether these groups are news: none reported yet, different from the last status report's, or the
+        most severe one's ``reannounce_after`` interval has passed since it."""
+        if not groups:
+            return False
+        last = self.store.latest_report("status")
+        if last is None or sorted(g.fingerprint for g in groups) != last.meta.get("fingerprints"):
+            return True
+        worst = max(groups, key=lambda g: rank(g.latest.severity)).latest.severity.value
+        interval = policy.reannounce_after.get(worst)
+        return bool(interval) and (now - last.generated_at).total_seconds() >= interval
+
+    async def _report(self, result: StatusResult, policy: HeartbeatPolicy, now: datetime) -> Report | None:
+        assert self.narrator is not None
+        groups = self.reportable_groups(result, policy)
+        if not self.report_due(groups, policy, now):
+            return None
+        report = await self.narrator.report("status", groups=groups)
+        await self.deliver(report)
+        return report
 
 
 class AnalysisCycle:
@@ -151,18 +204,36 @@ class AnalysisCycle:
 
 
 class BriefingJob:
-    """A scheduled briefing of one ``kind``. Report generation lands in phase 3; for now it records the run."""
+    """A scheduled briefing of one ``kind``: write it (model, or template when the model can't), store it, and
+    hand it to :func:`deliver`. With no narrator it only records the run."""
 
-    def __init__(self, kind: str, store: Store, *, clock: Clock = utc_now) -> None:
+    def __init__(
+        self,
+        kind: str,
+        store: Store,
+        *,
+        narrator: Narrator | None = None,
+        deliver: Deliver = deliver,
+        clock: Clock = utc_now,
+    ) -> None:
         self.kind = kind
         self.store = store
+        self.narrator = narrator
+        self.deliver = deliver
         self.clock = clock
         self.runs: list[datetime] = []
+        self.last: Report | None = None
 
-    async def __call__(self) -> None:
+    async def __call__(self) -> Report | None:
         at = self.clock()
         self.runs.append(at)
         log.info("briefing.due", kind=self.kind, at=at.isoformat())
+        if self.narrator is None:
+            return None
+        report = self.last = await self.narrator.report(self.kind)
+        log.info("briefing.stored", kind=self.kind, report_id=report.id, path=report.meta.get("path"))
+        await self.deliver(report)
+        return report
 
 
 class PollJob:
@@ -200,19 +271,23 @@ def register_jobs(
     inbox: Inbox | None = None,
     sources: Sources | None = None,
     prometheus: PrometheusClient | None = None,
+    budget: DailyBudget | None = None,
+    narrator: Narrator | None = None,
 ) -> None:
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source.
 
     Job names are ``status``, ``analysis``, ``briefing:<kind>`` (``briefing:<kind>@HH:MM`` when a kind is
     scheduled more than once) and ``poll:<source>``. The name keys the persisted bookkeeping, so keep it
     stable. A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
-    ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests).
+    ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests), and
+    ``narrator`` the one built from the config (its model calls are charged to ``budget``).
     """
     schedule = config.schedule
     clock = scheduler.clock
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
-    status = StatusCycle(store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock)
+    narrator = narrator or build_narrator(config, store, budget, clock=clock)
+    status = StatusCycle(store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock, narrator=narrator)
     scheduler.add("status", status, Every(schedule.status_interval))
     if prometheus is None and config.services.prometheus_url:
         prometheus = PrometheusClient(config.services.prometheus_url)
@@ -227,11 +302,11 @@ def register_jobs(
     kinds = Counter(b.kind for b in schedule.briefings)
     for briefing in schedule.briefings:
         name = f"briefing:{briefing.kind}" + (f"@{briefing.at}" if kinds[briefing.kind] > 1 else "")
-        job = BriefingJob(briefing.kind, store, clock=clock)
+        job = BriefingJob(briefing.kind, store, narrator=narrator, clock=clock)
         scheduler.add(name, job, DailyAt(briefing.at_time, schedule.tz))
     for source in sources.polling:
         poll = PollJob(source, inbox)
         scheduler.add(f"poll:{source.name}", poll, Every(poll.interval), retry_delay=min(60.0, poll.interval))
 
 
-__all__ = ["AnalysisCycle", "BriefingJob", "PollJob", "StatusCycle", "StatusResult", "register_jobs"]
+__all__ = ["AnalysisCycle", "BriefingJob", "PollJob", "StatusCycle", "StatusResult", "deliver", "register_jobs"]
