@@ -9,7 +9,8 @@ Three steps, each its own function so it can be tested and explained:
    claimed.
 2. **Prompt** (:func:`build_prompt`). The facts become lines, each with a priority *tier* (critical items
    first, then warnings, the rejections, notices, info, and notes last). The prompt is sized for a small
-   local model: ``context_tokens`` (default 3072) minus the output allowance (``max_tokens``), the system
+   local model: ``context_tokens`` (default 3072) minus the output allowance (``max_tokens``, per kind by default:
+   :data:`~argus_scout.config.DEFAULT_MAX_TOKENS`), the system
    prompt and the instructions, estimated at four characters a token, is what's left for facts. Lines are
    taken in priority order until the next one doesn't fit; every line not taken is counted, and the
    prompt says how many were left out per section. So the cut always falls on the least severe facts.
@@ -19,6 +20,12 @@ Three steps, each its own function so it can be tested and explained:
    written from a deterministic template** (:func:`render_template`) from the same facts, so a briefing
    is never silently skipped. The report's ``meta.path`` says which ran (``llm`` or ``template``) and
    ``meta.fallback_reason`` why.
+4. **Check** (:func:`assess_completion`). A model answer is used only if it is whole: not cut off by the token
+   limit (``truncated``), and not hollow: at least :data:`MIN_NARRATIVE_CHARS` for its kind, and naming every
+   open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`). Otherwise the
+   template writes the report from the same facts, so a model failure never drops one of those items. The
+   check is a floor, not a judgement of quality: an item counts as named when the answer contains its source or
+   a distinctive word of its summary.
 
 Every report is saved to the store with ``meta`` recording the facts used (event, recommendation and
 rejection ids, the tariff period, note names, what was left out), the persona and the model.
@@ -29,6 +36,7 @@ recommend; nothing in it moves a recommendation or starts anything.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -37,13 +45,14 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from argus_scout.budget import DailyBudget
-from argus_scout.config import ScoutConfig
+from argus_scout.config import ScoutConfig, resolve_max_tokens
 from argus_scout.engine import RecommendationEngine, Rejection
 from argus_scout.gpu import narrative_guard
 from argus_scout.inbox import EventGroup, Inbox
 from argus_scout.llm import (
     CHARS_PER_TOKEN,
     LLM_CALLS,
+    Completion,
     LLMUnavailable,
     Prompt,
     TextGenerator,
@@ -105,6 +114,13 @@ INSTRUCTIONS: dict[str, str] = {
 }
 
 TITLES = {"morning": "Morning briefing", "evening": "Evening review", "status": "Status update"}
+
+MIN_NARRATIVE_CHARS: dict[str, int] = {"morning": 160, "evening": 160, "status": 40}
+"""The shortest model answer accepted for a report with something in it. A 150-word briefing is about 900
+characters and an 80-word status update about 480; an answer under these is a sentence or two and is taken as
+hollow (the model ran out of budget, or wrote a pleasantry instead of the report)."""
+MIN_EMPTY_NARRATIVE_CHARS = 20
+"""The shortest answer accepted when there is nothing to report: one short sentence saying so."""
 
 # Priority tiers: lower is kept first when the prompt has to be cut.
 _SEVERITY_TIER = {Severity.CRITICAL: 1, Severity.WARNING: 2, Severity.NOTICE: 4, Severity.INFO: 5}
@@ -295,12 +311,68 @@ def build_prompt(
     return Prompt(system=system, user=header + render_facts(selection)), selection
 
 
+# --- checking a model answer ----------------------------------------------------------------------------------
+
+_WORD = re.compile(r"[a-z0-9][a-z0-9._%/-]*[a-z0-9%]|[a-z0-9]")
+_GENERIC_WORDS = """
+about above after again against all also been before being below between both check could does down during each
+from further have having here into just less more most needs nothing once only other over same should since some
+still such than that their them then there these they this those through under until very were what when where
+which while will with would your report reports reported times acknowledgement acknowledge info notice warning
+warnings critical status item items alert alerts
+"""
+_GENERIC = frozenset(_GENERIC_WORDS.split())
+"""Words too common to show that an answer names a particular item."""
+
+
+def _keywords(text: str) -> set[str]:
+    """Distinctive words: four characters or more (or containing a digit), not generic."""
+    return {
+        w for w in _WORD.findall(text.lower()) if (len(w) >= 4 or any(c.isdigit() for c in w)) and w not in _GENERIC
+    }
+
+
+def must_mention(facts: Facts) -> list[EventGroup]:
+    """The open items no report may drop: warnings, criticals, and anything that needs an acknowledgement."""
+    return [g for g in facts.groups if rank(g.latest.severity) >= rank(Severity.WARNING) or g.latest.requires_ack]
+
+
+def mentions(text: str, group: EventGroup) -> bool:
+    """Whether ``text`` names the item: its source, or a distinctive word of its summary. A floor, not proof."""
+    lowered = text.lower()
+    event = group.latest
+    about = f"{event.source} {event.summary}"
+    words = _keywords(about) or {w for w in _WORD.findall(about.lower()) if w not in _GENERIC}
+    if not words:
+        return True  # nothing to look for (a summary of generic words): don't refuse every answer over it
+    # At the start of a word, so "disk" finds "disks" but "ups" doesn't find "backups".
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(word)}", lowered) for word in words)
+
+
+def assess_completion(completion: Completion, facts: Facts) -> tuple[str, str] | None:
+    """``None`` when the answer may be delivered; otherwise ``(reason, detail)`` with reason ``truncated`` (the
+    token limit cut it off) or ``hollow`` (too short for its kind, or missing an item :func:`must_mention`
+    names)."""
+    if completion.truncated:
+        return "truncated", f"the model hit its token limit ({completion.completion_tokens} tokens)"
+    text = completion.text
+    floor = MIN_EMPTY_NARRATIVE_CHARS if facts.empty else MIN_NARRATIVE_CHARS.get(facts.kind, MIN_EMPTY_NARRATIVE_CHARS)
+    if len(text) < floor:
+        return "hollow", f"the model's answer was {len(text)} characters, under {floor} for a {facts.kind} report"
+    missing = [g.latest.event_id for g in must_mention(facts) if not mentions(text, g)]
+    if missing:
+        return "hollow", f"the model's answer left out {', '.join(missing)}"
+    return None
+
+
 # --- the template fallback -------------------------------------------------------------------------------------
 
 
 def render_template(facts: Facts, persona: Persona, *, reason: str = "") -> str:
-    """A plain-text report from the facts alone, no model: deterministic, and never empty."""
+    """A plain-text report from the facts alone, no model: deterministic, and never empty. At most
+    :data:`TEMPLATE_MAX_PER_SECTION` lines a section, except that every item :func:`must_mention` names is listed."""
     lines = fact_lines(facts)
+    keep = {g.latest.event_id for g in must_mention(facts)}
     out = [f"{TITLES.get(facts.kind, 'Report')}, {facts.at:%a %d %b %H:%M}."]
     headings = {
         "items": "Needs attention:",
@@ -313,9 +385,11 @@ def render_template(facts: Facts, persona: Persona, *, reason: str = "") -> str:
         if not section:
             continue
         out += ["", heading]
-        out += [f"- {ln.text}" for ln in section[:TEMPLATE_MAX_PER_SECTION]]
-        if len(section) > TEMPLATE_MAX_PER_SECTION:
-            out.append(f"- and {len(section) - TEMPLATE_MAX_PER_SECTION} more")
+        # Past the cap, items that need attention are still listed: only the rest are counted.
+        shown = [ln for i, ln in enumerate(section) if i < TEMPLATE_MAX_PER_SECTION or ln.ref in keep]
+        out += [f"- {ln.text}" for ln in shown]
+        if len(section) > len(shown):
+            out.append(f"- and {len(section) - len(shown)} more")
     if facts.empty:
         out += ["", "Nothing needs attention." if facts.kind != "status" else "No open status items."]
     tariff = [ln for ln in lines if ln.section == "tariff"]
@@ -334,6 +408,8 @@ _REASON_TEXT = {
     "error": "the model was unavailable",
     "disabled": "the model was turned off for this run",
     "no_llm": "no model is configured",
+    "truncated": "the model's answer was cut off",
+    "hollow": "the model's answer left out what needs attention",
 }
 
 
@@ -363,7 +439,7 @@ class Narrator:
         tariff: TariffFile | None = None,
         tz: ZoneInfo | None = None,
         clock: Clock = utc_now,
-        max_tokens: int = 400,
+        max_tokens: int | None = None,
         context_tokens: int = 3072,
         rejection_limit: int = 10,
         budget_kind: str = LLM_CALLS,
@@ -376,9 +452,13 @@ class Narrator:
         self.tz = tz or ZoneInfo("UTC")
         self.clock = clock
         self.max_tokens = max_tokens
+        """One output allowance for every kind; ``None``: per kind (:func:`~argus_scout.config.resolve_max_tokens`)."""
         self.context_tokens = context_tokens
         self.rejection_limit = rejection_limit
         self.budget_kind = budget_kind
+
+    def max_tokens_for(self, kind: str) -> int:
+        return resolve_max_tokens(kind, self.max_tokens, self.context_tokens)
 
     def gather(self, kind: str, *, groups: list[EventGroup] | None = None) -> Facts:
         """The facts for a ``kind`` report. ``groups`` overrides the inbox (the status cycle passes the groups
@@ -422,11 +502,12 @@ class Narrator:
         if write_memory:
             self._sync_memory(facts.rejections)
         persona = self.persona.get()
+        max_tokens = self.max_tokens_for(kind)
         prompt, selection = build_prompt(
             facts,
             persona,
             context_tokens=self.context_tokens,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
             notes_chars=self.memory.max_chars,
         )
         meta: dict[str, Any] = {
@@ -434,6 +515,7 @@ class Narrator:
             "persona_error": self.persona.error,
             "prompt_tokens_est": estimate_tokens(prompt.system + prompt.user),
             "context_tokens": self.context_tokens,
+            "max_tokens": max_tokens,
             "fingerprints": sorted(g.fingerprint for g in facts.groups),
             **delivery_meta(facts),
         }
@@ -444,21 +526,37 @@ class Narrator:
             reason = "no_llm"
         else:
             try:
-                completion = await self.generator.generate(prompt, max_tokens=self.max_tokens, kind=self.budget_kind)
+                completion = await self.generator.generate(prompt, max_tokens=max_tokens, kind=self.budget_kind)
             except LLMUnavailable as exc:
                 reason, error = exc.reason, str(exc)
             else:
                 meta |= {
-                    "path": "llm",
-                    "fallback_reason": None,
                     "backend": completion.backend,
-                    "model": completion.model,
                     "prompt_tokens": completion.prompt_tokens,
                     "completion_tokens": completion.completion_tokens,
-                    "facts": _facts_meta(facts, selection.lines, selection.omitted),
+                    "finish_reason": completion.finish_reason,
+                    "llm_chars": len(completion.text),
                 }
-                log.info("narrative.llm", kind=kind, model=completion.model, chars=len(completion.text))
-                return Draft(kind, facts.at, completion.text, meta)
+                verdict = assess_completion(completion, facts)
+                if verdict is None:
+                    meta |= {
+                        "path": "llm",
+                        "fallback_reason": None,
+                        "model": completion.model,
+                        "facts": _facts_meta(facts, selection.lines, selection.omitted),
+                    }
+                    log.info("narrative.llm", kind=kind, model=completion.model, chars=len(completion.text))
+                    return Draft(kind, facts.at, completion.text, meta)
+                reason, error = verdict
+                log.warning(
+                    "narrative.rejected_completion",
+                    kind=kind,
+                    reason=reason,
+                    detail=error,
+                    model=completion.model,
+                    completion_tokens=completion.completion_tokens,
+                    finish_reason=completion.finish_reason,
+                )
         text = render_template(facts, persona, reason=_REASON_TEXT.get(reason, reason))
         meta |= {
             "path": "template",
@@ -568,13 +666,15 @@ def build_narrator(
         tariff=tariff or TariffFile(config.files.tariff),
         tz=config.schedule.tz,
         clock=clock,
-        max_tokens=llm.max_tokens if llm else 400,
+        max_tokens=llm.max_tokens if llm else None,
         context_tokens=llm.context_tokens if llm else 3072,
     )
 
 
 __all__ = [
     "INSTRUCTIONS",
+    "MIN_EMPTY_NARRATIVE_CHARS",
+    "MIN_NARRATIVE_CHARS",
     "REPORT_KINDS",
     "SECTIONS",
     "Draft",
@@ -583,10 +683,13 @@ __all__ = [
     "Narrator",
     "Selection",
     "TariffFact",
+    "assess_completion",
     "build_narrator",
     "build_prompt",
     "delivery_meta",
     "fact_lines",
+    "mentions",
+    "must_mention",
     "render_facts",
     "render_template",
     "select_lines",

@@ -33,6 +33,19 @@ so a slow model is never asked twice, and wraps every failure (bad status, bad J
 Speech is argus-echo's GPU work, under echo's own lease and residency: nothing here wraps a call to echo
 (see :mod:`argus_scout.gpu`).
 
+**Thinking.** Reasoning models (qwen3, deepseek-r1) spend their output budget on a ``<think>`` block before
+the answer. :class:`OllamaBackend` sends ``think`` (``services.llm.think``, default ``false``) so Ollama skips
+it; an Ollama that refuses the field with a 400 naming it is asked once more without it, and the backend stops
+sending it (``llm.think_unsupported`` is logged). Older Ollamas ignore unknown fields. OpenAI-compatible servers
+disagree on the field (``reasoning_effort``, ``chat_template_kwargs``), so :class:`OpenAICompatBackend` sends
+none; ``services.llm.extra_body`` passes one through for a server that needs it.
+
+**Finish reason.** Every :class:`Completion` carries the server's finish reason (Ollama ``done_reason``,
+OpenAI ``finish_reason``); ``"length"`` means the token limit cut the answer off
+(:attr:`Completion.truncated`). A truncated completion is returned even when nothing is left after cleaning
+(the whole budget went on thinking), and so is one whose text was all ``<think>`` block, so the narrative can
+tell a cut-off or hollow answer from a failed call and fall back to its template (:mod:`argus_scout.narrative`).
+
 **The model's output is untrusted text.** :func:`clean_output` strips control characters and
 ``<think>`` blocks and caps its length; after that it is only ever stored and shown. Nothing parses it,
 executes it or turns it into an action: a report that says "approve X" approves nothing.
@@ -112,6 +125,13 @@ class Completion:
     backend: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    finish_reason: str | None = None
+    """Why the model stopped, as the server said it (``stop``, ``length``); ``None`` if it didn't say."""
+
+    @property
+    def truncated(self) -> bool:
+        """The token limit cut the answer off: it may be missing anything after the cut."""
+        return self.finish_reason == "length"
 
 
 def clean_output(text: str, *, max_chars: int) -> str:
@@ -148,13 +168,18 @@ class TextBackend(RemoteBackend):
         api_key: str | None = None,
         timeout: float = 120.0,
         temperature: float | None = None,
+        think: bool | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(base_url, api_key=api_key, timeout=timeout)
         self.model = model
         self.temperature = temperature
+        self.think = think
+        self.extra_body = dict(extra_body or {})
 
     def at(self, base_url: str) -> TextBackend:
-        """This backend (same model, key, timeout and temperature) pointed at ``base_url``; itself if unchanged."""
+        """This backend (same model, key, timeout, temperature, think and extra body) pointed at ``base_url``;
+        itself if unchanged."""
         if base_url.rstrip("/") == self.base_url:
             return self
         return type(self)(
@@ -163,6 +188,8 @@ class TextBackend(RemoteBackend):
             api_key=self.api_key,
             timeout=self.timeout,
             temperature=self.temperature,
+            think=self.think,
+            extra_body=self.extra_body,
         )
 
     def request(self, prompt: Prompt, max_tokens: int) -> dict[str, Any]:  # pragma: no cover - abstract
@@ -172,10 +199,15 @@ class TextBackend(RemoteBackend):
         """The response's text, and usage numbers for the report's meta."""
         raise NotImplementedError
 
+    def send(self, prompt: Prompt, max_tokens: int) -> Any:
+        """POST the request and return the decoded JSON. Raises :class:`BackendError`."""
+        return self.post_json(self.path, self.request(prompt, max_tokens))
+
     def complete(self, prompt: Prompt, *, max_tokens: int) -> Completion:
-        """One blocking round-trip. Raises :class:`BackendError` on any failure, including an empty or
-        malformed response."""
-        data = self.post_json(self.path, self.request(prompt, max_tokens))
+        """One blocking round-trip. Raises :class:`BackendError` on any failure, including a malformed response
+        or an empty one that the token limit didn't cut off. A completion whose text cleans to nothing (all
+        ``<think>``) or that was truncated comes back with ``text`` possibly empty: the caller judges it."""
+        data = self.send(prompt, max_tokens)
         if not isinstance(data, dict):
             raise BackendError(f"{self.name}: expected a JSON object, got {type(data).__name__}")
         try:
@@ -184,29 +216,59 @@ class TextBackend(RemoteBackend):
             raise BackendError(f"{self.name}: unexpected response shape ({exc!r})") from exc
         if not isinstance(text, str):
             raise BackendError(f"{self.name}: response text is {type(text).__name__}, not a string")
-        text = clean_output(text, max_chars=max_tokens * CHARS_PER_TOKEN * 2)
-        if not text:
+        finish = usage.get("finish_reason")
+        finish_reason = finish if isinstance(finish, str) and finish else None
+        if not text.strip() and finish_reason != "length":
             raise BackendError(f"{self.name}: the model returned no text")
         return Completion(
-            text=text,
+            text=clean_output(text, max_chars=max_tokens * CHARS_PER_TOKEN * 2),
             model=str(usage.get("model") or self.model),
             backend=self.name,
             prompt_tokens=_int(usage.get("prompt_tokens")),
             completion_tokens=_int(usage.get("completion_tokens")),
+            finish_reason=finish_reason,
         )
 
 
+def _refuses_think(exc: BackendError) -> bool:
+    """The server answered 400 and its error names ``think``: an Ollama that won't take the field."""
+    response = getattr(exc.__cause__, "response", None)
+    if getattr(response, "status_code", None) != 400:
+        return False
+    try:
+        return "think" in str(response.text).lower()  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — an unreadable body is just "not that error"
+        return False
+
+
 class OllamaBackend(TextBackend):
-    """Ollama's ``POST /api/chat`` with ``stream: false``."""
+    """Ollama's ``POST /api/chat`` with ``stream: false``, and ``think`` when it isn't ``None``."""
 
     name = "ollama"
     path = "/api/chat"
+    think_refused = False
+    """Set once this server refused ``think``: it isn't sent again."""
 
     def request(self, prompt: Prompt, max_tokens: int) -> dict[str, Any]:
         options: dict[str, Any] = {"num_predict": max_tokens}
         if self.temperature is not None:
             options["temperature"] = self.temperature
-        return {"model": self.model, "messages": _messages(prompt), "stream": False, "options": options}
+        body: dict[str, Any] = {"model": self.model, "messages": _messages(prompt), "stream": False}
+        if self.think is not None and not self.think_refused:
+            body["think"] = self.think
+        return body | {"options": options}
+
+    def send(self, prompt: Prompt, max_tokens: int) -> Any:
+        body = self.request(prompt, max_tokens)
+        try:
+            return self.post_json(self.path, body)
+        except BackendError as exc:
+            if "think" not in body or not _refuses_think(exc):
+                raise
+            log.warning("llm.think_unsupported", backend=self.name, model=self.model, error=str(exc))
+            self.think_refused = True
+            del body["think"]
+            return self.post_json(self.path, body)
 
     def parse(self, data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if data.get("error"):
@@ -215,13 +277,18 @@ class OllamaBackend(TextBackend):
             "model": data.get("model"),
             "prompt_tokens": data.get("prompt_eval_count"),
             "completion_tokens": data.get("eval_count"),
+            "finish_reason": data.get("done_reason"),
         }
-        return data["message"]["content"], usage
+        return data["message"]["content"] or "", usage
 
 
 class OpenAICompatBackend(TextBackend):
     """An OpenAI-compatible ``POST {base_url}/chat/completions``. ``base_url`` includes the API prefix
-    (``/v1``); a hosted provider's key is sent as a bearer token by cortex."""
+    (``/v1``); a hosted provider's key is sent as a bearer token by cortex.
+
+    It sends no thinking switch of its own (servers disagree on its name); ``extra_body`` is merged into the
+    request for a server that needs one (``chat_template_kwargs``, ``reasoning_effort``). It never replaces
+    the fields scout sets."""
 
     name = "openai"
     path = "chat/completions"  # relative, so it joins onto a base_url that ends in /v1
@@ -235,16 +302,18 @@ class OpenAICompatBackend(TextBackend):
         }
         if self.temperature is not None:
             body["temperature"] = self.temperature
-        return body
+        return {**self.extra_body, **body}
 
     def parse(self, data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if data.get("error"):
             raise BackendError(f"openai: {data['error']}")
         usage = data.get("usage") or {}
-        return data["choices"][0]["message"]["content"], {
+        choice = data["choices"][0]
+        return choice["message"]["content"] or "", {
             "model": data.get("model"),
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
+            "finish_reason": choice.get("finish_reason"),
         }
 
 
@@ -260,6 +329,8 @@ def build_backend(config: LLMConfig) -> TextBackend:
         api_key=secret.get_secret_value() if secret else None,
         timeout=config.timeout,
         temperature=config.temperature,
+        think=config.think if config.backend == "ollama" else None,
+        extra_body=config.extra_body,
     )
 
 

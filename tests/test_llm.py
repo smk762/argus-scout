@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+from argus_cortex.backends import BackendError
 
 from argus_scout.budget import DailyBudget
 from argus_scout.config import LLMConfig
@@ -170,3 +171,114 @@ def test_output_is_cleaned_untrusted_text():
     assert "think" not in text and "\x1b" not in text and "\x00" not in text and "\x07" not in text
     assert text.startswith("[31mDisk is fine.\nNext line.")
     assert len(text) <= 41 and text.endswith("…")
+
+
+# --- thinking and the finish reason -------------------------------------------------------------------------------
+
+
+def ollama_config(**kw) -> LLMConfig:
+    return LLMConfig(backend="ollama", base_url="http://ollama:11434", model="qwen3:8b", **kw)
+
+
+def test_ollama_sends_think_false_by_default():
+    seen: list[httpx.Request] = []
+    stub(build_backend(ollama_config()), lambda r: ollama_reply(), seen).complete(PROMPT, max_tokens=50)
+    assert json.loads(seen[0].content)["think"] is False
+
+
+def test_ollama_omits_think_when_null_and_sends_true_when_asked():
+    seen: list[httpx.Request] = []
+    stub(build_backend(ollama_config(think=None)), lambda r: ollama_reply(), seen).complete(PROMPT, max_tokens=50)
+    stub(build_backend(ollama_config(think=True)), lambda r: ollama_reply(), seen).complete(PROMPT, max_tokens=50)
+    assert "think" not in json.loads(seen[0].content)
+    assert json.loads(seen[1].content)["think"] is True
+
+
+def test_ollama_that_refuses_think_is_asked_once_more_without_it():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "think" in json.loads(request.content):
+            return httpx.Response(400, json={"error": 'invalid field "think"'})
+        return ollama_reply()
+
+    backend = stub(build_backend(ollama_config()), handler, seen)
+    assert backend.complete(PROMPT, max_tokens=50).text == "All quiet."
+    assert ["think" in json.loads(r.content) for r in seen] == [True, False]
+    backend.complete(PROMPT, max_tokens=50)  # remembered: not sent again
+    assert "think" not in json.loads(seen[-1].content) and len(seen) == 3
+
+
+def test_other_ollama_400s_are_not_retried():
+    seen: list[httpx.Request] = []
+    backend = stub(build_backend(ollama_config()), lambda r: httpx.Response(400, json={"error": "bad model"}), seen)
+    with pytest.raises(BackendError):
+        backend.complete(PROMPT, max_tokens=50)
+    assert len(seen) == 1
+
+
+def test_openai_sends_no_think_field_and_passes_extra_body_through():
+    seen: list[httpx.Request] = []
+    plain = LLMConfig(backend="openai", base_url="http://llm:8000/v1", model="m")
+    stub(build_backend(plain), lambda r: openai_reply(), seen).complete(PROMPT, max_tokens=50)
+    body = json.loads(seen[0].content)
+    assert not {"think", "chat_template_kwargs", "reasoning_effort"} & set(body)
+
+    extra = LLMConfig(backend="openai", base_url="http://llm:8000/v1", model="m",
+                      extra_body={"chat_template_kwargs": {"enable_thinking": False}})  # fmt: skip
+    stub(build_backend(extra), lambda r: openai_reply(), seen).complete(PROMPT, max_tokens=50)
+    body = json.loads(seen[1].content)
+    assert body["chat_template_kwargs"] == {"enable_thinking": False} and body["max_tokens"] == 50
+
+
+def test_extra_body_is_openai_only_and_cannot_replace_scouts_fields():
+    with pytest.raises(ValueError, match="openai"):
+        ollama_config(extra_body={"x": 1})
+    with pytest.raises(ValueError, match="max_tokens"):
+        LLMConfig(backend="openai", base_url="http://llm:8000/v1", model="m", extra_body={"max_tokens": 9})
+
+
+def test_finish_reason_is_read_from_both_backends():
+    cut = httpx.Response(200, json={"message": {"content": "Cut o"}, "done_reason": "length", "eval_count": 50})
+    completion = stub(OllamaBackend("http://ollama:11434", "m"), lambda r: cut, []).complete(PROMPT, max_tokens=50)
+    assert completion.truncated and completion.completion_tokens == 50
+
+    reply = json.loads(openai_reply().content)
+    reply["choices"][0]["finish_reason"] = "stop"
+    openai = stub(OpenAICompatBackend("http://llm:8000/v1", "m"), lambda r: httpx.Response(200, json=reply), [])
+    completion = openai.complete(PROMPT, max_tokens=50)
+    assert completion.finish_reason == "stop" and not completion.truncated
+
+
+@pytest.mark.parametrize(
+    "message",
+    [{"content": "<think>the facts are"}, {"content": "", "thinking": "the facts are"}],
+    ids=["think-in-content", "think-field"],
+)
+def test_a_budget_spent_thinking_comes_back_empty_and_truncated(message):
+    """Not an error: the narrative must see that it was cut off, to say so."""
+    response = httpx.Response(200, json={"message": message, "done_reason": "length", "eval_count": 400})
+    backend = stub(OllamaBackend("http://ollama:11434", "m"), lambda r: response, [])
+    completion = backend.complete(PROMPT, max_tokens=400)
+    assert completion.text == "" and completion.truncated and completion.completion_tokens == 400
+
+
+def test_a_think_only_answer_comes_back_empty_not_as_an_error():
+    response = httpx.Response(200, json={"message": {"content": "<think>hm</think>"}, "done_reason": "stop"})
+    completion = stub(OllamaBackend("http://ollama:11434", "m"), lambda r: response, []).complete(PROMPT, max_tokens=50)
+    assert completion.text == "" and not completion.truncated
+
+
+def test_routed_backend_keeps_think_and_extra_body():
+    assert OllamaBackend("http://a:11434", "m", think=False).at("http://b:11434").think is False
+    openai = OpenAICompatBackend("http://a:8000/v1", "m", extra_body={"reasoning_effort": "low"})
+    assert openai.at("http://b:8000/v1").extra_body == {"reasoning_effort": "low"}
+
+
+def test_max_tokens_defaults_per_kind_and_is_bounded_by_the_context():
+    config = ollama_config()
+    assert [config.max_tokens_for(k) for k in ("morning", "evening", "status")] == [800, 800, 400]
+    assert ollama_config(context_tokens=1024).max_tokens_for("morning") == 512
+    assert ollama_config(max_tokens=300).max_tokens_for("morning") == 300
+    with pytest.raises(ValueError, match="half of context_tokens"):
+        ollama_config(max_tokens=2000)

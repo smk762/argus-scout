@@ -482,6 +482,21 @@ class LLMGpuConfig(_Section):
         return self
 
 
+DEFAULT_MAX_TOKENS: dict[str, int] = {"morning": 800, "evening": 800, "status": 400}
+"""Output allowance per report kind when ``services.llm.max_tokens`` is unset. A 150-word briefing is about 200
+tokens; the rest is headroom for a model that writes long or thinks anyway."""
+DEFAULT_MAX_TOKENS_OTHER = 400
+LLM_REQUEST_FIELDS = frozenset({"model", "messages", "max_tokens", "stream", "temperature"})
+"""Request fields the ``openai`` backend sets itself, which ``extra_body`` may not replace."""
+
+
+def resolve_max_tokens(kind: str, configured: int | None, context_tokens: int) -> int:
+    """``configured`` if set, else the kind's default capped at half the context window."""
+    if configured is not None:
+        return configured
+    return min(DEFAULT_MAX_TOKENS.get(kind, DEFAULT_MAX_TOKENS_OTHER), context_tokens // 2)
+
+
 class LLMConfig(_Section):
     """The model the narrative is written with. See :mod:`argus_scout.llm`.
 
@@ -499,14 +514,49 @@ class LLMConfig(_Section):
     api_key_env: EnvName | None = None
     """Env var holding an API key, sent as a bearer token (hosted backends). Unset: no key."""
     timeout: float = Field(default=120.0, gt=0, description="Seconds before one model call gives up.")
-    max_tokens: int = Field(default=400, gt=0, description="Most tokens one report may generate.")
+    max_tokens: int | None = Field(default=None, gt=0)
+    """Most tokens one report may generate, every kind. Unset: per kind, 800 for ``morning`` and ``evening``,
+    400 for ``status``, each capped at half of ``context_tokens``. Set, it may be at most half of
+    ``context_tokens``: the rest is the prompt's."""
     context_tokens: int = Field(
         default=3072, ge=1024, description="The model's context window; prompts are cut to fit it with the output."
     )
     temperature: float | None = Field(default=None, ge=0, le=2)
     """Sampling temperature. Unset: the server's default."""
+    think: bool | None = False
+    """Ollama only: sent as ``think``, so a reasoning model (qwen3, deepseek-r1) answers without spending the output
+    budget on a ``<think>`` block first. ``null``: not sent (the model's default). An Ollama that refuses the field
+    is asked again without it. The ``openai`` backend ignores this key: use ``extra_body``."""
+    extra_body: Annotated[dict[str, Any], NullAsEmptyDict] = Field(default_factory=dict)
+    """``openai`` only: extra request fields, passed through as they are, for a server that needs one, e.g.
+    ``chat_template_kwargs: {enable_thinking: false}`` (vLLM, SGLang) or ``reasoning_effort: low``. Fields scout
+    sets itself (``model``, ``messages``, ``max_tokens``, ``stream``, ``temperature``) can't be replaced."""
     gpu: LLMGpuConfig | None = None
     """Hold a GPU lease around each model call. Leave unset for a hosted backend."""
+
+    def max_tokens_for(self, kind: str) -> int:
+        """The output allowance for one report of ``kind`` (see ``max_tokens``)."""
+        return resolve_max_tokens(kind, self.max_tokens, self.context_tokens)
+
+    @model_validator(mode="after")
+    def _token_split(self) -> LLMConfig:
+        if self.max_tokens is not None and self.max_tokens > self.context_tokens // 2:
+            raise ValueError(
+                f"max_tokens ({self.max_tokens}) may be at most half of context_tokens ({self.context_tokens}): "
+                "the rest is the prompt's"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _extra_body(self) -> LLMConfig:
+        if not self.extra_body:
+            return self
+        if self.backend != "openai":
+            raise ValueError("extra_body is for backend openai; Ollama's thinking switch is think")
+        reserved = sorted(set(self.extra_body) & LLM_REQUEST_FIELDS)
+        if reserved:
+            raise ValueError(f"extra_body can't set {', '.join(reserved)}: scout sets it")
+        return self
 
     @model_validator(mode="after")
     def _gpu_target_for_openai(self) -> LLMConfig:

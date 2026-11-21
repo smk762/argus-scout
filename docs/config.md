@@ -328,9 +328,11 @@ Guide: [narrative.md](narrative.md).
 | `model` | text | required |  | The model name the server knows it by. |
 | `api_key_env` | env var name or null | `null` |  | Env var holding an API key, sent as a bearer token (hosted backends). Unset: no key. |
 | `timeout` | number | `120.0` | > 0 | Seconds before one model call gives up. |
-| `max_tokens` | integer | `400` | > 0 | Most tokens one report may generate. |
+| `max_tokens` | integer or null | `null` | > 0 | Most tokens one report may generate, every kind. Unset: per kind, 800 for `morning` and `evening`, 400 for `status`, each capped at half of `context_tokens`. Set, it may be at most half of `context_tokens`: the rest is the prompt's. |
 | `context_tokens` | integer | `3072` | >= 1024 | The model's context window; prompts are cut to fit it with the output. |
 | `temperature` | number or null | `null` | >= 0, <= 2 | Sampling temperature. Unset: the server's default. |
+| `think` | boolean or null | `false` |  | Ollama only: sent as `think`, so a reasoning model (qwen3, deepseek-r1) answers without spending the output budget on a `<think>` block first. `null`: not sent (the model's default). An Ollama that refuses the field is asked again without it. The `openai` backend ignores this key: use `extra_body`. |
+| `extra_body` | map of text to any | `{}` |  | `openai` only: extra request fields, passed through as they are, for a server that needs one, e.g. `chat_template_kwargs: {enable_thinking: false}` (vLLM, SGLang) or `reasoning_effort: low`. Fields scout sets itself (`model`, `messages`, `max_tokens`, `stream`, `temperature`) can't be replaced. |
 | `gpu` | [services.llm.gpu](#servicesllmgpu) or null | `null` |  | Hold a GPU lease around each model call. Leave unset for a hosted backend. |
 
 ```yaml

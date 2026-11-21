@@ -137,8 +137,10 @@ services:
   #   model: <MODEL>
   #   api_key_env: SCOUT_LLM_API_KEY         # hosted backends only
   #   timeout: 120                           # seconds per call
-  #   max_tokens: 400                        # most tokens one report may generate
+  #   max_tokens: 400                        # most tokens one report may generate; unset: 800 briefings, 400 status
   #   context_tokens: 3072                   # the model's context window; prompts are cut to fit
+  #   think: false                           # ollama: skip a reasoning model's <think> block; null: don't send
+  #   extra_body: {}                         # openai: extra request fields, e.g. chat_template_kwargs
   #   gpu:                                   # hold an argus-iris GPU lease around each call; leave out when hosted
   #     min_vram_mb: 6000                    # weights plus working set, MiB
   #     model_mb: 5200                       # the part that stays loaded in the model server
