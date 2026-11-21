@@ -10,7 +10,9 @@ and shown, never parsed: a report that says "approve X" approves nothing.
 | `evening` | the same | what's still open, what was approved, what to watch overnight. Under 150 words. |
 | `status` | by the status cycle, when open items pass the heartbeat policy's report rules and at least one is news: not yet announced in its current form (new, escalated or changed, or cleared and back), or its re-announce interval passed; or at a briefing slot | only the reportable items, most severe first, and rejections. Under 80 words. |
 
-Rest hours (heartbeat policy) skip the status cycle entirely; briefings still run. Write one now:
+Rest hours (heartbeat policy) skip the status cycle entirely; briefings still run. Write one now, from the CLI or
+over HTTP (`POST /api/reports`, which also delivers it unless told not to; see
+[api.md](api.md#on-request-reports)):
 
 ```bash
 argus-scout brief --config scout.yaml --kind morning            # asks the model, stores and prints it
@@ -18,6 +20,17 @@ argus-scout brief --config scout.yaml --kind status --dry-run   # stores nothing
 argus-scout brief --config scout.yaml --no-llm                  # the template only
 argus-scout deliver --config scout.yaml --latest                # send the newest report to the channels
 ```
+
+```bash
+curl -s -X POST localhost:8400/api/reports -H "Authorization: Bearer $SCOUT_API_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"kind": "morning"}'     # store, deliver and return it
+```
+
+A scheduled briefing and an on-request one are written by the same code (`Briefings` in `cycles.py`), so they get
+the same facts, persona, caps, GPU lease and fallback, and `meta.trigger` says which it was (`scheduled`, `request`
+or `cli`). Only one report of a kind is written at a time: a request that arrives while one is being written gets a
+409, and a scheduled job that comes due waits its turn. Both are held to the daily caps, even though other work
+done for an HTTP request may go over them.
 
 ## What the model sees
 
@@ -32,7 +45,7 @@ many were left out per section, so a cut always drops the least severe facts.
 
 Every stored report's `meta` records how it was written: `path` (`llm` or `template`), `fallback_reason`, the
 model, the persona, token counts, and the ids of the facts it used and how many it left out. See it with
-`GET /api/reports/latest`.
+`GET /api/reports/latest` or `GET /api/reports/{id}`.
 
 ## Backends
 

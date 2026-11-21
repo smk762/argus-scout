@@ -14,10 +14,14 @@ Nothing on the API moves a recommendation past `approved`: there is no deploy ro
 | POST | `/api/recommendations/{id}/approve` | server token | Body `{"by": "<NAME>", "reason": "...", "revision": <N>}`. A manual approval, recorded in the audit trail. Proposed only, and only at the `revision` you viewed (see [Decisions](#decisions)). An optional `standing` also creates a runtime standing rule from it, in the same transaction (see [Standing rules](#standing-rules)). |
 | POST | `/api/recommendations/{id}/reject` | server token | The same body, without `standing`. The reason feeds rejection memory and the briefings. Proposed only. |
 | DELETE | `/api/approvals/rules/{rule_id}` | server token | Body `{"by": "<NAME>"}`. Deletes a **runtime** standing rule. 409 for a file rule (edit the approvals file), 404 unknown. |
+| POST | `/api/reports` | server token | Body `{"kind": "morning"\|"evening"\|"status", "deliver": true, "no_llm": false}`. Write a report now, store it and (unless `deliver: false`) send it to the channels. Returns the report plus `delivered` and `delivery`. 409 while a report of that kind is being written. See [On-request reports](#on-request-reports). |
+| POST | `/api/reports/{id}/deliver` | server token | Body `{"force": false, "channels": null}`. Send a stored report, as `argus-scout deliver`: a channel that already has it says `duplicate` unless `force`; `channels` names a subset. 404 unknown report, 409 no channels configured, 422 an unknown channel name. |
 | GET | `/api/events` | read auth | Open events, grouped by fingerprint |
 | GET | `/api/recommendations` | read auth | Recommendations, oldest first, each with its `revision`. `?status=proposed` (repeatable), `?limit=` (1-500, default 100). |
 | GET | `/api/recommendations/{id}` | read auth | One recommendation with its `revision` and transition history; `approved_by_rule` names the standing rule that approved it, if one did |
 | GET | `/api/approvals/rules` | read auth | Every standing rule: `origin` `file` (the approvals file) or `api` (created at runtime), `expires_at`, `expired`, and for a runtime rule `created_by` |
+| GET | `/api/reports` | read auth | Stored reports, newest first. `?kind=morning`, `?limit=` (1-200, default 20). |
+| GET | `/api/reports/{id}` | read auth | One report (`id` is an integer). 404 when there is none. |
 | GET | `/api/reports/latest` | read auth | The newest report; `?kind=morning` for the newest of one kind. 404 when there is none. |
 | GET | `/api/policy/explain` | read auth | The effective heartbeat policy and what decides each open item now |
 | GET | `/wall` | read auth | The latest report, open items and pending decisions as plain text |
@@ -35,6 +39,36 @@ curl -s -X POST localhost:8400/api/recommendations/<REC_ID>/reject \
   -H "Authorization: Bearer $SCOUT_API_TOKEN" -H 'Content-Type: application/json' \
   -d '{"by": "<NAME>", "reason": "That volume is meant to be full", "revision": <N>}'
 ```
+
+## On-request reports
+
+`POST /api/reports` writes a report the way a scheduled briefing does, through the same code: the same narrator and
+persona, the model's `llm_calls` cap, the GPU lease and the template fallback (see [narrative.md](narrative.md)).
+The report is stored with `meta.trigger: "request"` and then delivered through the channels, unless the body says
+`"deliver": false`, in which case nothing is sent and nothing is spoken (send it later with
+`/api/reports/{id}/deliver`). `"no_llm": true` skips the model and uses the template.
+
+```bash
+curl -s -X POST localhost:8400/api/reports \
+  -H "Authorization: Bearer $SCOUT_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind": "morning", "deliver": false}'
+curl -s -X POST localhost:8400/api/reports/<REPORT_ID>/deliver \
+  -H "Authorization: Bearer $SCOUT_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"channels": ["<CHANNEL>"]}'
+```
+
+- **One report of a kind at a time.** While a report of that kind is being written, by a scheduled briefing job or
+  another request, the answer is 409 at once: a request is never held open for the length of someone else's model
+  call. Retry when it's done. Other kinds aren't held up. A scheduled job that comes due during an on-request
+  report waits for it and then writes its own, so a slot is never lost.
+- **Held to the caps.** Other work done while serving an HTTP request may go over a daily cap (unless
+  `budget.block_manual`); reports and their deliveries never do, whatever `block_manual` says, exactly as the CLI
+  and the scheduler are held. Over `llm_calls` the report comes from the template (`fallback_reason: budget`);
+  over `tts` or `speak` voice is held back and text still goes.
+- **Waits for the model.** The request returns when the report is stored and delivered, so allow for the model's
+  `timeout`. The model call runs off the event loop; the rest of the API keeps answering meanwhile.
+- A `status` report written here covers every open item, as a status report at a briefing slot does, not only the
+  items the status cycle would announce.
 
 ## Decisions
 
@@ -139,7 +173,7 @@ Reaching scout by `127.0.0.1`, another IP or `localhost` needs neither. A name i
 the `Host` check and as a same-host write `Origin`; listing a name's origin in `allowed_origins` alone is not enough
 to reach scout by that name.
 
-**Bodies are capped**: 256 KiB for an event push, 8 KiB for an ack, approve, reject or rule delete (413 over it, 400 for a bad
+**Bodies are capped**: 256 KiB for an event push, 8 KiB for an ack, approve, reject, rule delete, report or deliver (413 over it, 400 for a bad
 `Content-Length`). Write routes read the body only after auth, so an unauthenticated caller can't make scout buffer
 one. Action bodies refuse unknown keys; `by` is 1-100 characters and `reason` up to 2000, with no control
 characters.
@@ -151,7 +185,7 @@ characters.
 | 403 | `server.read_only`, or an untrusted browser origin |
 | 404 | No such source (told only to the server token), event, recommendation, report or standing rule |
 | 405 | A push to a polled source (told only to the server token) |
-| 409 | The event is already acked; the recommendation isn't `proposed`, or changed since you viewed it (reload and decide again); a delete names a file rule (edit the approvals file) |
+| 409 | The event is already acked; the recommendation isn't `proposed`, or changed since you viewed it (reload and decide again); a delete names a file rule (edit the approvals file); a report of that kind is being written; no channels to deliver to |
 | 413 | Body over the cap |
 | 422 | Body failed validation; a standing rule the guardrails refuse (nothing is approved) |
 | 503 | No token configured: the route is closed |

@@ -70,7 +70,8 @@ Counts live in the store, so a crash loop can't reset them and the server and th
 one atomic check-and-increment. They reset at midnight in `schedule.timezone`, whatever the host's clock says. At the cap, a report comes from
 its template (`fallback_reason: budget`) and speech is held back; text still goes out. Work done while serving an
 HTTP request goes over the cap and is logged, unless `budget.block_manual: true`; scheduled jobs and the CLI are
-always held to it. Watch `scout_usage_used` and `scout_usage_limit` on `/metrics`. An older scout's `usage.json`
+always held to it, and so are reports written or delivered over HTTP (`POST /api/reports`,
+`/api/reports/{id}/deliver`). Watch `scout_usage_used` and `scout_usage_limit` on `/metrics`. An older scout's `usage.json`
 beside the store is imported once and renamed.
 
 ## The scheduler and its jobs

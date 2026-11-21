@@ -226,6 +226,8 @@ class Store(Protocol):
 
     def list_reports(self, limit: int = 50, *, kind: str | None = None) -> list[Report]: ...
 
+    def get_report(self, report_id: int) -> Report | None: ...
+
     # -- delivery records ------------------------------------------------------------
     def record_delivery(
         self,

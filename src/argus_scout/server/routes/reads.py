@@ -30,7 +30,7 @@ WALL_RECOMMENDATIONS = 20
 WALL_STANDING_HOURS = 24
 
 
-def _report_dict(report: Report) -> dict[str, Any]:
+def report_dict(report: Report) -> dict[str, Any]:
     return {
         "id": report.id,
         "kind": report.kind,
@@ -156,7 +156,7 @@ def read_router() -> APIRouter:
         report = get_runtime(request).store.latest_report(kind or None)
         if report is None:
             raise HTTPException(status_code=404, detail=f"no {kind} report yet" if kind else "no report yet")
-        return _report_dict(report)
+        return report_dict(report)
 
     @router.get("/api/policy/explain")
     def policy_explain(request: Request) -> dict[str, Any]:
@@ -169,4 +169,4 @@ def read_router() -> APIRouter:
     return router
 
 
-__all__ = ["clean", "explain_state", "read_router", "render_wall"]
+__all__ = ["clean", "explain_state", "read_router", "render_wall", "report_dict"]

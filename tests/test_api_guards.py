@@ -31,7 +31,7 @@ from argus_scout.server.guards import (
 from argus_scout.store import SqliteStore
 
 SERVER_SRC = Path(argus_scout.server.__file__).parent
-PARAMS = {"source": "hook", "event_id": "e1", "rec_id": "r1", "rule_id": "api-nope"}
+PARAMS = {"source": "hook", "event_id": "e1", "rec_id": "r1", "rule_id": "api-nope", "report_id": "1"}
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +62,7 @@ def write_routes(app: FastAPI) -> list[tuple[str, str]]:
 def test_every_write_route_is_guarded(store, tmp_path, read_only):
     app = make_app(store, tmp_path, read_only=read_only)
     assert unguarded_routes(app, read_only=read_only) == []
-    assert len(write_routes(app)) == 5, "the walk found a different set of write routes: update the tests"
+    assert len(write_routes(app)) == 7, "the walk found a different set of write routes: update the tests"
 
 
 def test_walker_flags_an_unguarded_route(store, tmp_path):
@@ -252,6 +252,7 @@ READS = [
     "/api/events",
     "/api/recommendations",
     "/api/approvals/rules",
+    "/api/reports",
     "/api/reports/latest",
     "/api/policy/explain",
     "/wall",
@@ -281,7 +282,7 @@ def test_every_get_route_is_known(store, tmp_path):
     app = make_app(store, tmp_path)
     always_open = {"/health", "/metrics", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
     gets = {v.path for v in iter_routes(app) if "GET" in v.methods}
-    assert gets - always_open == set(READS) | {"/api/recommendations/{rec_id}"}
+    assert gets - always_open == set(READS) | {"/api/recommendations/{rec_id}", "/api/reports/{report_id:int}"}
 
 
 # --- filesystem paths ----------------------------------------------------------------------------------------

@@ -604,7 +604,7 @@ class BudgetConfig(_Section):
     ``schedule.timezone``."""
     block_manual: bool = False
     """Refuse over-cap work done while serving an HTTP request too. Off: such work goes through and is logged.
-    Scheduled jobs and the CLI are always held to the caps."""
+    Scheduled jobs, the CLI and reports written or delivered over HTTP are always held to the caps."""
 
 
 class ServerConfig(_Section):
