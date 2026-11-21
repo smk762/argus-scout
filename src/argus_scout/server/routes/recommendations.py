@@ -3,13 +3,14 @@
 ``POST /api/recommendations/{id}/approve`` and ``/reject`` are **manual** transitions: approve sets
 ``approval_source="manual"`` (never a standing rule), and both record who decided, and why, in the store's
 transition audit trail. Only a ``proposed`` recommendation can be approved or rejected; anything else is a
-``409``. There is no route past ``approved``: recording that a person carried a recommendation out
+``409``, as is a decision on a copy that changed before the save (the store's ``expected_status`` check: an
+engine cycle can't overwrite a person's decision, and a person can't decide on a copy the engine has since
+retired). There is no route past ``approved``: recording that a person carried a recommendation out
 (``deployed``, ``retired``) is left out of v0.1, and scout itself never deploys anything.
 """
 
 from __future__ import annotations
 
-import threading
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,7 +21,7 @@ from argus_scout.recommendations import Recommendation, Status
 from argus_scout.server.deps import get_runtime
 from argus_scout.server.guards import read_json, write_auth
 from argus_scout.server.routes.models import DecisionBody
-from argus_scout.store.base import Store, Transition
+from argus_scout.store.base import Store, StoreConflict, Transition
 
 LIST_LIMIT = 500
 
@@ -43,8 +44,6 @@ def with_history(store: Store, rec: Recommendation) -> dict[str, Any]:
 
 def write_router(server: ServerConfig) -> APIRouter:
     router = APIRouter(prefix="/api/recommendations", tags=["recommendations"])
-    # Read-transition-save must not interleave, or two deciders could both "win" on stale copies.
-    lock = threading.Lock()
 
     async def decide(request: Request, rec_id: str, *, approve: bool) -> dict[str, Any]:
         runtime = get_runtime(request)
@@ -52,18 +51,22 @@ def write_router(server: ServerConfig) -> APIRouter:
         done = "approved" if approve else "rejected"
 
         def apply() -> dict[str, Any]:
-            with lock:
-                rec = runtime.store.get_recommendation(rec_id)
-                if rec is None:
-                    raise HTTPException(status_code=404, detail=f"no recommendation {rec_id!r}")
-                moved = rec.approve() if approve else rec.reject(body.reason)
-                if not moved:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"recommendation {rec_id!r} is {rec.status.value}; only a proposed one can be {done}",
-                    )
-                runtime.store.save_recommendation(rec, by=body.by, reason=body.reason)
-                return with_history(runtime.store, rec)
+            rec = runtime.store.get_recommendation(rec_id)
+            if rec is None:
+                raise HTTPException(status_code=404, detail=f"no recommendation {rec_id!r}")
+            loaded = rec.status
+            moved = rec.approve() if approve else rec.reject(body.reason)
+            if not moved:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"recommendation {rec_id!r} is {rec.status.value}; only a proposed one can be {done}",
+                )
+            try:
+                # The store refuses the write if anyone (the engine, another request) changed it since we read it.
+                runtime.store.save_recommendation(rec, by=body.by, reason=body.reason, expected_status=loaded)
+            except StoreConflict as exc:
+                raise HTTPException(status_code=409, detail=f"{exc}; reload and decide again") from None
+            return with_history(runtime.store, rec)
 
         return await run_in_threadpool(apply)
 
