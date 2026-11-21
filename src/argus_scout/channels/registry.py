@@ -27,6 +27,8 @@ import structlog
 from pydantic import BaseModel, ValidationError
 
 from argus_scout.channels.base import Channel, VoiceChannel
+from argus_scout.channels.mask import MaskChannel
+from argus_scout.channels.snapcast import SnapcastChannel
 from argus_scout.channels.text import TextChannel
 from argus_scout.channels.webhook import WebhookChannel
 from argus_scout.config import PluginChannel, ScoutConfig
@@ -35,7 +37,14 @@ from argus_scout.severity import Severity
 log = structlog.get_logger(__name__)
 
 ENTRY_POINT_GROUP = "argus_scout.channels"
-BUILTINS: dict[str, Any] = {"text": TextChannel, "webhook": WebhookChannel}
+# snapcast and mask import their optional dependency (numpy) only when a channel is built, so a missing extra
+# fails that one entry ("install argus-scout[snapcast]") and nothing else.
+BUILTINS: dict[str, Any] = {
+    "text": TextChannel,
+    "webhook": WebhookChannel,
+    "snapcast": SnapcastChannel,
+    "mask": MaskChannel,
+}
 
 
 @dataclass

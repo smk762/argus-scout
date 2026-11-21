@@ -229,7 +229,13 @@ FETCH_NAMES = {"afetch", "fetch"}
 # The only modules allowed to fetch at all: the Prometheus client, and the JSON status poller
 # (which GETs status endpoints the config names; it is a source of status events, not a scraper), and the
 # webhook channel (which POSTs messages to the one URL its config names; delivery, never a monitored host).
-FETCHERS = {"prometheus.py", "sources/json_poll.py", "channels/webhook.py"}
+# The voice channels fetch their own delivery targets, never a monitored host: argus-mask (its /health and /push,
+# at the one URL its config names) and the snapserver's JSON-RPC over HTTP (the one control URL).
+FETCHERS = {"prometheus.py", "sources/json_poll.py", "channels/webhook.py", "channels/mask.py", "channels/snapcast.py"}
+# Raw sockets (asyncio streams). Only the snapcast channel, for the snapserver's TCP JSON-RPC control port at the one
+# host its config names: a delivery target (the speakers), not a monitored host.
+RAW_SOCKET_CALLS = {"open_connection", "create_connection", "open_unix_connection", "start_server", "sock_connect"}
+RAW_SOCKET_USERS = {"channels/snapcast.py"}
 
 
 def test_no_module_contacts_hosts_directly():
@@ -249,3 +255,8 @@ def test_no_module_contacts_hosts_directly():
                 continue
             bad = {n for n in names if n in NETWORK_MODULES or n.split(".")[0] in {"httpx", "requests", "aiohttp"}}
             assert not bad, f"{rel} imports {bad}"
+        if rel not in RAW_SOCKET_USERS:
+            calls = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in RAW_SOCKET_CALLS} | {
+                n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in RAW_SOCKET_CALLS
+            }
+            assert not calls, f"{rel} opens raw sockets: {calls}"
