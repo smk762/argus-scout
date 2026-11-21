@@ -424,7 +424,13 @@ def deliver(
 @app.command()
 def serve(
     config_path: Path | None = typer.Option(
-        None, "--config", "-c", exists=True, dir_okay=False, help="scout.yaml; refuses to start if it is invalid."
+        None,
+        "--config",
+        "-c",
+        envvar="SCOUT_CONFIG",
+        exists=True,
+        dir_okay=False,
+        help="scout.yaml; refuses to start if it is invalid. The container image sets SCOUT_CONFIG=/config/scout.yaml.",
     ),
     host: str | None = typer.Option(
         None,

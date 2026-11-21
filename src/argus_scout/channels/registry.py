@@ -161,8 +161,13 @@ def build_channels(config: ScoutConfig, registry: Registry | None = None) -> Cha
         if isinstance(entry, PluginChannel):
             try:
                 cfg = plugin.config_model.model_validate(entry.model_dump(), context={"base_dir": config.base_dir})
+                if getattr(cfg, "name", None) != entry.name:
+                    raise TypeError(f"the plugin's config model must keep name {entry.name!r}")
             except ValidationError as exc:
                 built.errors[entry.name] = f"{entry.kind}: {_format(exc)}"
+                continue
+            except Exception as exc:  # noqa: BLE001 — a plugin's own validator may raise anything; it fails only itself
+                built.errors[entry.name] = f"{entry.kind}: {type(exc).__name__}: {exc}"
                 continue
         else:
             cfg = entry

@@ -151,7 +151,7 @@ $ argus-scout serve [OPTIONS]
 
 **Options**:
 
-* `-c, --config <file>`: scout.yaml; refuses to start if it is invalid.
+* `-c, --config <file>`: scout.yaml; refuses to start if it is invalid. The container image sets SCOUT_CONFIG=/config/scout.yaml.  [env var: SCOUT_CONFIG]
 * `--host <str>`: Bind address . Reads are open unless server.read_auth: keep it on loopback.
 * `--port <int>`: 
 * `--help`: Show this message and exit.

@@ -413,3 +413,29 @@ def test_signal_pending_round_trip(tmp_path):
         assert store.drop_signal_pending(["r"]) == 1
         store.save_signal_pending("r", {})
         assert store.load_signal_pending() == {}
+
+
+def test_resolved_column_migration_keeps_open_events_open(tmp_path):
+    """A database from before ``resolved_at``: its events stay open, and resolving one never touches the ack."""
+    db = tmp_path / "old.db"
+    before = MIGRATIONS.index(next(m for m in MIGRATIONS if "resolved_at" in m))
+    with SqliteStore(db) as s:
+        pass
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TABLE events")  # rebuild at the pre-resolved_at schema
+    conn.executescript(MIGRATIONS[0].split("CREATE TABLE recommendations")[0])
+    conn.execute(f"PRAGMA user_version = {before}")
+    conn.commit()
+    conn.close()
+    with SqliteStore(db) as s:
+        assert s.schema_version == SCHEMA_VERSION
+    with SqliteStore(db) as s:
+        s.upsert_event(event("a"), now=T0)
+        s.upsert_event(event("b", summary="other"), now=T0)
+        assert s.resolve_missing("nas", ["b"], at=T0) == ["a"]
+        assert s.resolve_missing("nas", ["b"], at=T0) == []  # idempotent
+        assert [e.event_id for e in s.open_events(now=T0)] == ["b"]
+        assert s.get_entry("nas", "a").acked_by is None
+        assert s.events_by_fingerprint(event("a").fingerprint) == []
+        assert s.prune(T0 + timedelta(seconds=1))["events"] == 1
+        assert s.get_entry("nas", "a") is None and s.get_entry("nas", "b") is not None
