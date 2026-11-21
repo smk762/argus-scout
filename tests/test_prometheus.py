@@ -256,7 +256,7 @@ def test_no_module_contacts_hosts_directly():
             bad = {n for n in names if n in NETWORK_MODULES or n.split(".")[0] in {"httpx", "requests", "aiohttp"}}
             assert not bad, f"{rel} imports {bad}"
         if rel not in RAW_SOCKET_USERS:
-            calls = {
-                n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in RAW_SOCKET_CALLS
-            } | {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in RAW_SOCKET_CALLS}
+            calls = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in RAW_SOCKET_CALLS} | {
+                n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in RAW_SOCKET_CALLS
+            }
             assert not calls, f"{rel} opens raw sockets: {calls}"

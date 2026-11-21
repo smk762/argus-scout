@@ -134,7 +134,9 @@ def test_resampling_and_remixing():
 
 def test_encode_to_snapcast_sample_formats():
     pcm = Pcm(np.array([[1.0], [-1.0], [0.5]], dtype=np.float32), 48000)
-    assert encode(pcm, SampleFormat.parse("48000:16:2")) == struct.pack("<6h", 32767, 32767, -32767, -32767, 16384, 16384)
+    assert encode(pcm, SampleFormat.parse("48000:16:2")) == struct.pack(
+        "<6h", 32767, 32767, -32767, -32767, 16384, 16384
+    )
     # snapcast keeps 24-bit samples in 4-byte containers
     assert encode(pcm, SampleFormat.parse("48000:24:1")) == struct.pack("<3i", 2**23 - 1, -(2**23 - 1), 2**22)
     assert SampleFormat.parse("48000:24:2").bytes_per_second == 48000 * 2 * 4
@@ -325,7 +327,7 @@ def test_plan_switches_unmutes_sets_volume_and_undoes_each():
         plan(server_status(), snap_cfg("/x", stream="radio"))
     with pytest.raises(ChannelError, match="no group attic"):
         plan(server_status(), snap_cfg("/x", groups=["attic"]))
-    assert plan(server_status(stream="scout"), snap_cfg("/x", stream="scout", unmute=False)) == []
+    assert plan(server_status(stream="scout"), snap_cfg("/x", stream="scout", unmute=False, groups=["g1"])) == []
 
 
 @needs_fifo
@@ -488,7 +490,9 @@ async def test_mask_skip_is_reported_by_the_dispatcher_and_not_recorded(tmp_path
         async def synthesise(self, text, message):
             return speech()
 
-    dispatcher = Dispatcher([BoundChannel(channel, channel.config)], synthesiser=Synth(), gates=OpenGates(), store=store)
+    dispatcher = Dispatcher(
+        [BoundChannel(channel, channel.config)], synthesiser=Synth(), gates=OpenGates(), store=store
+    )
     report = await dispatcher.deliver(message())
     assert report.get("face").status == "skipped" and report.ok
     assert store.delivered_channels(message().key) == set()

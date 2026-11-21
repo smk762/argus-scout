@@ -37,6 +37,7 @@ Needs the ``snapcast`` extra (numpy, for format conversion): ``pip install argus
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import json
 import os
@@ -187,10 +188,8 @@ class SnapcastRpc:
                     return message
         finally:
             writer.close()
-            try:
+            with contextlib.suppress(OSError):
                 await writer.wait_closed()
-            except OSError:
-                pass
 
 
 Change = tuple[str, dict[str, Any]]
