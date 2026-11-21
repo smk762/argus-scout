@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import io
 import json
@@ -548,6 +549,206 @@ async def test_mask_push_refused_for_a_vanished_screen_is_skipped_and_errors_fai
 def test_mask_external_sound_screen_counts_as_ready():
     screens = {"holly": [{"display": "hld", "audio_ready": True, "sound": "external"}]}
     assert readiness(mask_health(screens=screens), "holly")[0]
+
+
+# --- mask over the source socket (transport: websocket) --------------------------------------------------------
+
+
+class FakeSource:
+    """argus-mask's ``WS /session/<face>/source`` on 127.0.0.1, as its server speaks it (argus_mask.server.app)."""
+
+    def __init__(self, mode="ok"):
+        self.mode = mode
+        self.hellos: list[dict] = []
+        self.frames: list[bytes] = []
+        self.requests: list = []
+        self.ended = False
+
+    async def handler(self, ws):
+        self.requests.append(ws.request)
+        if self.mode in ("busy", "down"):  # refused before the hello is read, as mask does
+            detail = "face 'holly' already has a source" if self.mode == "busy" else "the a2f driver is down: gone"
+            await ws.send(json.dumps({"type": "error", "detail": detail}))
+            await ws.close(code=1013, reason=detail)
+            return
+        self.hellos.append(json.loads(await ws.recv()))
+        if self.mode == "silent":
+            await ws.wait_closed()  # until scout gives up and closes
+            return
+        if self.mode == "big":
+            await ws.send("x" * (128 * 1024))
+            return
+        await ws.send(json.dumps({"type": "ready", "session_id": "s1", "fps": 30}))
+        async for data in ws:
+            if isinstance(data, bytes):
+                self.frames.append(data)
+                if self.mode == "close_early":
+                    await ws.close(code=1011, reason="driver failed")
+                    return
+            elif json.loads(data).get("type") == "end":
+                self.ended = True
+                break
+        if self.mode == "no_done":
+            await ws.wait_closed()  # until scout gives up and closes
+            return
+        samples = sum(len(f) for f in self.frames) // (2 * self.hellos[0]["channels"])
+        duration_ms = round(samples * 1000 / self.hellos[0]["sample_rate"])
+        await ws.send(json.dumps({"type": "done", "frames": 6, "duration_ms": duration_ms}))
+        await ws.close()
+
+
+@pytest.fixture
+async def source_server():
+    from websockets.asyncio.server import serve
+
+    servers = []
+
+    async def start(fake, **kw):
+        server = await serve(fake.handler, "127.0.0.1", 0, compression=None, max_size=2**23, **kw)
+        servers.append(server)
+        return server.sockets[0].getsockname()[1]
+
+    yield start
+    for server in servers:
+        server.close()
+        await server.wait_closed()
+
+
+def ws_channel(port, *, healths=None, resolve=None, **kw):
+    """A websocket mask channel at ``mask.test`` (which resolves only through ``resolve``: 127.0.0.1)."""
+    cfg = MaskConfig(
+        kind="mask", name="face", url=f"http://mask.test:{port}", face="holly", transport="websocket", **kw
+    )
+    fake = FakeMask(*(healths or [mask_health(screens=READY)]))
+
+    async def sleep(seconds):
+        return None
+
+    resolver = resolve or (lambda host, p: ["127.0.0.1"] if host == "mask.test" else [])
+    return MaskChannel(cfg, environ={}, fetcher=fake.fetcher, sleep=sleep, resolve=resolver), fake
+
+
+def cloned(pcm: Pcm | None = None) -> SpeechAudio:
+    return dataclasses.replace(speech(pcm), cloned=True, voice="narrator")
+
+
+async def test_mask_ws_discloses_a_cloned_voice_and_not_a_synthetic_one(source_server):
+    fake = FakeSource()
+    port = await source_server(fake)
+    channel, _ = ws_channel(port, seed=7)
+    clone = await channel.play(cloned(), message())
+    assert clone.ok and clone.status is None and "disclosed" in clone.detail
+    plain = await channel.play(speech(), message())
+    assert plain.ok and plain.status is None and "disclosed" not in plain.detail
+    assert [h["disclose"] for h in fake.hellos] == [True, False]
+    assert fake.hellos[0] == {"sample_rate": 22050, "channels": 1, "format": "s16le", "seed": 7, "disclose": True}
+
+
+async def test_mask_ws_cloned_voice_needs_no_allow_flag_but_http_still_refuses_it(source_server):
+    fake = FakeSource()
+    channel, _ = ws_channel(await source_server(fake))
+    assert channel.config.allow_cloned_voice is False
+    assert (await channel.play(cloned(), message())).status is None
+    http = FakeMask(mask_health(screens=READY))
+    refused = await mask_channel(http).play(cloned(), message())
+    assert refused.status == "skipped" and refused.permanent and "transport: websocket" in refused.detail
+    assert http.requests == []  # mask is never asked
+
+
+async def test_mask_ws_pcm_arrives_intact_in_capped_frames(source_server, monkeypatch):
+    import argus_scout.channels.mask as mask_module
+
+    monkeypatch.setattr(mask_module, "WS_FRAME_BYTES", 4001)  # odd: frames must still hold whole samples
+    fake = FakeSource()
+    port = await source_server(fake)
+    channel, _ = ws_channel(port)
+    pcm = sine(seconds=0.5, channels=2)
+    result = await channel.play(speech(pcm), message())
+    assert result.ok and "0.5s" in result.detail
+    assert b"".join(fake.frames) == to_s16le(decode(speech(pcm)))
+    assert len(fake.frames) > 1 and all(len(f) <= 4001 and len(f) % 4 == 0 for f in fake.frames)
+    assert fake.ended
+    request = fake.requests[0]
+    assert request.path == "/session/holly/source"
+    assert request.headers["Host"] == f"mask.test:{port}"  # the configured name, though it connected to 127.0.0.1
+    assert "Origin" not in request.headers  # mask's origin guard lets a client with no Origin through
+
+
+async def test_mask_ws_busy_face_is_skipped_and_a_refusal_fails(source_server):
+    busy = await ws_channel(await source_server(FakeSource("busy")))[0].play(speech(), message())
+    assert busy.ok and busy.status == "skipped" and "already has a source" in busy.detail
+    with pytest.raises(ChannelError, match="driver is down"):
+        await ws_channel(await source_server(FakeSource("down")))[0].play(speech(), message())
+
+
+async def test_mask_ws_not_ready_is_skipped_before_connecting(source_server):
+    fake = FakeSource()
+    channel, _ = ws_channel(await source_server(fake), healths=[mask_health()])
+    result = await channel.play(cloned(), message())
+    assert result.status == "skipped" and "not ready" in result.detail
+    assert fake.requests == []
+
+
+async def test_mask_ws_timeouts_and_early_close_fail_promptly(source_server, monkeypatch):
+    import argus_scout.channels.mask as mask_module
+
+    monkeypatch.setattr(mask_module, "WS_READY_TIMEOUT_S", 0.3)
+    started = time.monotonic()
+    with pytest.raises(ChannelError, match="no ready"):
+        await ws_channel(await source_server(FakeSource("silent")))[0].play(speech(), message())
+    with pytest.raises(ChannelError, match="driver failed"):
+        await ws_channel(await source_server(FakeSource("close_early")))[0].play(speech(), message())
+    with pytest.raises(ChannelError, match="outlasted"):
+        await ws_channel(await source_server(FakeSource("no_done")), timeout=0.3)[0].play(speech(), message())
+    assert time.monotonic() - started < 5
+
+
+async def test_mask_ws_caps_what_mask_may_send(source_server):
+    with pytest.raises(ChannelError, match="closed"):
+        await ws_channel(await source_server(FakeSource("big")))[0].play(speech(), message())
+
+
+async def test_mask_ws_goes_only_to_the_configured_host(source_server):
+    from websockets.datastructures import Headers
+    from websockets.http11 import Response
+
+    elsewhere = FakeSource()
+    other = await source_server(elsewhere)
+
+    def redirect(connection, request):
+        return Response(302, "Found", Headers({"Location": f"ws://127.0.0.1:{other}/session/holly/source"}))
+
+    fake = FakeSource()
+    with pytest.raises(ChannelError, match="302"):
+        await ws_channel(await source_server(fake, process_request=redirect))[0].play(speech(), message())
+    assert elsewhere.requests == []  # the redirect was not followed
+
+    with pytest.raises(ChannelError, match="cannot resolve"):
+        await ws_channel(await source_server(FakeSource()), resolve=lambda h, p: [])[0].play(speech(), message())
+
+    def broken(host, port):
+        raise OSError("no such host")
+
+    with pytest.raises(ChannelError, match="cannot resolve mask.test"):
+        await ws_channel(await source_server(FakeSource()), resolve=broken)[0].play(speech(), message())
+
+
+def test_mask_ws_url_follows_the_configured_scheme():
+    from argus_scout.channels.mask import source_url
+
+    assert source_url("http://mask:8000", "holly") == "ws://mask:8000/session/holly/source"
+    assert source_url("https://faces.example/mask/", "a.b") == "wss://faces.example/mask/session/a.b/source"
+
+
+def test_mask_ws_needs_websockets(monkeypatch):
+    from argus_scout.channels.audio import MissingExtra
+
+    for name in ("websockets", "websockets.asyncio", "websockets.asyncio.client"):
+        monkeypatch.setitem(sys.modules, name, None)
+    cfg = MaskConfig(kind="mask", name="face", url="http://mask:8000", face="holly", transport="websocket")
+    with pytest.raises(MissingExtra, match=r"argus-scout\[mask\]"):
+        MaskChannel(cfg)
+    MaskChannel(cfg.model_copy(update={"transport": "http"}))  # http needs only numpy
 
 
 # --- missing extra -------------------------------------------------------------------------------------------

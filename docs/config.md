@@ -232,7 +232,8 @@ Needs the `mask` extra: `pip install "argus-scout[mask]"`.
 | `poll_interval` | number | `1.0` | > 0, <= 30 | Seconds between readiness checks while waiting. |
 | `seed` | integer | `0` | >= 0, <= 2147483647 | The idle layer's seed. |
 | `token_env` | env var name or null | `null` |  | Env var holding a bearer token, for a proxy in front of mask. Unset: no Authorization header. |
-| `allow_cloned_voice` | boolean | `false` |  | Push speech in a cloned voice (`SpeechAudio.cloned`) to this face. Off by default: `/push` can't set mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure. |
+| `transport` | `http` \| `websocket` | `http` |  | How speech reaches mask: `http` (`POST /push`) or `websocket` (its source socket, whose hello sets the disclosure label for a cloned voice). The same host and port either way: `ws://` or `wss://` from `url`. |
+| `allow_cloned_voice` | boolean | `false` |  | http only: push speech in a cloned voice (`SpeechAudio.cloned`) anyway. Off by default: `/push` can't set mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure. Use `transport: websocket` instead, which discloses it. Ignored over websocket. |
 
 ```yaml
 channels:
@@ -351,7 +352,7 @@ argus-echo, the speech server voice channels play from. See `argus_scout.channel
 | Key | Type | Default | Constraints | Description |
 |---|---|---|---|---|
 | `url` | URL | required |  | The engine's root, e.g. `http://echo:8000`: scout calls `/health` and `/synthesise/stream` under it. |
-| `voice_clone_id` | text or null | `null` |  | A clone stored on that engine (clones are per engine). Wins over `speaker`. Speech in a clone is marked as cloned, which the `mask` channel refuses unless its `allow_cloned_voice` is set. |
+| `voice_clone_id` | text or null | `null` |  | A clone stored on that engine (clones are per engine). Wins over `speaker`. Speech in a clone is marked as cloned: the `mask` channel discloses it over `transport: websocket`, and over http refuses it unless its `allow_cloned_voice` is set. |
 | `speaker` | text or null | `null` |  | A built-in speaker (`GET /speakers` on the engine). Neither this nor a clone: the engine's default voice. |
 | `language` | text | `en` |  | ISO language code. Miso speaks English only. |
 | `instruction` | text or null | `null` |  | Qwen3-TTS only: a speaking instruction. Other engines ignore it. |

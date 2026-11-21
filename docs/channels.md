@@ -105,8 +105,8 @@ How scout uses echo's contracts:
   Anything else is retried by the redelivery sweep.
 
 Echo's contract has no flag saying a voice is a clone, so scout decides from its own request: speech made with
-a `voice_clone_id` is marked as cloned, and the `mask` channel refuses it unless `allow_cloned_voice` is set
-(see `mask` below).
+a `voice_clone_id` is marked as cloned. The `mask` channel shows it with mask's disclosure label over
+`transport: websocket`, and over http refuses it unless `allow_cloned_voice` is set (see `mask` below).
 
 Echo has no speaker of its own, so there is no `echo` channel. Voice channels such as Snapcast and argus-mask
 play the audio.
@@ -313,7 +313,8 @@ to the `control` host only. Snapserver is a delivery target, not a monitored hos
 ## `mask`
 
 Speaks through an [argus-mask](https://github.com/smk762/argus-mask) face: lip-synced on whatever screen is
-watching it. It uses mask's published agent contract over HTTP.
+watching it. It uses mask's published agent contracts: HTTP `POST /push` by default, or mask's source socket with
+`transport: websocket`, which is the only way to show a cloned voice with mask's disclosure label.
 
 ```yaml
 - kind: mask
@@ -321,6 +322,7 @@ watching it. It uses mask's published agent contract over HTTP.
   url: http://mask:8000
   face: <FACE_ID>
   wait_ready: 0
+  transport: websocket   # recommended if scout ever speaks in a cloned voice
 ```
 
 | Key | Default | Meaning |
@@ -332,29 +334,69 @@ watching it. It uses mask's published agent contract over HTTP.
 | `seed` | `0` | The idle layer's seed |
 | `token_env` | unset | Env var holding a bearer token, for a reverse proxy in front of mask. If it is set in the config but missing from the environment, nothing is sent. |
 | `timeout` | `120` | Seconds the whole delivery may take. Mask answers a push when the speech ends. |
-| `allow_cloned_voice` | `false` | Push speech in a cloned voice. Off by default: see below. |
+| `transport` | `http` | `http` (`POST /push`) or `websocket` (the source socket, `ws://` or `wss://` from `url`). See below. |
+| `allow_cloned_voice` | `false` | http only: push speech in a cloned voice with no disclosure. Not recommended: see below. |
 
-**Readiness** comes from `GET /health`. The face is ready when the driver is available, the server isn't
-read-only, no other source is speaking through the face (`live`), and at least one screen watching it reports
-`audio_ready`. Screens are keyed by the name the viewer used, so an alias and its face both match. A screen with
-house audio (`sound: external`, the sound on Snapcast) counts as ready. If the face isn't ready, the delivery is
-**skipped**, unless `wait_ready` gives it time. A read-only server or a driver that is down is a failure.
+**Readiness** comes from `GET /health`, whichever transport is used. The face is ready when the driver is
+available, the server isn't read-only, no other source is speaking through the face (`live`), and at least one
+screen watching it reports `audio_ready`. Screens are keyed by the name the viewer used, so an alias and its face
+both match. A screen with house audio (`sound: external`, the sound on Snapcast) counts as ready. If the face isn't
+ready, the delivery is **skipped**, unless `wait_ready` gives it time. A read-only server or a driver that is down
+is a failure.
 
-**Speech** goes as `POST /push?face=<face>&seed=<seed>&require_screen=true` with raw 16-bit PCM and the headers
-`X-Sample-Rate`, `X-Audio-Format: pcm_s16le` and `X-Channels`. Mask never sees the text. `require_screen` makes mask
-refuse with a 409 if the screen went away after the readiness check, and scout reports that as skipped too, so speech
-never goes to a face no one can hear. Mask caps a push at 25 MB, about 9 minutes of 24 kHz mono speech.
+**Speech over http** (`transport: http`) goes as `POST /push?face=<face>&seed=<seed>&require_screen=true` with raw
+16-bit PCM and the headers `X-Sample-Rate`, `X-Audio-Format: pcm_s16le` and `X-Channels`. Mask never sees the text.
+`require_screen` makes mask refuse with a 409 if the screen went away after the readiness check, and scout reports
+that as skipped too, so speech never goes to a face no one can hear. Mask caps a push at 25 MB, about 9 minutes of
+24 kHz mono speech.
+
+**Speech over the socket** (`transport: websocket`) goes to `WS /session/<face>/source`:
+
+1. Scout sends a JSON hello: `{"sample_rate": …, "channels": …, "format": "s16le", "seed": …, "disclose": …}`.
+   `disclose` is `true` exactly when the speech is in a cloned voice, and `false` otherwise.
+2. Mask answers `{"type": "ready", …}` once its driver is open. If the face already has a source, mask answers
+   `{"type": "error", …}` and closes, and the delivery is **skipped**. Any other refusal (a driver that is down, a
+   face it doesn't serve, a read-only server) is a failure.
+3. Scout sends the PCM as binary messages of at most 64 KB each, paced at real time plus a one-second lead, as
+   mask's own client does. Then it sends `{"type": "end"}`.
+4. Mask answers `{"type": "done", "frames": …, "duration_ms": …}` and closes. A socket that closes before `done`,
+   or an `error` mid-speech, is a failure.
+
+The socket has no `require_screen`, so the `/health` check just before connecting is its only readiness check. A
+screen that goes away in the second between the check and the speech isn't caught as it is over http.
+
+The socket can't go through `argus_cortex.net`, so scout applies the same rules itself. The configured host is
+resolved once, and the addresses are checked with `argus_cortex.net.check_url`, with only that host allowed. Scout
+then connects to those addresses and nowhere else. `Host` and TLS SNI stay the configured name, and a redirect is
+refused, not followed. Environment proxies are ignored and compression is off. A message from mask is capped at
+64 KB, since mask only sends small JSON. The connect and handshake have a 10 s limit, `ready` has 30 s, and the
+speech has its length plus 15 s, capped at `timeout`. Scout sends no `Origin` header, which mask's origin guard
+admits as a non-browser client.
 
 argus-mask has no authentication of its own. Reaching its port is access, so keep it on a trusted network or behind
-a proxy (`token_env`). Mask takes its own GPU lease (argus-iris) for the stream, and scout takes none.
+a proxy (`token_env`, sent on both transports). Mask takes its own GPU lease (argus-iris) for the stream, and scout
+takes none.
 
-**Cloned voices are refused by default.** argus-echo can speak in a cloned voice (`services.echo.voice_clone_id`),
-which may be a real person's. argus-mask records consent and shows a disclosure label for voices made through
-its own Voices page, but `/push` has no way to carry that label, so a face fed a clone over HTTP would speak in
-someone's voice with nothing telling the viewer. Speech synthesised with a `voice_clone_id` is marked as cloned,
-and the `mask` channel **skips** it (permanently, so it's never retried) with a reason saying why, before
-contacting mask at all. Set `allow_cloned_voice: true` only for a clone whose owner consented and whose disclosure
-your viewers get some other way. Built-in speakers and Qwen's designed voices aren't clones.
+**Cloned voices are disclosed, or refused.** argus-echo can speak in a cloned voice
+(`services.echo.voice_clone_id`), which may be a real person's. Speech synthesised with a `voice_clone_id` is marked
+as cloned. Built-in speakers and Qwen's designed voices aren't clones.
+
+- Over **websocket**, a cloned voice goes with `disclose: true`. Every screen watching the face, and every recording,
+  shows mask's fixed label: *An AI voice of a real person, used with their consent.* `allow_cloned_voice` isn't
+  needed and is ignored.
+- Over **http**, `/push` has no way to carry that label. The channel **skips** cloned speech (permanently, so it's
+  never retried) with a reason saying why, before contacting mask at all.
+- `allow_cloned_voice: true` makes http push the clone anyway, with **no disclosure**. Scout logs a warning
+  (`channel.mask.cloned_voice_undisclosed`) on every such push. It exists for a clone whose owner consented and
+  whose viewers are told some other way. Prefer `transport: websocket`.
+
+**Consent stays your responsibility.** The hello's only consent field is `disclose`. It carries no consent record
+or owner id. Mask checks its consent records (signed releases, revocation) only for voices it synthesises itself,
+through `/speak` and `say`, from the voice's record in its Voices directory. A source on the socket is trusted to
+say whether to disclose. Scout can't see whether the echo clone it asked for is consented, so it doesn't invent a
+consent reference. It discloses every clone, and the label says the voice is used with consent. Use only a clone of
+someone who consented (mask's *A consenting speaker*, covered by a release). A *Personal use* clone shown on a face
+would claim a consent that doesn't exist, so use a synthetic `speaker` instead.
 
 The `snapcast` channel plays cloned voices: it is audio-only house playback that you configured for your own
 speakers, and there's no face presenting the voice as a person. If that matters in your house, use a synthetic
