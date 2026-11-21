@@ -7,8 +7,8 @@ touches the hosts it reports on. Anything it recommends is carried out by a pers
 Part of the [Argus suite](https://github.com/smk762/argus-cortex/blob/dev/SUITE.md). Where
 [argus-herald](https://github.com/smk762/argus-herald) broadcasts out to the public, scout reports in to you.
 
-> **Status: pre-alpha.** The policy core, signals, the HTTP API, the narrative (briefings) and text and webhook
-> delivery are here. Voice channels are being built in phases; see the development epic in this repo's issues.
+> **Status: pre-alpha.** The policy core, signals, the HTTP API, the narrative (briefings), text and webhook
+> delivery, and the Snapcast and argus-mask voice channels are here. See the development epic in this repo's issues.
 
 ## Quickstart
 
@@ -38,7 +38,7 @@ GPU, model choice, turning on writes, adding an event source and cleanup: [deplo
 | `argus_scout.narrative` | Morning, evening and status reports written from structured facts (open items, recommendations, rejections and their reasons, the tariff, your notes), with prompts sized for small local models. If the model is down, over its daily cap or not configured, the report comes from a plain template instead: a briefing is never skipped. Try one with `argus-scout brief --config scout.yaml --kind morning --dry-run`. |
 | `argus_scout.llm` | The model call, through argus-cortex's remote backends: Ollama, or any OpenAI-compatible API (local or hosted). Every call is charged to a daily cap, and the model's output is only ever text: nothing parses it into an action. |
 | `argus_scout.persona` / `argus_scout.memory` | How reports sound (a neutral default persona; bring your own YAML) and a directory of your own markdown notes folded into briefings. Scout only reads your notes and writes just its own rejections summary there. |
-| `argus_scout.channels` | Where reports go. `text` appends to a file beside your config (on by default in the starter config), and `webhook` POSTs signed JSON to one URL. Other kinds, including voice, are plugins. Each message goes to a channel at most once, even across restarts. Channels run concurrently, and one failing never holds up the others. Speech is synthesised once per message for every speaker, and follows quiet hours. See [docs/channels.md](docs/channels.md). Re-send the newest report with `argus-scout deliver --config scout.yaml --latest`. |
+| `argus_scout.channels` | Where reports go. `text` appends to a file beside your config (on by default in the starter config), and `webhook` POSTs signed JSON to one URL. `snapcast` plays speech into a Snapcast pipe stream (`[snapcast]` extra) and `mask` speaks through an argus-mask face when a screen is ready (`[mask]` extra). Other kinds are plugins. Each message goes to a channel at most once, even across restarts. Channels run concurrently, and one failing never holds up the others. Speech is synthesised once per message for every speaker, and follows quiet hours. See [docs/channels.md](docs/channels.md). Re-send the newest report with `argus-scout deliver --config scout.yaml --latest`. |
 | `argus_scout.engine` | Turns signal hits into recommendations: one per instance (refreshed, never duplicated), retired when the signal clears or goes stale, standing approvals applied when proposed, and a rejected proposal isn't raised again unless it gets worse. If Prometheus can't answer, the result is "unknown", never "all clear". |
 
 ## Install
@@ -46,6 +46,7 @@ GPU, model choice, turning on writes, adding an event source and cleanup: [deplo
 ```bash
 uv pip install argus-scout            # library + CLI
 uv pip install "argus-scout[server]"  # + the HTTP server
+uv pip install "argus-scout[snapcast,mask]"  # + the Snapcast and argus-mask voice channels
 ```
 
 ## Configure

@@ -195,6 +195,9 @@ class Dispatcher:
     # -- running ---------------------------------------------------------------------
     def _record(self, bound: BoundChannel, message: Delivery, result: DeliveryResult) -> None:
         self.stats[(bound.name, result.status or "")] += 1
+        if result.status == "skipped":
+            log.info("dispatch.skipped", channel=bound.name, key=message.key, detail=result.detail)
+            return  # not delivered, not failed: nothing to record, nothing to retry
         if result.status == "sent":
             log.info("dispatch.sent", channel=bound.name, key=message.key, detail=result.detail)
         else:
@@ -227,7 +230,8 @@ class Dispatcher:
             result = DeliveryResult(ok=False, error=f"timed out after {bound.timeout:g}s")
         except Exception as exc:  # noqa: BLE001 — a failing channel never affects the others
             result = DeliveryResult(ok=False, error=f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
-        result = replace(result, channel=bound.name, status="sent" if result.ok else "failed")
+        skipped = result.ok and result.status == "skipped"  # the channel declined (device not ready): not a failure
+        result = replace(result, channel=bound.name, status="skipped" if skipped else "sent" if result.ok else "failed")
         if not result.ok and not result.error:
             result = replace(result, error="the channel reported a failure")
         self._record(bound, message, result)
