@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7"]
+server = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.7", "prometheus-client>=0.20"]
 cli = ["rich>=13.0"]
 # httpx2 backs starlette's TestClient: starlette >=1.3 deprecated the httpx path
 # and raises when neither client is installed, so testing the server needs it.

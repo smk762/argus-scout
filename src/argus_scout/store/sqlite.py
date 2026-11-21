@@ -34,7 +34,8 @@ import structlog
 from argus_scout.approvals import StandingRule
 from argus_scout.events import StatusEvent, parse_dt
 from argus_scout.recommendations import Recommendation, Status
-from argus_scout.store.base import InboxEntry, Report, Transition
+from argus_scout.severity import Severity
+from argus_scout.store.base import InboxEntry, JobRun, Report, Transition
 
 log = structlog.get_logger()
 
@@ -100,6 +101,18 @@ MIGRATIONS: tuple[str, ...] = (
     );
     CREATE INDEX reports_kind ON reports (kind, generated_at);
     CREATE INDEX reports_generated ON reports (generated_at);
+    """,
+    # 2: scheduler bookkeeping, one row per job
+    """
+    CREATE TABLE job_runs (
+        name            TEXT PRIMARY KEY,
+        last_run_at     TEXT,
+        last_success_at TEXT,
+        last_error_at   TEXT,
+        last_error      TEXT,
+        run_count       INTEGER NOT NULL DEFAULT 0,
+        error_count     INTEGER NOT NULL DEFAULT 0
+    );
     """,
 )
 
@@ -446,6 +459,88 @@ class SqliteStore:
         sql += " ORDER BY generated_at DESC, id DESC LIMIT ?"
         params.append(int(limit))
         return [self._report_from_row(r) for r in self._query(sql, params)]
+
+    # -- scheduler bookkeeping -------------------------------------------------------
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> JobRun:
+        return JobRun(
+            name=row["name"],
+            last_run_at=_dt(row["last_run_at"]),
+            last_success_at=_dt(row["last_success_at"]),
+            last_error_at=_dt(row["last_error_at"]),
+            last_error=row["last_error"],
+            run_count=row["run_count"],
+            error_count=row["error_count"],
+        )
+
+    def get_job_run(self, name: str) -> JobRun | None:
+        rows = self._query("SELECT * FROM job_runs WHERE name = ?", (name,))
+        return self._job_from_row(rows[0]) if rows else None
+
+    def list_job_runs(self) -> list[JobRun]:
+        return [self._job_from_row(r) for r in self._query("SELECT * FROM job_runs ORDER BY name")]
+
+    def record_job_run(
+        self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None = None
+    ) -> JobRun:
+        """Count one run of ``name``. A success moves ``last_run_at`` (what the schedule keys on) to
+        ``started_at``; a failure leaves it alone, so the run is still due and is retried."""
+        ok = error is None
+        with self._tx() as conn:
+            conn.execute(
+                """INSERT INTO job_runs (name, last_run_at, last_success_at, last_error_at, last_error,
+                       run_count, error_count)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)
+                   ON CONFLICT (name) DO UPDATE SET
+                       last_run_at = COALESCE(excluded.last_run_at, last_run_at),
+                       last_success_at = COALESCE(excluded.last_success_at, last_success_at),
+                       last_error_at = COALESCE(excluded.last_error_at, last_error_at),
+                       last_error = COALESCE(excluded.last_error, last_error),
+                       run_count = run_count + 1,
+                       error_count = error_count + excluded.error_count""",
+                (
+                    name,
+                    _ts(started_at) if ok else None,
+                    _ts(finished_at) if ok else None,
+                    None if ok else _ts(finished_at),
+                    error,
+                    0 if ok else 1,
+                ),
+            )
+            row = conn.execute("SELECT * FROM job_runs WHERE name = ?", (name,)).fetchone()
+        return self._job_from_row(row)
+
+    # -- counts (read at scrape time by /metrics) ----------------------------------------
+    def recommendation_counts(self) -> dict[Status, int]:
+        """Recommendations per status; every status is present, zero when empty."""
+        counts = dict.fromkeys(Status, 0)
+        for r in self._query("SELECT status, COUNT(*) AS n FROM recommendations GROUP BY status"):
+            counts[Status(r["status"])] = r["n"]
+        return counts
+
+    def approval_counts(self) -> dict[str, int]:
+        """Approvals recorded in the audit trail, per source (``manual`` / ``standing``)."""
+        counts = {"manual": 0, "standing": 0}
+        rows = self._query(
+            "SELECT COALESCE(source, 'manual') AS source, COUNT(*) AS n FROM recommendation_transitions"
+            " WHERE to_status = ? GROUP BY COALESCE(source, 'manual')",
+            (Status.APPROVED.value,),
+        )
+        for r in rows:
+            counts[r["source"]] = r["n"]
+        return counts
+
+    def open_event_counts(self, *, now: datetime | None = None) -> dict[str, int]:
+        """Open (unacked, unexpired) events per severity; every severity is present."""
+        counts = {sev.value: 0 for sev in Severity}
+        rows = self._query(
+            "SELECT severity, COUNT(*) AS n FROM events WHERE acked_at IS NULL"
+            " AND (expires_at IS NULL OR expires_at > ?) GROUP BY severity",
+            (_ts(_now(now)),),
+        )
+        for r in rows:
+            counts[r["severity"]] = r["n"]
+        return counts
 
     # -- retention -------------------------------------------------------------------
     def prune(self, older_than: datetime) -> dict[str, int]:

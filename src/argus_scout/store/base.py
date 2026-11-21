@@ -55,6 +55,19 @@ class Report:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class JobRun:
+    """The scheduler's bookkeeping for one job, so its schedule and counters survive a restart."""
+
+    name: str
+    last_run_at: datetime | None = None  # start of the last successful run: what the schedule keys on
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error: str | None = None
+    run_count: int = 0
+    error_count: int = 0
+
+
 @runtime_checkable
 class Store(Protocol):
     """A persistence backend. :class:`~argus_scout.store.sqlite.SqliteStore` is the default."""
@@ -109,8 +122,24 @@ class Store(Protocol):
 
     def list_reports(self, limit: int = 50, *, kind: str | None = None) -> list[Report]: ...
 
+    # -- scheduler bookkeeping ------------------------------------------------------
+    def get_job_run(self, name: str) -> JobRun | None: ...
+
+    def list_job_runs(self) -> list[JobRun]: ...
+
+    def record_job_run(
+        self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None = None
+    ) -> JobRun: ...
+
+    # -- counts for /metrics ------------------------------------------------------------
+    def recommendation_counts(self) -> dict[Status, int]: ...
+
+    def approval_counts(self) -> dict[str, int]: ...
+
+    def open_event_counts(self, *, now: datetime | None = None) -> dict[str, int]: ...
+
     # -- retention ---------------------------------------------------------------
     def prune(self, older_than: datetime) -> dict[str, int]: ...
 
 
-__all__ = ["InboxEntry", "Report", "Store", "Transition"]
+__all__ = ["InboxEntry", "JobRun", "Report", "Store", "Transition"]

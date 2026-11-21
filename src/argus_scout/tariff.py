@@ -12,7 +12,10 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
+
+log = structlog.get_logger()
 
 _MINUTES_PER_DAY = 24 * 60
 
@@ -121,6 +124,38 @@ def load_tariff(path: str | Path) -> Tariff:
     if not isinstance(raw, dict):
         raise ValueError("tariff file must be a YAML mapping")
     return tariff_from_dict(raw)
+
+
+class TariffFile:
+    """A tariff backed by a file, re-read when its mtime changes.
+
+    :meth:`get` returns None when no path is set, the file is missing, or it fails to load (``error`` says
+    why): a bad tariff edit turns tariff awareness off rather than stopping anything.
+    """
+
+    def __init__(self, path: str | Path | None) -> None:
+        self.path = str(path) if path else ""
+        self.error: str | None = None
+        self._mtime: float | None = None
+        self._cached: Tariff | None = None
+
+    def get(self) -> Tariff | None:
+        if not self.path:
+            return None
+        try:
+            mtime = Path(self.path).stat().st_mtime
+        except OSError as exc:
+            self.error, self._mtime, self._cached = str(exc), None, None
+            return None
+        if mtime == self._mtime:
+            return self._cached
+        try:
+            self._cached, self.error = load_tariff(self.path), None
+        except Exception as exc:  # noqa: BLE001 — degrade to "no tariff", report the error
+            log.warning("tariff.load_failed", path=self.path, error=str(exc))
+            self._cached, self.error = None, str(exc)
+        self._mtime = mtime
+        return self._cached
 
 
 def coverage_gaps(periods: tuple[TariffPeriod, ...]) -> list[tuple[time, time]]:

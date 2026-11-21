@@ -231,7 +231,7 @@ def serve(
     ),
     port: int | None = typer.Option(None, help="[default: server.port, else 8400]"),
 ) -> None:
-    """Run the HTTP server (needs the [server] extra)."""
+    """Run the HTTP server and the scheduler (needs the [server] extra)."""
     config = ScoutConfig()
     if config_path is not None:
         try:
@@ -243,10 +243,12 @@ def serve(
     port = port or config.server.port
     try:
         import uvicorn
+
+        from argus_scout.server.app import create_app
     except ImportError as exc:
         typer.echo("the server needs the [server] extra: pip install 'argus-scout[server]'", err=True)
         raise typer.Exit(1) from exc
-    uvicorn.run("argus_scout.server.app:app", host=host, port=port)
+    uvicorn.run(create_app(config), host=host, port=port)
 
 
 if __name__ == "__main__":
