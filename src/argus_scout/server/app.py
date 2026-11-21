@@ -95,7 +95,7 @@ def build_runtime(
     if store is None:
         store = SqliteStore(config.store.path)
     if budget is None:
-        budget = budget_from_config(config)
+        budget = budget_from_config(config, counter=store)
     policy_file = PolicyFile(config.files.heartbeat)
     tariff = TariffFile(config.files.tariff)
     scheduler = Scheduler(store, clock=clock, **({"sleep": sleep} if sleep else {}))
