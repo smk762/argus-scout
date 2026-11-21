@@ -412,6 +412,7 @@ def register_jobs(
     deliver: Deliver | None = None,
     dispatcher: Dispatcher | None = None,
     briefings: Briefings | None = None,
+    approvals: StandingApprovals | None = None,
 ) -> Briefings:
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source, and with a
     ``dispatcher``, the redelivery sweep (:class:`~argus_scout.channels.redeliver.RedeliveryJob`).
@@ -425,6 +426,8 @@ def register_jobs(
     are charged to ``budget``). ``deliver`` is handed every stored report (default: :func:`deliver`, a no-op).
     ``briefings`` is the shared report writer (its narrator and ``deliver`` then win); one is made if not given.
     Returns it, so on-request reports go through the same writer as the scheduled ones.
+    ``approvals`` is the runtime's :class:`StandingApprovals`, shared with the HTTP API so a rule it adds applies
+    from the next analysis cycle (one is made from ``files.approvals`` if not given).
     """
     schedule = config.schedule
     clock = scheduler.clock
@@ -446,7 +449,7 @@ def register_jobs(
         store,
         rules=SignalRulesFile(config.files.signals),
         client=prometheus,
-        approvals=StandingApprovals(config.files.approvals, store=store),
+        approvals=approvals if approvals is not None else StandingApprovals(config.files.approvals, store=store),
         tariff=tariff,
         tz=schedule.tz,
         clock=clock,

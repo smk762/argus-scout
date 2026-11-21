@@ -15,7 +15,9 @@ RUN apt-get update \
 
 COPY . .
 
-RUN uv pip install --system --no-cache ".[server]"
+# Every extra that backs a built-in channel goes in the image, so a channels: entry the config enables never
+# fails inside it with "install argus-scout[...]" (tests/test_dockerfile.py keeps this list complete).
+RUN uv pip install --system --no-cache ".[server,snapcast,mask]"
 
 # Mount a config directory at /config (scout.yaml, its .env, and the files it names). Relative paths in
 # scout.yaml resolve against it, so the default store (scout.db) lands there too and survives restarts.

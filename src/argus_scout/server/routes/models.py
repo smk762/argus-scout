@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 BY_MAX = 100
 REASON_MAX = 2000
+PATTERN_MAX = 200
 
 
 def _no_controls(value: str) -> str:
@@ -56,4 +67,50 @@ class DecisionBody(_Body):
     revision: Annotated[int, Field(ge=0, strict=True)]
 
 
-__all__ = ["AckBody", "DecisionBody"]
+def _regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise ValueError(f"not a valid regular expression: {exc}") from None
+    return value
+
+
+TitlePattern = Annotated[
+    str, StringConstraints(min_length=1, max_length=PATTERN_MAX), AfterValidator(_no_controls), AfterValidator(_regex)
+]
+
+
+class StandingBody(_Body):
+    """ "And keep approving things like this": the arguments of
+    :meth:`~argus_scout.approvals.StandingApprovals.add_from`, which builds the rule from the approved recommendation
+    (its analyzer, its title unless ``title_pattern`` is given, its impact and confidence).
+
+    ``scope: analyzer`` covers matching proposals from this analyzer until the rule is deleted (or until ``until``, if
+    given); ``scope: until`` requires ``until``. ``once`` is a plain approve, so it isn't accepted here: omit
+    ``standing`` instead. ``max_impact`` widens the rule to ``medium``; ``high`` is never allowed."""
+
+    scope: Literal["analyzer", "until"]
+    until: AwareDatetime | None = None
+    title_pattern: TitlePattern | None = None
+    max_impact: Literal["low", "medium"] | None = None
+
+    @model_validator(mode="after")
+    def _until_needed(self) -> StandingBody:
+        if self.scope == "until" and self.until is None:
+            raise ValueError("scope 'until' needs until")
+        return self
+
+
+class ApproveBody(DecisionBody):
+    """An approve, optionally creating a runtime standing rule from the recommendation in the same transaction."""
+
+    standing: StandingBody | None = None
+
+
+class RuleDeleteBody(_Body):
+    """Who deleted a runtime standing rule, for the log."""
+
+    by: By
+
+
+__all__ = ["AckBody", "ApproveBody", "DecisionBody", "RuleDeleteBody", "StandingBody"]

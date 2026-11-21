@@ -11,13 +11,15 @@ Nothing on the API moves a recommendation past `approved`: there is no deploy ro
 |---|---|---|---|
 | POST | `/api/events/{source}` | the source's `token_env`, else the server token | Push one status event or a list of up to 100 (256 KiB). All or nothing: validated whole, then stored in one transaction. Returns each event's inbox outcome. See [sources.md](sources.md#webhook). |
 | POST | `/api/events/{source}/{event_id}/ack` | server token | Body `{"by": "<NAME>"}`. 404 unknown event, 409 already acked. |
-| POST | `/api/recommendations/{id}/approve` | server token | Body `{"by": "<NAME>", "reason": "...", "revision": <N>}`. A manual approval, recorded in the audit trail. Proposed only, and only at the `revision` you viewed (see [Decisions](#decisions)). |
-| POST | `/api/recommendations/{id}/reject` | server token | The same body. The reason feeds rejection memory and the briefings. Proposed only. |
+| POST | `/api/recommendations/{id}/approve` | server token | Body `{"by": "<NAME>", "reason": "...", "revision": <N>}`. A manual approval, recorded in the audit trail. Proposed only, and only at the `revision` you viewed (see [Decisions](#decisions)). An optional `standing` also creates a runtime standing rule from it, in the same transaction (see [Standing rules](#standing-rules)). |
+| POST | `/api/recommendations/{id}/reject` | server token | The same body, without `standing`. The reason feeds rejection memory and the briefings. Proposed only. |
+| DELETE | `/api/approvals/rules/{rule_id}` | server token | Body `{"by": "<NAME>"}`. Deletes a **runtime** standing rule. 409 for a file rule (edit the approvals file), 404 unknown. |
 | POST | `/api/reports` | server token | Body `{"kind": "morning"\|"evening"\|"status", "deliver": true, "no_llm": false}`. Write a report now, store it and (unless `deliver: false`) send it to the channels. Returns the report plus `delivered` and `delivery`. 409 while a report of that kind is being written. See [On-request reports](#on-request-reports). |
 | POST | `/api/reports/{id}/deliver` | server token | Body `{"force": false, "channels": null}`. Send a stored report, as `argus-scout deliver`: a channel that already has it says `duplicate` unless `force`; `channels` names a subset. 404 unknown report, 409 no channels configured, 422 an unknown channel name. |
 | GET | `/api/events` | read auth | Open events, grouped by fingerprint |
 | GET | `/api/recommendations` | read auth | Recommendations, oldest first, each with its `revision`. `?status=proposed` (repeatable), `?limit=` (1-500, default 100). |
-| GET | `/api/recommendations/{id}` | read auth | One recommendation with its `revision` and transition history |
+| GET | `/api/recommendations/{id}` | read auth | One recommendation with its `revision` and transition history; `approved_by_rule` names the standing rule that approved it, if one did |
+| GET | `/api/approvals/rules` | read auth | Every standing rule: `origin` `file` (the approvals file) or `api` (created at runtime), `expires_at`, `expired`, and for a runtime rule `created_by` |
 | GET | `/api/reports` | read auth | Stored reports, newest first. `?kind=morning`, `?limit=` (1-200, default 20). |
 | GET | `/api/reports/{id}` | read auth | One report (`id` is an integer). 404 when there is none. |
 | GET | `/api/reports/latest` | read auth | The newest report; `?kind=morning` for the newest of one kind. 404 when there is none. |
@@ -79,6 +81,52 @@ the decision is applied to the recommendation as stored, so it can never undo a 
 wording you didn't see. The engine's own writes carry the revision they read too, so a cycle can't overwrite a
 decision either.
 
+## Standing rules
+
+"Approve, and keep approving things like this": an approve may carry `standing`, which creates a runtime standing
+rule from the recommendation being approved. Its fields are what
+[`StandingApprovals.add_from`](../src/argus_scout/approvals.py) takes:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `scope` | yes | `analyzer`: matching proposals from this analyzer until the rule is deleted (or until `until`, if given). `until`: the same, but `until` is required. A one-off is a plain approve: omit `standing`. |
+| `until` | for `scope: until` | When the rule expires: an ISO 8601 time with a UTC offset, in the future. |
+| `title_pattern` | no | A regex (case-insensitive, up to 200 characters) the title must contain. Without it the rule matches this recommendation's title exactly (after normalising case and punctuation). |
+| `max_impact` | no | `low` or `medium`; defaults to this recommendation's impact. `high` is never allowed. |
+
+The rule also takes the recommendation's analyzer and confidence (a proposal must be at least as confident), and
+records `created_by` (the body's `by`) and a note naming the recommendation.
+
+```bash
+curl -s -X POST localhost:8400/api/recommendations/<REC_ID>/approve \
+  -H "Authorization: Bearer $SCOUT_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"by": "<NAME>", "revision": <N>, "standing": {"scope": "until", "until": "2026-12-31T00:00:00Z"}}'
+curl -s localhost:8400/api/approvals/rules
+curl -s -X DELETE localhost:8400/api/approvals/rules/<RULE_ID> \
+  -H "Authorization: Bearer $SCOUT_API_TOKEN" -H 'Content-Type: application/json' -d '{"by": "<NAME>"}'
+```
+
+**All or nothing.** The manual approval and the rule are written in one store transaction: both happen or neither
+does. You asked for one decision ("approve, and keep approving these"), and half of it would be a surprise either
+way: approved, while you expect the next one to be too and it won't be; or a rule with no approval behind it.
+
+**The guardrails still apply.** A standing rule for a proposal with high impact, or raised from a critical signal,
+is refused with **422** and the reason (`no standing approval for this proposal: high impact; nothing was
+approved`), and **the manual approval is not applied either**: the recommendation stays `proposed` at the same
+revision. To approve it by hand, send the approve again without `standing`. A stale `revision`, or a
+recommendation that isn't `proposed`, is a 409 as usual and creates no rule.
+
+The response is the approved recommendation, as for any approve, plus `standing_rule`: the new rule. From the next
+analysis cycle, a matching proposal is moved to `approved` (never further) with `approval_source: "standing"` and
+`approved_by_rule` set to the rule's id; `/wall` lists what a rule approved in the last 24 hours ("approved by
+standing rule `<RULE_ID>`"). An expired rule matches nothing; `GET /api/approvals/rules` still lists it (with
+`expired: true`) until it is deleted.
+
+**Audit.** Who approved the recommendation is in its transition history, as for any approve. The rule records who
+created it (`created_by`, stored with the rule, so it survives restarts). Who deleted a runtime rule is logged
+(`standing_approval.rule_removed`, with `rule_id`, `by` and `created_by`): the store keeps no history of deleted
+rules. File rules can't be created or deleted over the API; they come from `files.approvals`.
+
 ## Auth model
 
 Every write passes two independent layers.
@@ -125,7 +173,7 @@ Reaching scout by `127.0.0.1`, another IP or `localhost` needs neither. A name i
 the `Host` check and as a same-host write `Origin`; listing a name's origin in `allowed_origins` alone is not enough
 to reach scout by that name.
 
-**Bodies are capped**: 256 KiB for an event push, 8 KiB for an ack, approve, reject, report or deliver (413 over it, 400 for a bad
+**Bodies are capped**: 256 KiB for an event push, 8 KiB for an ack, approve, reject, rule delete, report or deliver (413 over it, 400 for a bad
 `Content-Length`). Write routes read the body only after auth, so an unauthenticated caller can't make scout buffer
 one. Action bodies refuse unknown keys; `by` is 1-100 characters and `reason` up to 2000, with no control
 characters.
@@ -135,11 +183,11 @@ characters.
 | 400 | `Host` isn't an IP, `localhost` or a `trusted_hosts` name; body isn't JSON, or the source can't parse it; a malformed `Content-Length` |
 | 401 | Missing or wrong bearer token |
 | 403 | `server.read_only`, or an untrusted browser origin |
-| 404 | No such source (told only to the server token), event, recommendation or report |
+| 404 | No such source (told only to the server token), event, recommendation, report or standing rule |
 | 405 | A push to a polled source (told only to the server token) |
-| 409 | The event is already acked; the recommendation isn't `proposed`, or changed since you viewed it (reload and decide again); a report of that kind is being written; no channels to deliver to |
+| 409 | The event is already acked; the recommendation isn't `proposed`, or changed since you viewed it (reload and decide again); a delete names a file rule (edit the approvals file); a report of that kind is being written; no channels to deliver to |
 | 413 | Body over the cap |
-| 422 | Body failed validation |
+| 422 | Body failed validation; a standing rule the guardrails refuse (nothing is approved) |
 | 503 | No token configured: the route is closed |
 
 A test walks every route the app serves and fails on a state-changing one without the guards and a token check, and
@@ -148,8 +196,9 @@ on any route (bar `/health` and `/metrics`) that answers a rebinding `Host`.
 ## `/wall`
 
 A plain-text page for a terminal or a kiosk: the latest report, the open items (severity, source, summary, count,
-whether an ack is needed) and up to 20 recommendations awaiting a decision, each with its id and revision
-(`[<id> rev <N>]`, what an approve or reject names). Times are in
+whether an ack is needed), up to 20 recommendations awaiting a decision, each with its id and revision
+(`[<id> rev <N>]`, what an approve or reject names), and what a standing rule approved in the last 24 hours
+(`[<id>] approved by standing rule <RULE_ID>: <title>`). Times are in
 `schedule.timezone`. Everything on it came from producers or the model, so control and format characters
 (terminal escapes, bidi overrides) are stripped first. It reads the store, so it works with or without a text
 channel.

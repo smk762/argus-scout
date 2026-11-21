@@ -8,7 +8,9 @@ A rule matches a class of recommendation and approves it when it reaches
 - ``until``: matching proposals until ``expires_at``.
 
 Rules come from a YAML file (read-only, reloaded when it changes; see
-``examples/approvals.yaml``) and from :meth:`StandingApprovals.add_from`.
+``examples/approvals.yaml``) and from :meth:`StandingApprovals.add_from`
+(over HTTP: an approve with ``standing``; ``DELETE /api/approvals/rules/{id}``
+removes one). A runtime rule records ``created_by``; who removed one is logged.
 
 Guardrails, which no rule can override:
 
@@ -21,6 +23,7 @@ Guardrails, which no rule can override:
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -83,6 +86,7 @@ class StandingRule:
     origin: Literal["file", "api"] = "file"
     note: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    created_by: str = ""  # who created a runtime rule (the API's ``by``); empty for file rules
 
     def expired(self, now: datetime | None = None) -> bool:
         return self.expires_at is not None and (now or datetime.now(UTC)) >= self.expires_at
@@ -145,6 +149,7 @@ class StandingRule:
             origin=origin if origin in ("file", "api") else "api",
             note=str(raw.get("note") or ""),
             created_at=parse_dt(raw.get("created_at")) or datetime.now(UTC),
+            created_by=str(raw.get("created_by") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -162,6 +167,7 @@ class StandingRule:
             "origin": self.origin,
             "note": self.note,
             "created_at": self.created_at.isoformat(),
+            "created_by": self.created_by,
         }
 
 
@@ -204,10 +210,12 @@ class StandingApprovals:
         self._api_rules: dict[str, StandingRule] = {}
         self.match_counts: dict[str, int] = {}
         self.store = store
+        # The HTTP API adds and removes runtime rules from a worker thread while the analysis cycle reads them.
+        self._lock = threading.Lock()
         if store is not None:
             self._api_rules = {r.rule_id: r for r in store.load_runtime_rules()}
 
-    def _reload(self) -> None:
+    def _reload_locked(self) -> None:
         if not self.path:
             return
         try:
@@ -229,19 +237,30 @@ class StandingApprovals:
         log.info("standing_approval.rules_loaded", path=self.path, count=len(rules))
 
     def rules(self, *, include_expired: bool = True) -> list[StandingRule]:
-        self._reload()
-        rules = [*self._file_rules.values(), *self._api_rules.values()]
+        with self._lock:
+            self._reload_locked()
+            rules = [*self._file_rules.values(), *self._api_rules.values()]
         return rules if include_expired else [r for r in rules if not r.expired()]
 
     def get(self, rule_id: str) -> StandingRule | None:
         return next((r for r in self.rules() if r.rule_id == rule_id), None)
 
-    def remove(self, rule_id: str) -> bool:
-        """Remove a runtime rule. File rules are removed by editing the file."""
-        removed = self._api_rules.pop(rule_id, None) is not None
-        if removed and self.store is not None:
+    def remove(self, rule_id: str, *, by: str | None = None) -> bool:
+        """Remove a runtime rule. File rules are removed by editing the file.
+
+        The store is written first, so a failed delete leaves the rule in place rather than gone until a restart
+        brings it back. ``by`` (who removed it) is logged: the store keeps no history of deleted rules."""
+        # Never call the store while holding the lock: a caller may hold a store transaction and want the lock.
+        with self._lock:
+            rule = self._api_rules.get(rule_id)
+        if rule is None:
+            return False
+        if self.store is not None:
             self.store.delete_runtime_rule(rule_id)
-        return removed
+        with self._lock:
+            self._api_rules.pop(rule_id, None)
+        log.info("standing_approval.rule_removed", rule_id=rule_id, by=by or "", created_by=rule.created_by)
+        return True
 
     def add_from(
         self,
@@ -251,10 +270,12 @@ class StandingApprovals:
         expires_at: datetime | None = None,
         title_pattern: str | None = None,
         max_impact: str | None = None,
+        by: str | None = None,
     ) -> StandingRule | None:
         """A runtime rule covering proposals like ``rec``. ``once`` creates nothing.
 
-        Refuses to create a rule for a proposal the guardrails would block.
+        Refuses (``ValueError``) to create a rule for a proposal the guardrails would block. ``by`` is recorded on
+        the rule as ``created_by``.
         """
         if scope == "once":
             return None
@@ -276,10 +297,12 @@ class StandingApprovals:
             expires_at=expires_at,
             origin="api",
             note=f"from recommendation {rec.id}",
+            created_by=by or "",
         )
         if self.store is not None:
             self.store.save_runtime_rule(rule)
-        self._api_rules[rule.rule_id] = rule
+        with self._lock:
+            self._api_rules[rule.rule_id] = rule
         log.info("standing_approval.rule_added", **rule.to_dict())
         return rule
 
