@@ -1,18 +1,20 @@
-"""HTTP server. Read-only for now: state-changing routes arrive with auth (see the epic).
+"""HTTP server: the scheduler's host, ``/health``, ``/metrics`` and the API.
 
 :func:`create_app` builds the app from a :class:`~argus_scout.config.ScoutConfig`. Its lifespan opens the
 store, registers the scheduler's jobs and starts the scheduler, and stops both on shutdown. Building the
 app has no side effects; nothing is opened until the app starts.
 
-Routes: ``/health`` and ``/metrics`` (see :mod:`argus_scout.server.metrics`). Both are read-only and need no
-auth. Every state-changing route must go behind argus-cortex's ``auth.bearer`` and ``WriteGuard``.
+Routes: ``/health`` and ``/metrics`` (see :mod:`argus_scout.server.metrics`), always open; the API in
+:mod:`argus_scout.server.routes`. Every state-changing route goes behind argus-cortex's ``auth.bearer`` (or a
+push source's token) and ``WriteGuard``: see :mod:`argus_scout.server.guards`, and ``tests/test_api_guards.py``,
+which walks the routes and fails on an unguarded one.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -26,8 +28,11 @@ from argus_scout.heartbeat import PolicyFile
 from argus_scout.inbox import Inbox
 from argus_scout.prometheus import PrometheusClient
 from argus_scout.scheduler import Clock, Scheduler, Sleep, utc_now
+from argus_scout.server.deps import get_runtime
+from argus_scout.server.guards import install_guards
 from argus_scout.server.metrics import ScoutCollector, build_registry
-from argus_scout.sources import Sources
+from argus_scout.server.routes import include_routes
+from argus_scout.sources import Sources, build_sources
 from argus_scout.store.base import Store
 from argus_scout.store.sqlite import SqliteStore
 from argus_scout.tariff import TariffFile
@@ -48,6 +53,7 @@ class Runtime:
     budget: DailyBudget
     scheduler: Scheduler
     registry: CollectorRegistry
+    sources: Sources = field(default_factory=Sources)
 
 
 def build_runtime(
@@ -70,11 +76,13 @@ def build_runtime(
     tariff = TariffFile(config.files.tariff)
     scheduler = Scheduler(store, clock=clock, **({"sleep": sleep} if sleep else {}))
     inbox = inbox or Inbox(store, clock=clock)
+    sources = sources if sources is not None else build_sources(config)
     register_jobs(scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus)
     collector = ScoutCollector(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
     )
-    return Runtime(config, store, policy_file, inbox, tariff, budget, scheduler, build_registry(collector))
+    registry = build_registry(collector)
+    return Runtime(config, store, policy_file, inbox, tariff, budget, scheduler, registry, sources=sources)
 
 
 def create_app(
@@ -110,6 +118,8 @@ def create_app(
 
     app = FastAPI(title="argus-scout", version=argus_scout.__version__, lifespan=lifespan)
     app.add_middleware(ManualOriginMiddleware)
+    install_guards(app, config.server)  # after other middleware: the guards run first
+    include_routes(app, config.server)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -125,4 +135,4 @@ def create_app(
     return app
 
 
-__all__ = ["Runtime", "build_runtime", "create_app"]
+__all__ = ["Runtime", "build_runtime", "create_app", "get_runtime"]
