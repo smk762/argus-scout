@@ -26,7 +26,7 @@ Check the file with `argus-scout check config scout.yaml`. Re-send the newest re
 
 | Key | Default | Meaning |
 |---|---|---|
-| `kind` | required | `text`, `webhook`, or a kind an installed plugin provides |
+| `kind` | required | `text`, `webhook`, `snapcast`, `mask`, or a kind an installed plugin provides |
 | `name` | required | Unique among channels. Delivery records are keyed by it, so renaming a channel makes it new. |
 | `enabled` | `true` | `false` keeps the entry but sends nothing |
 | `min_severity` | `info` | Send only messages at or above `info` / `notice` / `warning` / `critical` |
@@ -220,6 +220,117 @@ ok = hmac.compare_digest(expected, request.headers["X-Scout-Signature"])
 | `meta` | object | The report's metadata as stored, for example `path`, which is `llm` or `template` |
 
 The response body is read (64 KiB cap) and ignored. Any 2xx counts as delivered.
+
+## Voice channels and speech audio
+
+`snapcast` and `mask` play speech that scout has already synthesised (once per message, shared by every voice
+channel). Each is an optional extra, because both need numpy to convert the audio:
+
+```bash
+pip install "argus-scout[snapcast]"   # or [mask], or both: "argus-scout[snapcast,mask]"
+```
+
+Without the extra, that channel fails to start with `install argus-scout[snapcast]` (or `[mask]`) in
+`argus-scout check config`, and every other channel still works.
+
+The synthesiser's audio may be `wav` (8, 16, 24 or 32-bit integer PCM, or 32/64-bit float, including
+`WAVE_FORMAT_EXTENSIBLE`), `pcm_s16le` or `pcm_f32le` (raw, described by the audio's `sample_rate` and
+`channels`). Other formats, such as `mp3` or `ogg`, are refused with a clear error. Configure argus-echo to return
+WAV or raw PCM. Channel counts are converted (mono is copied to every channel, anything else is averaged), and the
+sample rate is converted by linear interpolation, which is plenty for speech.
+
+A voice channel may answer **skipped** when its device isn't ready, such as no screen watching an argus-mask face.
+A skipped delivery is not a failure and isn't recorded, so a later delivery of the same message tries again.
+
+## `snapcast`
+
+Plays speech on Snapcast speakers by writing PCM into a snapserver **pipe stream**'s FIFO, optionally setting up
+the groups over Snapcast's JSON-RPC first and restoring them afterwards.
+
+```yaml
+- kind: snapcast
+  name: house
+  fifo: /run/snapcast/scout.fifo
+  sample_format: "48000:16:2"
+  control: tcp://snapserver:1705
+  stream: scout
+  volume: 60
+```
+
+The matching snapserver stream:
+
+```ini
+[stream]
+source = pipe:///run/snapcast/scout.fifo?name=scout&sampleformat=48000:16:2
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fifo` | required | The pipe stream's FIFO. A relative path resolves beside `scout.yaml`. |
+| `sample_format` | `48000:16:2` | The stream's `sampleformat`: `rate:bits:channels`. Bits are 16, 24 or 32. Snapcast keeps 24-bit samples in 4 bytes, and so does scout. |
+| `open_timeout` | `2` | Seconds to keep retrying a FIFO that has no reader, then fail |
+| `tail_ms` | `250` | Silence written after the speech, so the last word isn't cut off |
+| `control` | unset | Snapserver JSON-RPC: `tcp://host:1705` (the control port) or `http://host:1780/jsonrpc`. Unset: no control, audio only. |
+| `stream` | unset | Switch the groups to this stream (its `name`) while speaking, then switch them back |
+| `groups` | all | Group ids or names to set up |
+| `volume` | unset | Client volume (percent) while speaking, then restored |
+| `unmute` | `true` | Unmute muted groups and clients while speaking, then mute them again |
+| `restore_delay` | `1.5` | Seconds after the last byte before restoring, for the audio still in Snapcast's buffer |
+| `control_timeout` | `5` | Seconds per JSON-RPC call |
+| `timeout` | `120` | Seconds the whole delivery may take, playback included |
+
+**The FIFO.** The path must already exist and be a FIFO. A missing path or a regular file is refused, and scout
+never creates anything there. It opens the FIFO with `O_NONBLOCK`, so a FIFO with no reader fails at once
+(`ENXIO`) instead of blocking. Scout retries for `open_timeout` seconds and then fails the delivery. Writes wait on
+`select` against a deadline (the speech's length plus 10 s), so a snapserver that stops reading fails the delivery
+too. A dead snapserver can't hang scout.
+
+**Control.** With `control` set, scout reads `Server.GetStatus`, then for each selected group calls
+`Group.SetStream`, `Group.SetMute` and `Client.SetVolume` only where something needs to change. Once the speech has
+played out, it undoes each change in reverse order, whether playback worked or not. A failed setup fails the
+delivery after putting back whatever had changed. A failed restore is logged and noted in the result. JSON-RPC goes
+to the `control` host only. Snapserver is a delivery target, not a monitored host.
+
+## `mask`
+
+Speaks through an [argus-mask](https://github.com/smk762/argus-mask) face: lip-synced on whatever screen is
+watching it. It uses mask's published agent contract over HTTP.
+
+```yaml
+- kind: mask
+  name: face
+  url: http://mask:8000
+  face: <FACE_ID>
+  wait_ready: 0
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `url` | required | The argus-mask server. Only that host and port are contacted, with no redirects. |
+| `face` | required | A face id or alias the server serves |
+| `wait_ready` | `0` | Seconds to wait for a ready screen. `0` skips at once. |
+| `poll_interval` | `1` | Seconds between readiness checks while waiting |
+| `seed` | `0` | The idle layer's seed |
+| `token_env` | unset | Env var holding a bearer token, for a reverse proxy in front of mask. If it is set in the config but missing from the environment, nothing is sent. |
+| `timeout` | `120` | Seconds the whole delivery may take. Mask answers a push when the speech ends. |
+
+**Readiness** comes from `GET /health`. The face is ready when the driver is available, the server isn't
+read-only, no other source is speaking through the face (`live`), and at least one screen watching it reports
+`audio_ready`. Screens are keyed by the name the viewer used, so an alias and its face both match. A screen with
+house audio (`sound: external`, the sound on Snapcast) counts as ready. If the face isn't ready, the delivery is
+**skipped**, unless `wait_ready` gives it time. A read-only server or a driver that is down is a failure.
+
+**Speech** goes as `POST /push?face=<face>&seed=<seed>&require_screen=true` with raw 16-bit PCM and the headers
+`X-Sample-Rate`, `X-Audio-Format: pcm_s16le` and `X-Channels`. Mask never sees the text. `require_screen` makes mask
+refuse with a 409 if the screen went away after the readiness check, and scout reports that as skipped too, so speech
+never goes to a face no one can hear. Mask caps a push at 25 MB, about 9 minutes of 24 kHz mono speech.
+
+argus-mask has no authentication of its own. Reaching its port is access, so keep it on a trusted network or behind
+a proxy (`token_env`). Mask takes its own GPU lease (argus-iris) for the stream, and scout takes none. `/push`
+carries no consent-disclosure flag, so use a synthetic voice for this channel.
+
+To play the same speech in the house and on the face, configure both channels and open the face's viewer with
+`audio=external`. Scout synthesises once and both channels get the same audio.
 
 ## Plugin channels
 

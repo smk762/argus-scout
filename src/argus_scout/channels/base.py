@@ -170,7 +170,7 @@ class SpeechAudio:
     voice: str | None = None
 
 
-DeliveryStatus = Literal["sent", "failed", "duplicate", "filtered", "disabled", "suppressed"]
+DeliveryStatus = Literal["sent", "failed", "duplicate", "filtered", "disabled", "suppressed", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -185,6 +185,8 @@ class DeliveryResult:
     - ``filtered``: below the channel's ``min_severity``, or not one of its ``kinds``
     - ``disabled``: ``enabled: false``
     - ``suppressed``: a voice channel the voice gate (quiet hours, voice policy) or a missing synthesiser held back
+    - ``skipped``: the channel itself declined, returning ``ok=True, status="skipped"`` (its device isn't ready,
+      e.g. no screen watching an argus-mask face). Not a failure and not recorded, so a later delivery tries again.
     """
 
     ok: bool

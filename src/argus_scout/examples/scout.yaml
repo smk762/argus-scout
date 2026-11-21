@@ -49,6 +49,28 @@ sources:
   #   auth_header: Authorization
   #   auth_env: SCOUT_BACKUPS_AUTH  # value sent in auth_header, e.g. "Bearer ..."
   #
+  # Speak on the house speakers through a Snapcast pipe stream (pip install "argus-scout[snapcast]").
+  # The FIFO must already exist as a FIFO (snapserver's pipe stream creates it); scout never creates
+  # one, and a FIFO with no reader fails the delivery instead of hanging.
+  # - kind: snapcast
+  #   name: house
+  #   fifo: /run/snapcast/scout.fifo
+  #   sample_format: "48000:16:2"    # the stream's sampleformat (rate:bits:channels)
+  #   control: tcp://snapserver:1705 # optional JSON-RPC (or http://snapserver:1780/jsonrpc)
+  #   stream: scout                  # optional: switch groups to this stream while speaking
+  #   groups: []                     # group ids or names; empty: every group
+  #   volume: 60                     # optional: client volume while speaking, restored after
+  #   unmute: true
+  #
+  # Speak through an argus-mask face, lip-synced (pip install "argus-scout[mask]"). If no screen
+  # watching the face can be heard, the delivery is skipped (not failed) unless wait_ready allows time.
+  # - kind: mask
+  #   name: face
+  #   url: http://mask:8000
+  #   face: <FACE_ID>
+  #   wait_ready: 0
+  #   token_env: SCOUT_MASK_TOKEN    # optional: for a proxy in front of mask
+  #
   # Any other kind comes from an installed plugin (entry-point group argus_scout.sources),
   # which validates its own keys. Try a poll without writing anything:
   #   argus-scout poll --config scout.yaml [--source backups]
