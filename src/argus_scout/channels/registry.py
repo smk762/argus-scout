@@ -26,6 +26,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ValidationError
 
+from argus_scout.channels import mask, snapcast
 from argus_scout.channels.base import Channel, VoiceChannel
 from argus_scout.channels.mask import MaskChannel
 from argus_scout.channels.snapcast import SnapcastChannel
@@ -45,6 +46,9 @@ BUILTINS: dict[str, Any] = {
     "snapcast": SnapcastChannel,
     "mask": MaskChannel,
 }
+# The optional extra each built-in kind needs (kinds not listed need none). The container image installs every
+# one: tests/test_dockerfile.py fails if a built-in's extra is missing here or from the Dockerfile.
+BUILTIN_EXTRAS: dict[str, str] = {"snapcast": snapcast.EXTRA, "mask": mask.EXTRA}
 
 
 @dataclass

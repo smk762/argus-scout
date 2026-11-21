@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import re
 import tomllib
@@ -72,3 +73,52 @@ def test_image_config_env_matches_the_serve_option():
     serve = typer.main.get_command(app).commands["serve"]  # type: ignore[attr-defined]
     [option] = [p for p in serve.params if p.name == "config_path"]
     assert option.envvar == "SCOUT_CONFIG"
+
+
+def _image_extras() -> set[str]:
+    """The extras the image's ``pip install`` of the project names (``".[a,b]"`` -> ``{"a", "b"}``)."""
+    text = re.sub(r"\\\n", " ", (ROOT / "Dockerfile").read_text())
+    found: set[str] = set()
+    for line in text.splitlines():
+        if re.match(r"\s*RUN\s", line) and "pip install" in line:
+            for group in re.findall(r"""["']?\.\[([^\]]*)\]""", line):
+                found |= {extra.strip() for extra in group.split(",") if extra.strip()}
+    assert found, "the Dockerfile installs the project with no extras (no `.[...]` in a pip install)"
+    return found
+
+
+def _builtin_extras() -> dict[str, str]:
+    """``kind -> extra`` for every built-in channel and source kind that needs one."""
+    from argus_scout.channels.registry import BUILTIN_EXTRAS
+    from argus_scout.sources.registry import BUILTINS as SOURCE_BUILTINS
+
+    needed = {f"channel {kind}": extra for kind, extra in BUILTIN_EXTRAS.items()}
+    for kind, plugin in SOURCE_BUILTINS.items():
+        extra = getattr(inspect.getmodule(plugin), "EXTRA", None)
+        if extra:
+            needed[f"source {kind}"] = extra
+    return needed
+
+
+def test_builtin_extras_mapping_is_complete():
+    """A built-in channel whose module declares ``EXTRA`` is in ``BUILTIN_EXTRAS``, with that extra."""
+    from argus_scout.channels.registry import BUILTIN_EXTRAS, BUILTINS
+
+    declared = {
+        kind: extra for kind, cls in BUILTINS.items() if (extra := getattr(inspect.getmodule(cls), "EXTRA", None))
+    }
+    assert declared == BUILTIN_EXTRAS
+
+
+def test_image_installs_every_builtin_extra():
+    """Every extra behind a built-in channel or source kind is a real extra, and the image installs it."""
+    optional = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["optional-dependencies"]
+    needed = _builtin_extras()
+    assert needed, "no built-in kind needs an extra: drop this test or teach it the new mapping"
+    unknown = {kind: extra for kind, extra in needed.items() if extra not in optional}
+    assert not unknown, f"built-ins name extras pyproject.toml doesn't define: {unknown}"
+    installed = _image_extras()
+    missing = {kind: extra for kind, extra in needed.items() if extra not in installed}
+    assert not missing, f"the image doesn't install these built-ins' extras (add them to the Dockerfile): {missing}"
+    stray = installed - set(optional)
+    assert not stray, f"the Dockerfile installs extras pyproject.toml doesn't define: {stray}"
