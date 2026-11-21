@@ -24,8 +24,9 @@ Three steps, each its own function so it can be tested and explained:
    limit (``truncated``), and not hollow: at least :data:`MIN_NARRATIVE_CHARS` for its kind, and naming every
    open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`). Otherwise the
    template writes the report from the same facts, so a model failure never drops one of those items. The
-   check is a floor, not a judgement of quality: an item counts as named when the answer contains its source or
-   a distinctive word of its summary.
+   check is a floor, not a judgement of quality (:func:`mentions` says what counts as naming an item). A refused
+   answer is kept for audit, never delivered: ``meta.rejected_text`` holds a cleaned, clipped copy and
+   ``meta.rejected_check`` the rule that failed and the item ids it found missing (:func:`rejection_meta`).
 
 Every report is saved to the store with ``meta`` recording the facts used (event, recommendation and
 rejection ids, the tariff period, note names, what was left out), the persona and the model.
@@ -37,6 +38,7 @@ recommend; nothing in it moves a recommendation or starts anything.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -47,6 +49,7 @@ import structlog
 from argus_scout.budget import DailyBudget
 from argus_scout.config import ScoutConfig, resolve_max_tokens
 from argus_scout.engine import RecommendationEngine, Rejection
+from argus_scout.events import StatusEvent
 from argus_scout.gpu import narrative_guard
 from argus_scout.inbox import EventGroup, Inbox
 from argus_scout.llm import (
@@ -65,7 +68,7 @@ from argus_scout.recommendations import Recommendation, Status
 from argus_scout.scheduler import Clock, utc_now
 from argus_scout.severity import Severity, rank
 from argus_scout.store.base import Report, Store
-from argus_scout.tariff import TariffFile, current_period, next_period_change
+from argus_scout.tariff import TariffFile, current_period, format_rate, next_period_change
 
 if TYPE_CHECKING:
     from argus_cortex.gpu import GpuCoordinator
@@ -128,9 +131,26 @@ _REJECTION_TIER = 3
 _NOTE_TIER = 6
 
 
+_SENTENCE_END = re.compile(r"[.!?](?=\s)")
+
+
 def _clip(text: str, limit: int = MAX_LINE_CHARS) -> str:
+    """``text`` on one line, at most ``limit`` characters. A longer one is cut at the last sentence end in the
+    second half of the room, else at the last word boundary, and ends in ``…``: never mid-word, unless the room
+    holds no word boundary at all."""
     text = " ".join(text.split())
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+    if len(text) <= limit:
+        return text
+    room = text[: limit - 1]
+    if text[limit - 1] == " ":  # the cut falls on a word boundary already
+        return room.rstrip() + "…"
+    ends = [m.end() for m in _SENTENCE_END.finditer(room)]
+    if ends and ends[-1] >= limit // 2:
+        return room[: ends[-1]] + " …"
+    space = room.rfind(" ")
+    if space > 0:
+        return room[:space].rstrip(" ,:;-–—(") + "…"
+    return room.rstrip() + "…"
 
 
 def _duration(seconds: int) -> str:
@@ -149,9 +169,10 @@ class TariffFact:
     currency: str
     next_period: str
     next_in_seconds: int
+    minor_digits: int | None = None
 
     def line(self) -> str:
-        now = f"{self.period} period now, {self.rate:g} {self.currency} minor units per {self.unit}"
+        now = f"{self.period} period now, {format_rate(self.rate, self.currency, self.unit, self.minor_digits)}"
         if self.next_period == self.period:
             return f"{now}, all day."
         return f"{now}; {self.next_period} starts in {_duration(self.next_in_seconds)}."
@@ -313,23 +334,169 @@ def build_prompt(
 
 # --- checking a model answer ----------------------------------------------------------------------------------
 
-_WORD = re.compile(r"[a-z0-9][a-z0-9._%/-]*[a-z0-9%]|[a-z0-9]")
-_GENERIC_WORDS = """
-about above after again against all also been before being below between both check could does down during each
-from further have having here into just less more most needs nothing once only other over same should since some
-still such than that their them then there these they this those through under until very were what when where
-which while will with would your report reports reported times acknowledgement acknowledge info notice warning
-warnings critical status item items alert alerts
+_TOKEN = re.compile(r"[a-z0-9]+")
+_STOPWORDS_TEXT = """
+the and for are was were not but has had have having its our out now new all any can did get got let may per via
+off own who why how yet too was been being into onto from with without about above after again against also
+before below between both check could does done down during each further here just less more most needs nothing
+once only other over same should since some still such than that their them then there these they this those
+through under until very what when where which while will would your you report reports reported times
+acknowledgement acknowledge acknowledged info notice warning warnings critical status item items alert alerts
+fine okay good well today tonight morning evening home lab homelab server servers system
+systems service services host hosts monitor monitoring scout argus agent job jobs node nodes data app api bot
 """
-_GENERIC = frozenset(_GENERIC_WORDS.split())
-"""Words too common to show that an answer names a particular item."""
+_STOPWORDS_BASE = frozenset(_STOPWORDS_TEXT.split())
+MIN_TOKEN_CHARS = 3
+"""Shorter words are dropped from the words an item is looked for by (so a stray ``4`` or ``pr`` can't match);
+a number of two digits or more is kept."""
+STRONG_PAYLOAD_KEYS = ("host", "hostname", "instance", "node", "device", "mountpoint", "service", "job", "container")
+"""Payload keys whose values name an item as strongly as its source does (and every value of a ``labels`` map)."""
+
+_UNITS = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+]
+_TENS = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+_NUMBER_WORD = {w: i for i, w in enumerate(_UNITS)} | {w: 20 + 10 * i for i, w in enumerate(_TENS)}
+_NUMBER_RUN = re.compile(
+    rf"\b(?:{'|'.join(sorted(_NUMBER_WORD, key=len, reverse=True))}|hundred)"
+    rf"(?:(?:[\s-]+|\s+and\s+)(?:{'|'.join(sorted(_NUMBER_WORD, key=len, reverse=True))}|hundred))*\b"
+)
+
+
+def _number_value(words: list[str]) -> int | None:
+    """``["one", "hundred", "five"]`` -> 105: 0-999 in simple forms; ``None`` if the words don't make one number."""
+    total, current, seen = 0, None, False
+    for word in words:
+        if word == "hundred":
+            if current is None or current >= 10 or total:
+                return None
+            total, current = current * 100, None
+            continue
+        value = _NUMBER_WORD[word]
+        if current is None:
+            current = value
+        elif current >= 20 and current % 10 == 0 and value < 10:
+            current += value  # "twenty seven"
+        else:
+            return None
+        seen = True
+    if not seen and not total:
+        return None
+    return total + (current or 0)
+
+
+def numbers_to_digits(text: str) -> str:
+    """Spelled-out numbers (0-999: "twenty-seven", "one hundred and five") as digits, so the answer check matches
+    them against the digits in an item. A run that isn't one number is left as it is."""
+
+    def replace(match: re.Match[str]) -> str:
+        words = [w for w in re.split(r"[\s-]+", match.group(0)) if w and w != "and"]
+        value = _number_value(words)
+        return match.group(0) if value is None else str(value)
+
+    return _NUMBER_RUN.sub(replace, text.lower())
+
+
+def _stem(word: str) -> str:
+    """A crude stem, the same on both sides of a match: "decisions" ~ "decision", "rebooting" ~ "reboot",
+    "batteries" ~ "battery". Not a dictionary: "restarting" stays "restart", so it never matches "rest"."""
+    if word.isdigit():
+        return word
+    for suffix, repl in (("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
+        if word.endswith(suffix) and not word.endswith("ss") and len(word) - len(suffix) + len(repl) >= MIN_TOKEN_CHARS:
+            word = word[: -len(suffix)] + repl
+            if suffix in ("ing", "ed") and len(word) > 3 and word[-1] == word[-2] and word[-1] not in "lsz":
+                word = word[:-1]  # "stopped" -> "stop"
+            break
+    if len(word) > 4 and word.endswith("e"):
+        word = word[:-1]  # "complete" ~ "completed" ~ "completes"
+    return word
+
+
+_STOPWORDS = frozenset(_stem(w) for w in _STOPWORDS_BASE)
+
+
+def _tokens(text: str) -> list[str]:
+    """Words of ``text``, split on anything that isn't a letter or digit (so ``ai-code-auditor`` is three)."""
+    return _TOKEN.findall(numbers_to_digits(text))
+
+
+def _keep(word: str) -> bool:
+    if word.isdigit():
+        return len(word) >= 2
+    return len(word) >= MIN_TOKEN_CHARS
 
 
 def _keywords(text: str) -> set[str]:
-    """Distinctive words: four characters or more (or containing a digit), not generic."""
-    return {
-        w for w in _WORD.findall(text.lower()) if (len(w) >= 4 or any(c.isdigit() for c in w)) and w not in _GENERIC
-    }
+    """Distinctive stems of ``text``: three characters or more (or a number of two digits or more), no stopwords."""
+    return {stem for w in _tokens(text) if _keep(w) and (stem := _stem(w)) not in _STOPWORDS}
+
+
+def _strong_values(event: StatusEvent) -> list[str]:
+    payload = event.payload or {}
+    values = [payload.get(key) for key in STRONG_PAYLOAD_KEYS]
+    labels = payload.get("labels")
+    if isinstance(labels, dict):
+        values += list(labels.values())
+    return [event.source, *(v for v in values if isinstance(v, str))]
+
+
+@dataclass(frozen=True)
+class ItemWords:
+    """What an answer has to contain to name an item (:func:`mentions`)."""
+
+    strong: frozenset[str]
+    """From the item's source (split on ``-``, ``_``, ``.``) and its host and label values: one is enough."""
+    weak: frozenset[str]
+    """From its summary: :attr:`needed` of them are."""
+
+    @property
+    def needed(self) -> int:
+        return min(MIN_WEAK_HITS, len(self.weak))
+
+
+MIN_WEAK_HITS = 2
+"""Distinct summary words an answer must contain to name an item when it names none of its strong words."""
+
+
+def item_words(group: EventGroup) -> ItemWords:
+    event = group.latest
+    strong = frozenset(k for value in _strong_values(event) for k in _keywords(value))
+    return ItemWords(strong, frozenset(_keywords(event.summary) - strong))
+
+
+def mentions(text: str, group: EventGroup) -> bool:
+    """Whether ``text`` names the item. A floor, not proof. Both sides are split into words (on ``-``, ``_`` and
+    punctuation), spelled-out numbers become digits, words under three characters and stopwords are dropped, and
+    words match whole, by a crude stem ("decisions" ~ "decision", but "restarting" is not "rest"). An item is
+    named by one of its strong words (its source's parts, host and label values) or by two distinct words of its
+    summary (one, if the summary has only one). An item with no distinctive words at all is taken as named."""
+    words = item_words(group)
+    if not (words.strong or words.weak):
+        return True  # nothing to look for (a summary of generic words): don't refuse every answer over it
+    said = {_stem(w) for w in _tokens(text)}
+    if words.strong & said:
+        return True
+    return len(words.weak & said) >= max(1, words.needed)
 
 
 def must_mention(facts: Facts) -> list[EventGroup]:
@@ -337,32 +504,62 @@ def must_mention(facts: Facts) -> list[EventGroup]:
     return [g for g in facts.groups if rank(g.latest.severity) >= rank(Severity.WARNING) or g.latest.requires_ack]
 
 
-def mentions(text: str, group: EventGroup) -> bool:
-    """Whether ``text`` names the item: its source, or a distinctive word of its summary. A floor, not proof."""
-    lowered = text.lower()
-    event = group.latest
-    about = f"{event.source} {event.summary}"
-    words = _keywords(about) or {w for w in _WORD.findall(about.lower()) if w not in _GENERIC}
-    if not words:
-        return True  # nothing to look for (a summary of generic words): don't refuse every answer over it
-    # At the start of a word, so "disk" finds "disks" but "ups" doesn't find "backups".
-    return any(re.search(rf"(?<![a-z0-9]){re.escape(word)}", lowered) for word in words)
+@dataclass(frozen=True)
+class Verdict:
+    """Why a model answer was refused: :attr:`reason` is ``truncated`` or ``hollow``; :attr:`rule` the check that
+    failed (``token_limit``, ``too_short`` or ``missing_items``)."""
+
+    reason: str
+    rule: str
+    detail: str
+    missing: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"reason": self.reason, "rule": self.rule, "detail": self.detail, "missing": list(self.missing)}
 
 
-def assess_completion(completion: Completion, facts: Facts) -> tuple[str, str] | None:
-    """``None`` when the answer may be delivered; otherwise ``(reason, detail)`` with reason ``truncated`` (the
-    token limit cut it off) or ``hollow`` (too short for its kind, or missing an item :func:`must_mention`
-    names)."""
+def check_completion(completion: Completion, facts: Facts) -> Verdict | None:
+    """``None`` when the answer may be delivered; otherwise the :class:`Verdict`: ``truncated`` (the token limit
+    cut it off) or ``hollow`` (too short for its kind, or missing an item :func:`must_mention` names)."""
     if completion.truncated:
-        return "truncated", f"the model hit its token limit ({completion.completion_tokens} tokens)"
+        detail = f"the model hit its token limit ({completion.completion_tokens} tokens)"
+        return Verdict("truncated", "token_limit", detail)
     text = completion.text
     floor = MIN_EMPTY_NARRATIVE_CHARS if facts.empty else MIN_NARRATIVE_CHARS.get(facts.kind, MIN_EMPTY_NARRATIVE_CHARS)
     if len(text) < floor:
-        return "hollow", f"the model's answer was {len(text)} characters, under {floor} for a {facts.kind} report"
-    missing = [g.latest.event_id for g in must_mention(facts) if not mentions(text, g)]
+        detail = f"the model's answer was {len(text)} characters, under {floor} for a {facts.kind} report"
+        return Verdict("hollow", "too_short", detail)
+    missing = tuple(g.latest.event_id for g in must_mention(facts) if not mentions(text, g))
     if missing:
-        return "hollow", f"the model's answer left out {', '.join(missing)}"
+        return Verdict("hollow", "missing_items", f"the model's answer left out {', '.join(missing)}", missing)
     return None
+
+
+def assess_completion(completion: Completion, facts: Facts) -> tuple[str, str] | None:
+    """:func:`check_completion` as ``(reason, detail)``, or ``None`` when the answer may be delivered."""
+    verdict = check_completion(completion, facts)
+    return None if verdict is None else (verdict.reason, verdict.detail)
+
+
+MAX_REJECTED_CHARS = 2000
+"""How much of a refused model answer is kept in ``meta.rejected_text``."""
+_KEEP_CONTROLS = {"\n", "\t"}
+
+
+def clean_rejected(text: str, limit: int = MAX_REJECTED_CHARS) -> str:
+    """A refused answer as it is safe to store and show: newlines normalised, control and format characters
+    (terminal escapes, bidi overrides) stripped, clipped to ``limit`` characters with ``…``."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "".join(c for c in text if c in _KEEP_CONTROLS or unicodedata.category(c) not in ("Cc", "Cf"))
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def rejection_meta(completion: Completion, verdict: Verdict) -> dict[str, Any]:
+    """What a report's meta keeps about a refused answer, so the verdict can be audited: ``rejected_text`` (for
+    the stored report and ``/api/reports``; stripped from every delivery, see
+    :data:`~argus_scout.channels.base.UNDELIVERED_META`) and ``rejected_check``."""
+    return {"rejected_text": clean_rejected(completion.text), "rejected_check": verdict.to_dict()}
 
 
 # --- the template fallback -------------------------------------------------------------------------------------
@@ -475,7 +672,9 @@ class Narrator:
         if tariff is not None and tariff.periods:
             period = current_period(tariff, local)
             next_name, seconds = next_period_change(tariff, local)
-            facts.tariff = TariffFact(period.name, period.rate, tariff.unit, tariff.currency, next_name, seconds)
+            facts.tariff = TariffFact(
+                period.name, period.rate, tariff.unit, tariff.currency, next_name, seconds, tariff.minor_digits
+            )
         facts.notes = self.memory.notes()
         return facts
 
@@ -537,7 +736,7 @@ class Narrator:
                     "finish_reason": completion.finish_reason,
                     "llm_chars": len(completion.text),
                 }
-                verdict = assess_completion(completion, facts)
+                verdict = check_completion(completion, facts)
                 if verdict is None:
                     meta |= {
                         "path": "llm",
@@ -547,11 +746,14 @@ class Narrator:
                     }
                     log.info("narrative.llm", kind=kind, model=completion.model, chars=len(completion.text))
                     return Draft(kind, facts.at, completion.text, meta)
-                reason, error = verdict
+                reason, error = verdict.reason, verdict.detail
+                meta |= rejection_meta(completion, verdict)
                 log.warning(
                     "narrative.rejected_completion",
                     kind=kind,
                     reason=reason,
+                    rule=verdict.rule,
+                    missing=list(verdict.missing),
                     detail=error,
                     model=completion.model,
                     completion_tokens=completion.completion_tokens,
@@ -683,13 +885,18 @@ __all__ = [
     "Narrator",
     "Selection",
     "TariffFact",
+    "Verdict",
     "assess_completion",
+    "check_completion",
+    "clean_rejected",
     "build_narrator",
     "build_prompt",
     "delivery_meta",
     "fact_lines",
     "mentions",
     "must_mention",
+    "numbers_to_digits",
+    "rejection_meta",
     "render_facts",
     "render_template",
     "select_lines",

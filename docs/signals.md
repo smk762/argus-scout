@@ -75,15 +75,39 @@ refreshed each cycle while it holds.
 
 `title`, `action`, `rationale` and `impact` are templates. Placeholders:
 
-- `{value}`, `{threshold}`, `{op}`, `{rule}`, `{severity}`, `{for}`
+- `{value}`: the current reading
+- `{threshold}`: the threshold of the step that sets the recommendation's severity: an `escalate` step's when one
+  set it, else the base `threshold` (see [Escalation wording](#escalation-wording))
+- `{peak}`: the most severe reading while the recommendation has been open (the current one, for a new one)
+- `{op}`, `{rule}`, `{severity}`, `{for}`
 - any label in `labels_key` or `labels` (a label missing from a sample renders as `?`)
 - the extra ones a tariff kind adds (below)
 
-Numbers take a precision and nothing else: `{value:.1f}`, `{value:.0%}`. The renderer is not Python's
+Numbers (`value`, `threshold`, `peak`) take a precision and nothing else: `{value:.1f}`, `{value:.0%}`. The renderer is not Python's
 `str.format`: no attribute or index access (`{value.__class__}`, `{labels[0]}`), no `!r` or `!s`, no other format
 specs, and no placeholder outside that allowlist. A template that breaks a rule makes its rule invalid when the
 file loads, so `check signals` catches it. Label values come from Prometheus, so they can't inject anything either:
 they are only ever substituted as text.
+
+### Escalation wording
+
+An open recommendation's severity is raised, never lowered, so it can come from an earlier, worse reading than
+the current one. Its text follows one rule: **it states the current reading, and the threshold of the step that
+set its severity.** When the severity is held above what the current reading would set, the title gets
+"(peaked at ...)", the peak formatted like the title's `{value}` and followed by whatever is written straight
+after it (`{value:.0f}°C` gives "(peaked at 91°C)"), unless the title already quotes `{peak}`. The evidence line
+for that reading ends "severity held at critical (peak 91)".
+
+With `threshold: 75` and `escalate: [{threshold: 85, severity: critical}]`, a cpu rule that read 91 °C and then
+78 °C reads:
+
+```text
+[critical] CPU on host-a at 78°C (peaked at 91°C)  ... At or above 85°C.
+```
+
+never "[critical] ... 78°C ... at or above 75°C". The current value is shown rather than the peak, because a
+briefing is read as "what is happening now"; the peak and the step's threshold explain the severity. An approved
+recommendation keeps the wording that was approved.
 
 ## Tariff-aware rules
 
@@ -91,7 +115,11 @@ Two kinds read the tariff file (`files.tariff`; see [`examples/tariff.yaml`](../
 Prometheus. They feed the same engine, so dedup, expiry, standing approvals and rejection memory apply unchanged.
 Without a tariff, or with one whose periods leave gaps or aren't priced per kWh, they are skipped and reported as
 *unknown*, never as clear. Amounts are in the currency's minor unit (cents, pence); `{saving}`, `{plan_cost}` and
-`{current_cost}` render in major units (`1.25`).
+`{current_cost}` render in major units (`1.25`). Rates (`{rate}`, `{cheaper_rate}`, and everywhere else scout
+shows one: briefings, the template, `argus-scout tariff now`) are rounded and carry their unit, in the unit people
+quote them in: `23.7 c/kWh` for AUD, USD, EUR and the like, `24.5 p/kWh` for GBP, `31.5 JPY/kWh` for a currency
+with no minor unit, and major units otherwise (`0.237 CHF/kWh`). The decimals come from the currency code; set
+`minor_digits` in the tariff file for a currency scout doesn't know.
 
 ### `tariff_shift`: move a load to a cheaper period
 
@@ -111,7 +139,7 @@ Without a tariff, or with one whose periods leave gaps or aren't priced per kWh,
     recommendation:
       title: "Run {load} after {starts_at} ({cheaper_period}) instead of now"
       action: Pause or reschedule {load} until {cheaper_period} starts in {starts_in}.
-      rationale: "{energy} kWh at {rate} rather than {cheaper_rate} per kWh saves about {saving} {currency}."
+      rationale: "{energy} kWh at {rate} rather than {cheaper_rate} saves about {saving} {currency}."
 ```
 
 While the current period is one of `periods` and a cheaper one starts within `horizon`, each sample at or above
@@ -150,7 +178,8 @@ Each analysis cycle hands the rules' hits to the recommendation engine. For each
 `labels_key` values:
 
 - **Dedup.** An open recommendation (draft, proposed or approved) with the same key is refreshed: its evidence,
-  last-seen time and expiry move on, its severity goes up if the hit's did, and a proposal's text is re-rendered.
+  last-seen time and expiry move on, its severity goes up if the hit's did (never down), its peak is kept, and a
+  proposal's text is re-rendered (see [Escalation wording](#escalation-wording)).
   An approved one keeps the wording that was approved; if a person approved it, a severity rise is noted in its
   evidence. Nothing is ever duplicated.
 - **Rejection memory.** If a person rejected this key before, the hit is suppressed, unless it is now more severe

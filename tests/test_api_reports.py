@@ -279,3 +279,20 @@ def test_deliver_is_held_to_the_speech_cap(store, tmp_path):
         assert sorted(rig.post(path).json()["sent"]) == ["log", "speaker"]
         assert rig.post(path, force=True).json()["sent"] == ["log"]  # over the cap: text only
         assert len(rig.speaker.played) == 1
+
+
+def test_a_refused_answer_is_readable_over_the_api_and_never_delivered(store, tmp_path):
+    """``rejected_text`` is behind the read policy (``/api/reports``); channels never see it."""
+    seed(store)
+    hollow = "Good morning. " + "Everything is calm and there is nothing to add this morning. " * 4
+    with scout_client(make_app(store, tmp_path)) as client:
+        rig = Rig(client)
+        rig.runtime.briefings.narrator.generator = FakeGenerator(hollow)
+        body = rig.post(kind="morning").json()
+        assert body["meta"]["fallback_reason"] == "hollow" and body["meta"]["rejected_check"]["missing"] == ["e1"]
+        one = client.get(f"/api/reports/{body['id']}").json()
+        assert one["meta"]["rejected_text"] == hollow.strip()
+        [sent] = rig.log.got
+        assert "Everything is calm" not in sent.text and "rejected_text" not in sent.meta
+        assert sent.meta["rejected_check"]["rule"] == "missing_items"
+        assert all("Everything is calm" not in said for said in rig.synth.calls)

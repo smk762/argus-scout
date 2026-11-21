@@ -45,6 +45,12 @@ REPORT_SOURCE = "scout"
 EVENT_KIND = "event"
 """The ``kind`` of a delivery built from an inbox item (reports carry their own kind: morning, status ...)."""
 
+UNDELIVERED_META = frozenset({"rejected_text"})
+"""Report meta keys that never leave scout in a delivery (webhook payloads included). ``rejected_text`` is a model
+answer the answer check refused: unvetted text that may drop or misstate what needs attention, so it is kept for
+audit (the stored report and ``/api/reports``, behind the read policy) and never sent anywhere. ``rejected_check``
+(which rule failed, which item ids were missing) is structured, holds no model text, and does go out."""
+
 
 _FENCE = re.compile(r"```.*?```", re.S)
 _LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
@@ -108,7 +114,7 @@ class Delivery:
         """A delivery for a stored report. ``meta`` may carry ``severity``, ``title`` and ``speakable``
         (text to say instead of the report text, or ``false`` for a report that is never spoken). Otherwise the
         spoken form is the report text with its markdown stripped (:func:`plain_speech`)."""
-        meta = dict(report.meta or {})
+        meta = {k: v for k, v in (report.meta or {}).items() if k not in UNDELIVERED_META}
         spoken = meta.get("speakable", True)
         speakable = spoken if isinstance(spoken, str) else (plain_speech(report.text) if spoken is not False else "")
         return cls(
@@ -238,6 +244,7 @@ class NullSynthesiser:
 __all__ = [
     "EVENT_KIND",
     "REPORT_SOURCE",
+    "UNDELIVERED_META",
     "Channel",
     "ChannelError",
     "Delivery",

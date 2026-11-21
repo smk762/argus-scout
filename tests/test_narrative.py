@@ -372,16 +372,90 @@ def test_template_lists_every_item_needing_attention_past_its_cap():
     assert "and 3 more" in text  # only the info items are counted, not listed
 
 
-def test_mentions_matches_source_or_a_distinctive_summary_word():
+AUDITOR = "Rest completed: 27 confirmed, 0 draft PRs, 4 decision(s) (needs an acknowledgement)"
+"""The real case: a briefing was refused as hollow for leaving this item out, though it named it."""
+
+
+def _item(summary: str, source: str = "mon", **payload):
+    from argus_scout.inbox import EventGroup
+
+    e = StatusEvent("x1", source, Severity.WARNING, T0, summary, payload=payload)
+    return EventGroup(e.fingerprint, [e])
+
+
+MENTIONS = [
+    # (answer, summary, source, payload, named?)
+    # -- the real case, both ways
+    (
+        "The code auditor finished its rest run with twenty-seven confirmed and four decisions to acknowledge.",
+        AUDITOR,
+        "ai-code-auditor",
+        {},
+        True,
+    ),
+    ("Systems are fine; restarting nothing.", AUDITOR, "ai-code-auditor", {}, False),
+    ("The auditor wants four decisions from you.", AUDITOR, "ai-code-auditor", {}, True),  # a source part
+    ("Twenty-seven findings were confirmed overnight.", AUDITOR, "ai-code-auditor", {}, True),  # 27 + confirmed
+    (
+        "Nothing was confirmed and no decision is pending.",
+        AUDITOR,
+        "ai-code-auditor",
+        {},
+        True,
+    ),  # 2 weak words (naming, not accuracy)
+    ("Four things are waiting and none is a draft.", AUDITOR, "ai-code-auditor", {}, False),  # one weak word
+    ("Zero problems, four green checks.", AUDITOR, "ai-code-auditor", {}, False),  # 0 and 4 are too short
+    ("Get some rest tonight.", AUDITOR, "ai-code-auditor", {}, False),  # one weak word is not enough
+    # -- whole words, with plural and stem tolerance
+    ("The /srv disk is nearly full.", "Disk /srv at 91%", "mon", {}, True),
+    ("Usage hit ninety-one percent on the disk.", "Disk /srv at 91%", "mon", {}, True),  # 91 spelled out + disk
+    ("Usage hit 91% overnight.", "Disk /srv at 91%", "mon", {}, False),  # one weak word
+    ("Both disks are nearly full.", "Disk /srv at 91%", "disk-mon", {}, True),  # "disks" ~ the source part "disk"
+    ("The UPS fan stopped.", "UPS fan", "mon", {}, True),
+    ("The backups ran.", "UPS fan", "mon", {}, False),  # "ups" is not a word of "backups"
+    ("The firmware is ready; it is waiting on a reboot.", "Firmware update waiting for a reboot", "fw", {}, True),
+    ("Two reboots are scheduled for the firmware.", "Firmware update waiting for a reboot", "fw", {}, True),
+    ("Rebooting is not needed.", "Firmware update waiting for a reboot", "fw", {}, False),  # one weak word
+    # -- host and label values are strong: one is enough
+    ("The NAS is running hot.", "CPU temperature high", "node-exporter", {"host": "nas-example"}, True),
+    ("A machine is running hot.", "CPU temperature high", "node-exporter", {"host": "nas-example"}, False),
+    (
+        "The postgres container keeps restarting.",
+        "Container restarts",
+        "docker",
+        {"labels": {"name": "postgres"}},
+        True,
+    ),
+    # -- generic words never name anything
+    ("A warning is open. Check it.", "Disk /srv at 91%", "mon", {}, False),
+    ("Everything is fine at home; the servers are healthy.", "Disk /srv at 91%", "home-server", {}, False),
+]
+
+
+@pytest.mark.parametrize(("answer", "summary", "source", "payload", "named"), MENTIONS)
+def test_mentions_paraphrases_and_near_misses(answer, summary, source, payload, named):
     from argus_scout.narrative import mentions
 
-    group = _group("e1", "warning", "Disk /srv at 91%")
-    assert mentions("Both disks are nearly full.", group)
-    assert mentions("Usage hit 91% overnight.", group)
-    assert not mentions("A warning is open. Check it.", group)  # generic words don't count
-    fan = _group("e2", "critical", "UPS fan")
-    assert mentions("The UPS fan stopped.", fan)
-    assert not mentions("The backups ran.", fan)  # matched at a word's start: "ups" is not in "backups"
+    assert mentions(answer, _item(summary, source, **payload)) is named
+
+
+@pytest.mark.parametrize(
+    ("text", "digits"),
+    [
+        ("twenty-seven", "27"),
+        ("four decisions", "4 decisions"),
+        ("one hundred and five", "105"),
+        ("nine hundred ninety-nine", "999"),
+        ("zero", "0"),
+        ("Ninety Nine", "99"),
+        ("seven and eight", "seven and eight"),  # two numbers, not one: left alone
+        ("someone tonight", "someone tonight"),  # number words inside other words are not numbers
+    ],
+)
+def test_numbers_to_digits(text, digits):
+    from argus_scout.narrative import numbers_to_digits
+
+    assert numbers_to_digits(text) == digits.lower()
 
 
 # --- the jobs ------------------------------------------------------------------------------------------------------
@@ -452,3 +526,110 @@ def test_cli_brief_prints_and_stores(tmp_path):
         assert s.latest_report("status") is not None
 
     assert runner.invoke(app, ["brief", "--config", str(config), "--kind", "weekly"]).exit_code == 1
+
+
+# --- a refused answer is kept for audit, never delivered ------------------------------------------------------
+
+
+async def test_a_hollow_answer_is_kept_for_audit_and_never_delivered(store):
+    import json
+
+    from argus_scout.channels import Delivery
+    from argus_scout.channels.webhook import build_payload
+
+    seed_attention(store)
+    hollow = WHOLE.replace("The UPS is on battery, so check the mains feed first. ", "Power is fine.\x1b[2J ")
+    report = await narrator(store, FakeGenerator(hollow)).report("morning")
+    meta = report.meta
+    assert meta["path"] == "template" and meta["fallback_reason"] == "hollow"
+    # Stored, cleaned: the verdict can be audited from the report alone.
+    assert meta["rejected_text"].startswith("Good morning.") and "Power is fine." in meta["rejected_text"]
+    assert "\x1b" not in meta["rejected_text"]
+    assert meta["rejected_check"] == {
+        "reason": "hollow",
+        "rule": "missing_items",
+        "detail": "the model's answer left out e1",
+        "missing": ["e1"],
+    }
+    assert store.get_report(report.id).meta["rejected_text"] == meta["rejected_text"]
+    # Never delivered: channels read the report text, and the delivery meta drops the refused answer.
+    assert "Power is fine" not in report.text
+    message = Delivery.from_report(report)
+    assert "rejected_text" not in message.meta and message.meta["rejected_check"]["missing"] == ["e1"]
+    payload = build_payload(message, channel="hook", sent_at=T0)
+    assert "rejected_text" not in payload["meta"] and "Power is fine" not in json.dumps(payload)
+
+
+async def test_a_truncated_answer_is_kept_clipped(store):
+    from argus_scout.narrative import MAX_REJECTED_CHARS
+
+    seed_attention(store)
+    long = "The UPS is on battery. " * 200
+    report = await narrator(store, FakeGenerator(long, finish_reason="length", completion_tokens=400)).report("status")
+    meta = report.meta
+    assert meta["rejected_check"]["rule"] == "token_limit" and meta["rejected_check"]["missing"] == []
+    assert len(meta["rejected_text"]) == MAX_REJECTED_CHARS and meta["rejected_text"].endswith("…")
+
+
+async def test_an_accepted_answer_has_no_rejection_meta(store):
+    seed_attention(store)
+    report = await narrator(store, FakeGenerator(WHOLE)).report("morning")
+    assert report.meta["path"] == "llm" and "rejected_text" not in report.meta and "rejected_check" not in report.meta
+
+
+def test_clean_rejected_strips_control_and_format_characters():
+    from argus_scout.narrative import clean_rejected
+
+    assert clean_rejected("a\r\nb\x00c‮d\te\x07") == "a\nbcd\te"
+    assert clean_rejected("x" * 50, limit=10) == "x" * 9 + "…"
+
+
+# --- clipping at a word boundary ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "clipped"),
+    [
+        ("merge argus-safelist into main before the release", 20, "merge…"),
+        ("merge the argus-safelist branch", 28, "merge the argus-safelist…"),
+        ("The disk on the backup host is full. Free some space now", 40, "The disk on the backup host is full. …"),
+        ("short enough", 40, "short enough"),
+        ("a" * 50, 10, "a" * 9 + "…"),  # one word longer than the room: cut it
+        ("ends exactly on a space here", 18, "ends exactly on a…"),
+    ],
+)
+def test_clip_cuts_at_word_or_sentence_boundaries(text, limit, clipped):
+    from argus_scout.narrative import _clip
+
+    out = _clip(text, limit)
+    assert out == clipped and len(out) <= limit
+
+
+def test_long_fact_lines_never_end_mid_word():
+    from argus_scout.narrative import MAX_LINE_CHARS, render_template
+
+    summary = "Review queue: " + " ".join(f"merge argus-safelist-{i}" for i in range(40))
+    text = render_template(Facts(kind="status", at=T0, groups=[_group("w1", "warning", summary)]), DEFAULT_PERSONA)
+    [line] = [ln for ln in text.splitlines() if ln.startswith("- ")]
+    assert len(line) - 2 <= MAX_LINE_CHARS and line.endswith("…")
+    assert line.removesuffix("…").split()[-1] in summary.split()  # a whole word, not a fragment of one
+
+
+# --- tariff wording -------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("currency", "rate", "shown"),
+    [("AUD", 23.6916, "23.7 c/kWh"), ("USD", 48.0, "48 c/kWh"), ("JPY", 31.46, "31.5 JPY/kWh")],
+)
+async def test_prompt_and_template_show_rates_in_the_common_unit(store, tmp_path, currency, rate, shown):
+    tariff = tmp_path / "tariff.yaml"
+    tariff.write_text(
+        f"plan: p\ncurrency: {currency}\nunit: kWh\nperiods:\n  all:\n    start: '00:00'\n    end: '00:00'\n"
+        f"    rate: {rate}\n"
+    )
+    gen = FakeGenerator("x")
+    report = await narrator(store, gen, tariff=TariffFile(tariff)).report("morning")
+    assert f"all period now, {shown}, all day." in gen.prompts[0].user
+    assert f"Energy: all period now, {shown}, all day." in report.text
+    assert "minor units" not in gen.prompts[0].user + report.text

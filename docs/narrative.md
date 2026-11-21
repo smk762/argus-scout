@@ -135,15 +135,45 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
   sentence (20 characters) is enough. An answer that was all `<think>` block is empty after cleaning, so it lands
   here.
 - **it leaves out an item that needs attention** (`hollow`): every open item that is a warning or critical, or
-  needs an acknowledgement, must be named. An item counts as named when a word of the answer starts with its
-  source or a distinctive word of its summary (four letters or more, or containing a digit, not a generic word
-  like "warning"): "disks" names "Disk /srv at 91%", "backups" doesn't name source `ups`. This is a floor, not a judgement of quality: a model that paraphrases every word away gets the
-  template, which is the safe side.
+  needs an acknowledgement, must be named. This is a floor, not a judgement of quality: a model that paraphrases
+  every word away gets the template, which is the safe side. How an item counts as named:
+  - The answer and the item are split into words on anything that isn't a letter or digit, so source
+    `ai-code-auditor` is `ai`, `code`, `auditor`, and `decision(s)` is `decision`.
+  - Spelled-out numbers become digits first (0 to 999: "twenty-seven" is 27, "one hundred and five" is 105), since
+    the prompt asks the model to write numbers for speech.
+  - Words under three characters (`ai`, `pr`, a single digit like `0` or `4`) and a list of stopwords (generic
+    words like "warning", "status", "system", "server", "home") are dropped. A number of two digits or more is kept.
+  - Words match whole, through a crude stem: "decisions" matches "decision", "reboots" "reboot", "batteries"
+    "battery", but "restarting" is not "rest" and "backups" is not "ups".
+  - An item's **strong** words come from its source and from the host and label values in its payload (`host`,
+    `hostname`, `instance`, `node`, `device`, `mountpoint`, `service`, `job`, `container`, and every value of
+    `labels`). One strong word names the item. Its **weak** words come from its summary, and it takes two distinct
+    ones (one, if the summary has only one).
+
+  For an item from source `ai-code-auditor` with the summary "Rest completed: 27 confirmed, 0 draft PRs, 4
+  decision(s)", "The code auditor finished its rest run with twenty-seven confirmed and four decisions to
+  acknowledge" names it (`code`, `auditor`); "Twenty-seven findings were confirmed" names it (27 and `confirm`);
+  "Systems are fine; restarting nothing" doesn't, and neither does "Get some rest tonight" (one weak word).
 
 The template lists the items from the same facts (ten a section, but every warning, critical and item awaiting
 acknowledgement however many there are), so a model that fails never costs the report one of those. The stored `meta` still records what the model did:
 `completion_tokens` (the raw count, thinking included), `finish_reason`, `llm_chars` (what was left after
 cleaning), and `error` naming the check that failed. Scout logs `narrative.rejected_completion` with the same.
+
+**A refused answer is kept for audit, and never delivered.** So a verdict can be checked after the fact, the
+report's `meta` also holds:
+
+- `rejected_text`: the model's answer, cleaned (newlines normalised, control and format characters such as
+  terminal escapes and bidi overrides stripped) and clipped to 2000 characters;
+- `rejected_check`: `{reason, rule, detail, missing}`, where `reason` is `truncated` or `hollow`, `rule` is the
+  check that failed (`token_limit`, `too_short` or `missing_items`) and `missing` the ids of the items the answer
+  didn't name.
+
+Channels read the report's text, which is the template's. `rejected_text` is also dropped from the `meta` every
+delivery carries (webhook payloads included): it is unvetted text that the check refused, possibly dropping or
+misstating what needs attention, so it never leaves scout. Read it from the stored report: `GET
+/api/reports/{id}` (behind `server.read_auth` when that is set), or `/api/reports`. `rejected_check`
+holds no model text and does go out with deliveries.
 
 ## GPU leases
 

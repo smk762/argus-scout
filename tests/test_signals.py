@@ -301,3 +301,55 @@ def test_example_rules_have_placeholder_values_only():
     text = textwrap.dedent(EXAMPLE.read_text())
     for forbidden in ("192.168.", "10.0.", "/home/", "@"):
         assert forbidden not in text
+
+
+# --- escalation wording ---------------------------------------------------------------------------------------
+
+
+CPU_RULE = {
+    "name": "cpu-hot",
+    "query": "cpu_temp_celsius",
+    "op": ">=",
+    "threshold": 75,
+    "severity": "warning",
+    "escalate": [{"threshold": 85, "severity": "critical"}],
+    "labels_key": ["instance"],
+    "recommendation": {
+        "title": "CPU on {instance} at {value:.0f}°C",
+        "action": "Check the cooling on {instance}.",
+        "rationale": "At or above {threshold:.0f}°C ({severity}).",
+    },
+}
+
+
+def cpu(**extra) -> SignalRule:
+    return SignalRule.model_validate({**CPU_RULE, **extra})
+
+
+def test_threshold_renders_the_step_that_set_the_severity():
+    from argus_scout.signals import make_hit
+
+    hit = make_hit(cpu(), Sample({"instance": "host-a"}, 91.0, T0), T0)
+    assert hit.severity == Severity.CRITICAL and hit.threshold == 85
+    assert hit.title == "CPU on host-a at 91°C"
+    assert hit.rationale == "At or above 85°C (critical)."  # the escalation step, not the base 75
+    base = make_hit(cpu(), Sample({"instance": "host-a"}, 78.0, T0), T0)
+    assert base.rationale == "At or above 75°C (warning)." and base.threshold == 75
+
+
+def test_a_held_severity_renders_the_current_value_and_the_peak():
+    from argus_scout.signals import make_hit
+
+    hit = make_hit(cpu(), Sample({"instance": "host-a"}, 78.0, T0), T0)
+    texts = hit.rerender(Severity.CRITICAL, 91.0)
+    assert texts.title == "CPU on host-a at 78°C (peaked at 91°C)"
+    assert texts.rationale == "At or above 85°C (critical)."
+    # A title that quotes {peak} itself gets no suffix.
+    own = make_hit(cpu(recommendation={**CPU_RULE["recommendation"], "title": "{value:.0f}°C, peak {peak:.0f}°C"}),
+                   Sample({"instance": "host-a"}, 78.0, T0), T0)  # fmt: skip
+    assert own.rerender(Severity.CRITICAL, 91.0).title == "78°C, peak 91°C"
+
+
+def test_peak_is_a_numeric_placeholder():
+    assert template_fields("{peak:.1f}", {"peak"}) == ["peak"]
+    assert render("{peak:.1f}", {"peak": 91.04}, {"peak"}) == "91.0"
