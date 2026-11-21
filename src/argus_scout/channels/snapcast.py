@@ -77,7 +77,7 @@ class SnapcastConfig(ChannelSettings):
     fifo: ConfigPath
     """The pipe stream's FIFO. Must exist and be a FIFO: scout never creates it."""
     sample_format: str = "48000:16:2"
-    """The stream's ``sampleformat``: ``rate:bits:channels``."""
+    """The stream's ``sampleformat``: ``rate:bits:channels``, with 16, 24 or 32 bits (24 kept in 4 bytes, as Snapcast does)."""
     open_timeout: float = Field(default=2.0, ge=0, le=30)
     """Seconds to keep retrying a FIFO with no reader before failing."""
     tail_ms: int = Field(default=250, ge=0, le=5000)
@@ -95,7 +95,9 @@ class SnapcastConfig(ChannelSettings):
     restore_delay: float = Field(default=1.5, ge=0, le=30)
     """Seconds after the last byte is written before restoring: snapcast plays its buffer behind the pipe."""
     control_timeout: float = Field(default=5.0, gt=0, le=60)
+    """Seconds per JSON-RPC call."""
     timeout: float = Field(default=120.0, gt=0, le=600)
+    """Seconds the whole delivery may take, playback included."""
 
     @field_validator("sample_format")
     @classmethod

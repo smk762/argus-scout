@@ -72,7 +72,7 @@ $ argus-scout poll [OPTIONS]
 **Options**:
 
 * `-c, --config <file>`: scout.yaml  [required]
-* `-s, --source <str>`: Poll only this source .
+* `-s, --source <str>`: Poll only this source (default: every polling source).
 * `--ingest`: Write the events to the store instead of only printing them.
 * `--help`: Show this message and exit.
 
@@ -134,14 +134,14 @@ $ argus-scout deliver [OPTIONS]
 
 * `-c, --config <file>`: scout.yaml  [required]
 * `--latest`: Send the newest stored report (the only mode for now).
-* `-k, --kind <str>`: The newest report of this kind .
-* `--channel <list[str]>`: Send only to this channel (repeatable) .
+* `-k, --kind <str>`: The newest report of this kind (default: any).
+* `--channel <list[str]>`: Send only to this channel, repeatable (default: every channel).
 * `--force`: Send again to channels that already have it.
 * `--help`: Show this message and exit.
 
 ## `argus-scout serve`
 
-Run the HTTP server and the scheduler (needs the  extra).
+Run the HTTP server and the scheduler (needs the server extra).
 
 **Usage**:
 
@@ -152,8 +152,8 @@ $ argus-scout serve [OPTIONS]
 **Options**:
 
 * `-c, --config <file>`: scout.yaml; refuses to start if it is invalid. The container image sets SCOUT_CONFIG=/config/scout.yaml.  [env var: SCOUT_CONFIG]
-* `--host <str>`: Bind address . Reads are open unless server.read_auth: keep it on loopback.
-* `--port <int>`: 
+* `--host <str>`: Bind address (default: server.host, else 127.0.0.1). Reads are open unless server.read_auth: keep it on loopback.
+* `--port <int>`: TCP port (default: server.port, else 8400).
 * `--help`: Show this message and exit.
 
 ## `argus-scout check`

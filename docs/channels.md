@@ -2,7 +2,7 @@
 
 Scout delivers every report it writes (scheduled briefings and status reports) to the channels in `scout.yaml`.
 Channels only deliver: none of them acts on a monitored host, and the only outbound HTTP is to a channel's own
-configured URL, through `argus_cortex.net`.
+configured URL, through `argus_cortex.net`. Every key is also listed in the [config reference](config.md#channels).
 
 ```yaml
 channels:
@@ -15,8 +15,7 @@ channels:
     url: https://<HOOK_HOST>/scout
     token_env: SCOUT_CHAT_TOKEN
     secret_env: SCOUT_CHAT_SECRET
-    min_severity: notice
-    kinds: [morning, evening, event]
+    kinds: [morning, evening]
 ```
 
 Check the file with `argus-scout check config scout.yaml`. Re-send the newest report with
@@ -32,6 +31,12 @@ Check the file with `argus-scout check config scout.yaml`. Re-send the newest re
 | `min_severity` | `info` | Send only messages at or above `info` / `notice` / `warning` / `critical` |
 | `kinds` | all | Send only these kinds: report kinds (`morning`, `evening`, `status`), or `event` for a single inbox item |
 | `timeout` | `30` | Seconds one delivery may take, retries included |
+
+**What gets sent in this version.** Scout delivers reports: the scheduled briefings and the status updates the
+status cycle writes when open items are worth reporting. Inbox items reach channels inside those status updates;
+the `event` message type exists in the interface and the webhook payload, but nothing sends single items yet.
+Reports carry no severity of their own, so every one is delivered as `info`: a `min_severity` above `info` keeps
+all of them off that channel. Use `kinds` to choose what a channel gets.
 
 ## How a message goes out
 
@@ -210,7 +215,7 @@ ok = hmac.compare_digest(expected, request.headers["X-Scout-Signature"])
 | Field | Type | Meaning |
 |---|---|---|
 | `schema`, `schema_version` | string, int | Always `argus-scout.delivery`. The version goes up only on an incompatible change. Fields may be added without a bump. |
-| `delivery_id` | string | `report:<id>` for a report. For a single inbox item it is `event:<source>/<event_id>:<content hash>:<announce count>`, so a changed or re-announced item gets a new id. |
+| `delivery_id` | string | `report:<id>` for a report. For a single inbox item (not sent in this version) it is `event:<source>/<event_id>:<content hash>:<announce count>`, so a changed or re-announced item gets a new id. |
 | `channel` | string | The channel's `name` |
 | `type` | `report` \| `event` | A stored report, or one inbox status item |
 | `kind` | string | Report kind (`morning`, `evening`, `status`), or `event` |
@@ -352,19 +357,61 @@ speakers, and there's no face presenting the voice as a person. If that matters 
 To play the same speech in the house and on the face, configure both channels and open the face's viewer with
 `audio=external`. Scout synthesises once and both channels get the same audio.
 
-## Plugin channels
+## Writing a channel plugin
 
-Another package adds a channel kind through the `argus_scout.channels` entry-point group:
+Another package adds a channel kind through the `argus_scout.channels` entry-point group. The entry point's name
+is the kind, and its value is the channel class:
 
 ```toml
 [project.entry-points."argus_scout.channels"]
 matrix = "my_package.scout:MatrixChannel"
 ```
 
-The class has a `kind`, a `config_model` (a pydantic model, normally subclassing
-`argus_scout.config.ChannelSettings`), and is built with one validated config entry. It implements
-`async deliver(message: Delivery) -> DeliveryResult`. A voice channel also implements
-`async play(audio: SpeechAudio, message: Delivery) -> DeliveryResult` and receives audio that scout has already
-synthesised. A voice channel never synthesises speech itself. A plugin that fails to import, an entry its model
-rejects, or a constructor that raises disables that one channel. The others still load, and
-`argus-scout check config` reports the error.
+```python
+from typing import Literal
+
+from argus_scout.channels import ChannelError, Delivery, DeliveryResult
+from argus_scout.config import ChannelSettings, EnvName, HttpUrl
+
+
+class MatrixConfig(ChannelSettings):
+    kind: Literal["matrix"]
+    url: HttpUrl
+    room: str
+    token_env: EnvName
+
+
+class MatrixChannel:
+    kind = "matrix"
+    config_model = MatrixConfig
+
+    def __init__(self, config: MatrixConfig) -> None:
+        self.config = config
+
+    async def deliver(self, message: Delivery) -> DeliveryResult:
+        ...  # send message.text (markdown) or message.speakable (plain)
+        return DeliveryResult(ok=True, detail="posted to the room")
+```
+
+- **`config_model`** is a pydantic model, normally a subclass of `argus_scout.config.ChannelSettings`, which brings
+  `name`, `enabled`, `min_severity`, `kinds` and `timeout`. It must keep `name` and narrow `kind` to your kind.
+  Scout validates the `channels:` entry with it (relative `ConfigPath`s resolve beside `scout.yaml`) and constructs
+  the class once with the result.
+- **`async deliver(message)`** gets a `Delivery`: `type` (`report` or `event`), `kind`, `key` (stable per message,
+  for idempotency on the receiving end), `text`, `speakable`, `severity`, `title`, `generated_at`, `report_id` and
+  `meta`. The dispatcher has already applied `enabled`, `min_severity`, `kinds` and the once-per-channel rule, and
+  runs the call under the channel's `timeout`.
+- **Failing.** Raise `ChannelError("why")`, or return `DeliveryResult(ok=False, error="why")`; any other exception
+  counts as a failure too. The failure is recorded and the redelivery sweep tries again later. When retrying can't
+  help (the receiver refused the message), use `ChannelError("why", permanent=True)` and it won't be retried.
+- **Declining.** A device that isn't ready returns `DeliveryResult(ok=True, status="skipped", detail="why")`: not a
+  failure and not recorded, so a later delivery of the same message tries again.
+- **A voice channel** also implements `async play(audio: SpeechAudio, message: Delivery) -> DeliveryResult`. It gets
+  audio scout has already synthesised (once, shared by every voice channel), plays it, and never synthesises speech
+  itself. Its `deliver` is never called for text; return a failure from it. Respect `audio.cloned`: a channel that
+  presents a voice as a person, as a face does, should refuse cloned speech unless its config allows it.
+- **Delivery only.** A channel sends to the place its config names and nothing else: no action on a monitored
+  host, and outbound HTTP only to its own configured URL, through `argus_cortex.net`.
+
+A plugin that fails to import, an entry its model rejects, or a constructor that raises disables that one channel.
+The others still load, and `argus-scout check config` reports the error. A plugin can't take over a built-in kind.

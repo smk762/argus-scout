@@ -215,7 +215,7 @@ def tariff_now(path: Path = ExistingFile) -> None:
 def poll(
     config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
     source: str | None = typer.Option(
-        None, "--source", "-s", help="Poll only this source [default: every polling source]."
+        None, "--source", "-s", help="Poll only this source (default: every polling source)."
     ),
     ingest: bool = typer.Option(False, "--ingest", help="Write the events to the store instead of only printing them."),
 ) -> None:
@@ -375,9 +375,9 @@ def brief(
 def deliver(
     config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
     latest: bool = typer.Option(False, "--latest", help="Send the newest stored report (the only mode for now)."),
-    kind: str | None = typer.Option(None, "--kind", "-k", help="The newest report of this kind [default: any]."),
+    kind: str | None = typer.Option(None, "--kind", "-k", help="The newest report of this kind (default: any)."),
     channel: list[str] | None = typer.Option(
-        None, "--channel", help="Send only to this channel (repeatable) [default: every channel]."
+        None, "--channel", help="Send only to this channel, repeatable (default: every channel)."
     ),
     force: bool = typer.Option(False, "--force", help="Send again to channels that already have it."),
 ) -> None:
@@ -434,12 +434,12 @@ def serve(
     ),
     host: str | None = typer.Option(
         None,
-        help="Bind address [default: server.host, else 127.0.0.1]. Reads are open unless server.read_auth: "
+        help="Bind address (default: server.host, else 127.0.0.1). Reads are open unless server.read_auth: "
         "keep it on loopback.",
     ),
-    port: int | None = typer.Option(None, help="[default: server.port, else 8400]"),
+    port: int | None = typer.Option(None, help="TCP port (default: server.port, else 8400)."),
 ) -> None:
-    """Run the HTTP server and the scheduler (needs the [server] extra)."""
+    """Run the HTTP server and the scheduler (needs the server extra)."""
     config = ScoutConfig()
     if config_path is not None:
         try:

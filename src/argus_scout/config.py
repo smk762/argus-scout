@@ -139,9 +139,17 @@ class FilesConfig(_Section):
     """The policy files scout reads. Each is optional: a missing one means built-in defaults."""
 
     heartbeat: ConfigPath | None = None
+    """The heartbeat policy (YAML): what is worth interrupting for, quiet and rest hours, per-source routing.
+    Unset, or a bad file: the built-in defaults. See ``examples/heartbeat.yaml``."""
     approvals: ConfigPath | None = None
+    """Standing approvals (YAML): rules that move matching proposals to ``approved``, never further. Unset: none.
+    See ``examples/approvals.yaml``."""
     tariff: ConfigPath | None = None
+    """A time-of-use energy tariff (YAML), for the narrative, ``/metrics`` and the tariff-aware signal rules.
+    Unset: no tariff. See ``examples/tariff.yaml``."""
     signals: ConfigPath | None = None
+    """Signal rules (YAML): PromQL questions that raise recommendations. Unset: the analysis cycle does nothing.
+    See ``examples/signals.yaml``."""
     persona: ConfigPath | None = None
     """The narrator's persona (YAML). Unset, or a bad file: the neutral built-in persona."""
     memory: ConfigPath | None = None
@@ -153,6 +161,8 @@ class StoreConfig(_Section):
     """Where scout keeps events, recommendations, approvals and reports."""
 
     path: ConfigPath = Field(default=Path("scout.db"), validate_default=True)
+    """The SQLite database file, created (with its directory) on first use and migrated on open. ``:memory:``
+    keeps nothing across restarts."""
 
 
 class SourceSettings(_Section):
@@ -160,7 +170,10 @@ class SourceSettings(_Section):
     :mod:`argus_scout.sources`), narrowing ``kind`` to its own name and adding its own keys."""
 
     kind: Name
+    """``webhook``, ``json_poll``, or a kind an installed plugin provides."""
     name: Name
+    """Unique among sources. It is the ``source`` of every event this source produces, and the
+    ``{source}`` in ``POST /api/events/{source}``."""
 
 
 class WebhookSource(SourceSettings):
@@ -176,6 +189,8 @@ class JsonPollSource(SourceSettings):
 
     kind: Literal["json_poll"]
     url: HttpUrl
+    """The status endpoint to GET. Only this host and port are allowed (a LAN address is fine); a redirect to
+    another host must pass the public-address rule."""
     interval: float = Field(default=60.0, gt=0, description="Seconds between polls.")
     items: str | None = None
     """Dotted path to the list of items in the response (``data.alerts``). Unset: the response is one item."""
@@ -190,6 +205,7 @@ class JsonPollSource(SourceSettings):
     """Close (``resolved``) this source's open events that a successful poll no longer lists. Turn it off for an
     endpoint that reports only changes rather than the full current state."""
     auth_header: str = "Authorization"
+    """The header ``auth_env``'s value is sent in."""
     auth_env: EnvName | None = None
     """Env var holding the value sent in ``auth_header`` (for example ``Bearer abc...``)."""
 
@@ -274,10 +290,14 @@ class ChannelSettings(_Section):
     :mod:`argus_scout.channels`), narrowing ``kind`` to its own name and adding its own keys."""
 
     kind: Name
+    """``text``, ``webhook``, ``snapcast``, ``mask``, or a kind an installed plugin provides."""
     name: Name
+    """Unique among channels. Delivery records are keyed by it, so renaming a channel makes it a new one."""
     enabled: bool = True
+    """``false`` keeps the entry but sends nothing."""
     min_severity: Literal["info", "notice", "warning", "critical"] = "info"
-    """Deliver only messages at or above this severity."""
+    """Deliver only messages at or above this severity. Reports are delivered as ``info`` in this version, so
+    anything above ``info`` keeps every report off this channel."""
     kinds: Annotated[list[str], NullAsEmptyList] = Field(default_factory=list)
     """Deliver only these kinds (report kinds such as ``morning``, or ``event`` for an inbox item). Empty: all."""
     timeout: float = Field(default=30.0, gt=0, le=600, description="Seconds one delivery may take, retries included.")
@@ -289,6 +309,7 @@ class TextChannel(ChannelSettings):
 
     kind: Literal["text"]
     dir: ConfigPath = Field(default=Path("."), validate_default=True)
+    """The root everything is written under. Relative to the config's directory."""
     file: Annotated[str, AfterValidator(_check_channel_file)] = "scout-reports.log"
     """Relative to ``dir``. ``{kind}`` and ``{date}`` (YYYY-MM-DD, UTC) are filled in per message."""
     rotate_bytes: int | None = Field(default=None, gt=0)
@@ -302,14 +323,16 @@ class WebhookChannel(ChannelSettings):
 
     kind: Literal["webhook"]
     url: HttpUrl
+    """Where to POST. Only this host and port are contacted (a LAN receiver is fine); redirects are never followed."""
     token_env: EnvName | None = None
     """Env var holding a bearer token to send. Unset: no Authorization header."""
     secret_env: EnvName | None = None
     """Env var holding an HMAC-SHA256 key; set, every POST carries an ``X-Scout-Signature`` header."""
     retries: int = Field(default=2, ge=0, le=5)
-    """Retries after a failed attempt (connection error, 429 or 5xx); a 4xx is not retried."""
+    """Retries after a failed attempt (connection error, 408, 429 or 5xx). Any other 4xx is final and permanent:
+    the redelivery sweep won't retry it either."""
     backoff: float = Field(default=1.0, ge=0, le=60)
-    """Seconds before the first retry; doubles each time."""
+    """Seconds before the first retry; doubles each time, up to 60."""
 
 
 class PluginChannel(BaseModel):
@@ -347,7 +370,9 @@ class Briefing(_Section):
     """A scheduled report, e.g. ``{kind: morning, at: "07:30"}`` in the schedule's timezone."""
 
     kind: Literal["morning", "evening", "status"]
+    """The report to write."""
     at: str
+    """24-hour ``HH:MM`` in ``schedule.timezone`` (quote it in YAML: ``"07:30"``)."""
 
     @field_validator("at")
     @classmethod
@@ -363,10 +388,16 @@ class Briefing(_Section):
 
 
 class ScheduleConfig(_Section):
+    """When scout's jobs run. A restart neither repeats a briefing that already went out nor resets an interval."""
+
     analysis_interval: float = Field(default=900.0, gt=0, description="Seconds between analysis cycles.")
     status_interval: float = Field(default=300.0, gt=0, description="Seconds between status cycles.")
     timezone: str = "UTC"
+    """An IANA zone name (``Europe/London``). Briefing times, quiet and rest hours and tariff periods are read
+    in it."""
     briefings: Annotated[list[Briefing], NullAsEmptyList] = Field(default_factory=list)
+    """Scheduled reports, one job each. A kind may appear at several times, never twice at the same time. A slot
+    missed while scout was down runs late only if it passed less than 30 minutes ago."""
 
     @field_validator("briefings")
     @classmethod
@@ -420,7 +451,8 @@ class LLMGpuConfig(_Section):
     priority: GpuPriority = Field(default="background", description="Briefings can wait: the lowest class.")
     target: Annotated[str, AfterValidator(_check_target)] | None = Field(
         default=None,
-        description="The broker service that serves the model. Default for ollama: ollama:<model>. Required for openai.",
+        description="The broker service that serves the model, `<service>` or `<service>:<model>`. Default for ollama: "
+        "`ollama:<model>`. Required for openai.",
     )
 
     @model_validator(mode="after")
@@ -439,15 +471,20 @@ class LLMConfig(_Section):
     """
 
     backend: Literal["ollama", "openai"]
+    """``ollama`` (Ollama's ``/api/chat``) or ``openai`` (any OpenAI-compatible ``/chat/completions``)."""
     base_url: HttpUrl
+    """The model server. For ``openai``, include the API prefix: ``http://llm:8000/v1``."""
     model: Name
+    """The model name the server knows it by."""
     api_key_env: EnvName | None = None
+    """Env var holding an API key, sent as a bearer token (hosted backends). Unset: no key."""
     timeout: float = Field(default=120.0, gt=0, description="Seconds before one model call gives up.")
     max_tokens: int = Field(default=400, gt=0, description="Most tokens one report may generate.")
     context_tokens: int = Field(
         default=3072, ge=1024, description="The model's context window; prompts are cut to fit it with the output."
     )
     temperature: float | None = Field(default=None, ge=0, le=2)
+    """Sampling temperature. Unset: the server's default."""
     gpu: LLMGpuConfig | None = None
     """Hold a GPU lease around each model call. Leave unset for a hosted backend."""
 
@@ -482,11 +519,18 @@ class EchoConfig(_Section):
     url: HttpUrl
     """The engine's root, e.g. ``http://echo:8000``: scout calls ``/health`` and ``/synthesise/stream`` under it."""
     voice_clone_id: str | None = None
+    """A clone stored on that engine (clones are per engine). Wins over ``speaker``. Speech in a clone is marked
+    as cloned, which the ``mask`` channel refuses unless its ``allow_cloned_voice`` is set."""
     speaker: str | None = None
+    """A built-in speaker (``GET /speakers`` on the engine). Neither this nor a clone: the engine's default voice."""
     language: str = "en"
+    """ISO language code. Miso speaks English only."""
     instruction: str | None = None
+    """Qwen3-TTS only: a speaking instruction. Other engines ignore it."""
     voice_description: str | None = None
+    """Qwen3-TTS only: a designed voice, described in words. Other engines ignore it."""
     emotion: str | None = None
+    """Qwen3-TTS only. Other engines ignore it."""
     extra: Annotated[dict[str, Any], NullAsEmptyDict] = Field(default_factory=dict)
     """Engine-specific request fields, passed through (Miso: ``temperature``, ``topk``)."""
     format: Literal["pcm_s16le", "wav"] = "pcm_s16le"
@@ -511,7 +555,10 @@ class ServicesConfig(_Section):
     """Services scout talks to. All optional; a missing one turns off what depends on it."""
 
     prometheus_url: HttpUrl | None = None
+    """Prometheus's root (``http://prometheus:9090``), queried read-only over the PromQL HTTP API. Scout never
+    scrapes or connects to the hosts it reports on. Unset: no signal rules run."""
     llm: LLMConfig | None = None
+    """The model reports are written with. Unset: every report comes from the plain template."""
     echo: EchoConfig | None = None
     """argus-echo for speech. Unset: nothing is synthesised, so voice channels stay silent; text still goes out."""
 
@@ -543,13 +590,21 @@ class BudgetConfig(_Section):
     or ``0`` is unlimited. The narrative charges each model call to ``llm_calls``."""
 
     limits: Annotated[dict[Name, Annotated[int, Field(ge=0)]], NullAsEmptyDict] = Field(default_factory=dict)
+    """Kind -> calls per day. Scout charges ``llm_calls`` (each report's model call), ``tts`` (each speech
+    synthesis) and ``speak`` (each spoken message). Counts live in the store and reset at local midnight."""
     block_manual: bool = False
-    """Refuse over-cap work started by a person too (HTTP requests, the CLI), not only scheduled work."""
+    """Refuse over-cap work done while serving an HTTP request too. Off: such work goes through and is logged.
+    Scheduled jobs and the CLI are always held to the caps."""
 
 
 class ServerConfig(_Section):
+    """The HTTP API that ``argus-scout serve`` runs. The defaults are closed: loopback only, read-only, and with
+    no token set every write is refused."""
+
     host: str = "127.0.0.1"
+    """Bind address (``serve --host`` overrides it). Reads are open unless ``read_auth``: keep it on loopback."""
     port: int = Field(default=8400, ge=1, le=65535)
+    """TCP port (``serve --port`` overrides it)."""
     read_only: bool = True
     """Refuse every state-changing route (webhook pushes included). Turn off only once a token is set."""
     allowed_origins: Annotated[list[str], NullAsEmptyList] = Field(default_factory=list)
@@ -568,15 +623,24 @@ class ScoutConfig(_Section):
 
     # A section whose keys are all commented out parses as null: NullAsEmpty* reads it as empty (defaults).
     files: Annotated[FilesConfig, NullAsEmptyDict] = FilesConfig()
+    """The policy files scout reads (reloaded while it runs)."""
     # A dict default is validated like file input, so the default store path resolves beside the config too.
     store: Annotated[StoreConfig, NullAsEmptyDict] = Field(default={}, validate_default=True)
+    """Where scout keeps its state."""
     sources: Annotated[list[SourceConfig], NullAsEmptyList] = Field(default_factory=list)
+    """Where status events come from."""
     channels: Annotated[list[ChannelConfig], NullAsEmptyList] = Field(default_factory=list)
+    """Where reports go."""
     schedule: Annotated[ScheduleConfig, NullAsEmptyDict] = ScheduleConfig()
+    """Cycle intervals, the timezone and the briefings."""
     services: Annotated[ServicesConfig, NullAsEmptyDict] = ServicesConfig()
+    """Prometheus, the model and argus-echo."""
     budget: Annotated[BudgetConfig, NullAsEmptyDict] = BudgetConfig()
+    """Daily usage caps."""
     delivery: Annotated[DeliveryConfig, NullAsEmptyDict] = DeliveryConfig()
+    """The redelivery sweep."""
     server: Annotated[ServerConfig, NullAsEmptyDict] = ServerConfig()
+    """The HTTP API."""
 
     _base_dir: Path | None = PrivateAttr(default=None)
 
