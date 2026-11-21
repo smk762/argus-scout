@@ -35,8 +35,11 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
+    PrivateAttr,
     SecretStr,
+    Tag,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -131,20 +134,26 @@ class StoreConfig(_Section):
     path: ConfigPath = Field(default=Path("scout.db"), validate_default=True)
 
 
-class WebhookSource(_Section):
+class SourceSettings(_Section):
+    """The keys every source has. A source plugin's ``config_model`` subclasses this (see
+    :mod:`argus_scout.sources`), narrowing ``kind`` to its own name and adding its own keys."""
+
+    kind: Name
+    name: Name
+
+
+class WebhookSource(SourceSettings):
     """Producers POST status events to scout."""
 
     kind: Literal["webhook"]
-    name: Name
     token_env: EnvName | None = None
     """Env var holding the bearer token this source must send. Unset means the server-wide token applies."""
 
 
-class JsonPollSource(_Section):
+class JsonPollSource(SourceSettings):
     """Scout GETs a JSON endpoint on an interval and maps its fields onto status events."""
 
     kind: Literal["json_poll"]
-    name: Name
     url: HttpUrl
     interval: float = Field(default=60.0, gt=0, description="Seconds between polls.")
     items: str | None = None
@@ -166,7 +175,36 @@ class JsonPollSource(_Section):
         return value
 
 
-SourceConfig = Annotated[WebhookSource | JsonPollSource, Field(discriminator="kind")]
+class PluginSource(BaseModel):
+    """A source of a kind that a plugin provides (anything but ``webhook`` and ``json_poll``).
+
+    The config schema can't know a third-party kind's keys, so here only ``kind`` and ``name`` are
+    checked and every other key is kept. :func:`argus_scout.sources.build_sources` then validates
+    the whole entry against the plugin's own ``config_model``. An unknown kind or a bad key fails
+    that one source (and ``argus-scout check config``), never the others.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    kind: Name
+    name: Name
+
+
+BUILTIN_SOURCE_KINDS = frozenset({"webhook", "json_poll"})
+
+
+def _source_tag(value: Any) -> str:
+    kind = value.get("kind") if isinstance(value, dict) else getattr(value, "kind", None)
+    return kind if kind in BUILTIN_SOURCE_KINDS else "plugin"
+
+
+SourceConfig = Annotated[
+    Annotated[WebhookSource, Tag("webhook")]
+    | Annotated[JsonPollSource, Tag("json_poll")]
+    | Annotated[PluginSource, Tag("plugin")],
+    Discriminator(_source_tag),
+]
+"""A ``sources:`` entry. Built-in kinds are validated here; any other kind by its plugin's model."""
 
 
 class Briefing(_Section):
@@ -244,6 +282,15 @@ class ScoutConfig(_Section):
     schedule: ScheduleConfig = ScheduleConfig()
     services: ServicesConfig = ServicesConfig()
     server: ServerConfig = ServerConfig()
+
+    _base_dir: Path | None = PrivateAttr(default=None)
+
+    @property
+    def base_dir(self) -> Path | None:
+        """The directory relative paths resolved against (the config file's), when there was one.
+
+        Plugin source configs are validated after loading, so they need it to resolve their paths."""
+        return self._base_dir
 
     @model_validator(mode="before")
     @classmethod
@@ -336,10 +383,12 @@ def parse_config(data: Any, base_dir: Path | None = None, *, source: str = "conf
     if not isinstance(data, dict):
         raise ConfigError(f"{source}: expected a mapping at the top level, got {type(data).__name__}")
     try:
-        return ScoutConfig.model_validate(data, context={"base_dir": base_dir})
+        config = ScoutConfig.model_validate(data, context={"base_dir": base_dir})
     except ValidationError as exc:
         count = exc.error_count()
         raise ConfigError(f"{source}: {count} error{'s' * (count != 1)}\n{_format_errors(exc)}") from exc
+    config._base_dir = base_dir
+    return config
 
 
 def load_config(path: str | Path, *, load_env: bool = True) -> ScoutConfig:

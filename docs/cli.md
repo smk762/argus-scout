@@ -18,6 +18,7 @@ $ argus-scout [OPTIONS] COMMAND [ARGS]...
 
 * `version`: Print the installed version.
 * `init`: Write a commented starter scout.yaml and a...
+* `poll`: Poll sources once and print the events...
 * `serve`: Run the HTTP server (needs the ...
 * `check`: Validate config files before scout loads...
 * `tariff`: Inspect a time-of-use tariff.
@@ -53,6 +54,23 @@ $ argus-scout init [OPTIONS] [path]
 **Options**:
 
 * `--force`: Overwrite existing files.
+* `--help`: Show this message and exit.
+
+## `argus-scout poll`
+
+Poll sources once and print the events they return. A dry run unless --ingest is given.
+
+**Usage**:
+
+```console
+$ argus-scout poll [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <file>`: scout.yaml  [required]
+* `-s, --source <str>`: Poll only this source .
+* `--ingest`: Write the events to the store instead of only printing them.
 * `--help`: Show this message and exit.
 
 ## `argus-scout serve`
