@@ -19,6 +19,7 @@ jobs:
     with:
       ruff-version: "0.15.16"
       test-extras: "dev"
+      python-versions: '["3.12", "3.13"]'
 
   suite-rules:
     # argus-ci suite rules: lint rules that each eliminate a finding class. New violations fail;
