@@ -28,9 +28,25 @@ uv pip install argus-scout            # library + CLI
 uv pip install "argus-scout[server]"  # + the HTTP server
 ```
 
+## Configure
+
+One file, `scout.yaml`, names every other file scout reads and every service it talks to. Secrets never go in it:
+it names an environment variable (`token_env: SCOUT_API_TOKEN`) and the value lives in a `.env` beside it, or in the
+real environment, which wins. Write a commented starter and check it:
+
+```bash
+argus-scout init config/          # writes config/scout.yaml and config/.env.example
+cp config/.env.example config/.env
+argus-scout check config config/scout.yaml
+argus-scout serve --config config/scout.yaml
+```
+
+Relative paths resolve against the config file's directory. Scout refuses to start on an invalid `scout.yaml` (unknown
+keys included); the policy files it names are reloaded while it runs, and a bad edit to one falls back to defaults.
+
 ## Try it
 
-Each config file has a commented example in [`examples/`](examples/). Copy one, edit it, and check it before scout loads
+Each policy file has a commented example in [`examples/`](examples/). Copy one, edit it, and check it before scout loads
 it:
 
 ```bash
