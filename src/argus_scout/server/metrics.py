@@ -18,6 +18,7 @@ Families (all prefixed ``scout_``):
 - ``job_runs_total{job}``, ``job_errors_total{job}`` (counters): scheduler runs, and runs that raised.
 - ``job_last_success_timestamp_seconds{job}`` (gauge): Unix time the job last finished cleanly.
 - ``job_running{job}`` (gauge): 1 while the job is running.
+- ``deliveries_total{channel,result}`` (counter): delivery attempts recorded in the store, ``sent`` or ``failed``.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ class ScoutCollector(Collector):
         self.clock = clock
 
     def collect(self) -> Iterator[Metric]:
-        for part in (self._usage, self._tariff, self._store, self._jobs):
+        for part in (self._usage, self._tariff, self._store, self._jobs, self._deliveries):
             try:
                 yield from part()
             except Exception:  # noqa: BLE001 — one broken source must not blank the whole scrape
@@ -123,6 +124,15 @@ class ScoutCollector(Collector):
         yield recs
         yield approvals
         yield inbox
+
+    def _deliveries(self) -> Iterator[Metric]:
+        deliveries = CounterMetricFamily(
+            f"{PREFIX}_deliveries", "Delivery attempts per channel, by result.", labels=["channel", "result"]
+        )
+        if self.store is not None:
+            for (channel, ok), n in sorted(self.store.delivery_counts().items()):
+                deliveries.add_metric([channel, "sent" if ok else "failed"], n)
+        yield deliveries
 
     def _jobs(self) -> Iterator[Metric]:
         runs = CounterMetricFamily(f"{PREFIX}_job_runs", "Scheduler job runs.", labels=["job"])

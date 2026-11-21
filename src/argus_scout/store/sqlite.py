@@ -37,6 +37,7 @@ from argus_scout.recommendations import TRANSITIONS, Recommendation, Status
 from argus_scout.severity import Severity
 from argus_scout.store.base import (
     UNCHECKED,
+    DeliveryRecord,
     IllegalTransition,
     InboxEntry,
     JobRun,
@@ -137,6 +138,24 @@ MIGRATIONS: tuple[str, ...] = (
         since TEXT NOT NULL,
         PRIMARY KEY (rule, key)
     );
+    """,
+    # 5: delivery records, one row per attempt at a message on a channel. At most one successful row per
+    # (delivery_key, channel): that is what makes re-delivery idempotent, across restarts too.
+    """
+    CREATE TABLE deliveries (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        delivery_key TEXT NOT NULL,
+        channel      TEXT NOT NULL,
+        report_id    INTEGER,
+        event_source TEXT,
+        event_id     TEXT,
+        at           TEXT NOT NULL,
+        ok           INTEGER NOT NULL,
+        error        TEXT
+    );
+    CREATE UNIQUE INDEX deliveries_sent ON deliveries (delivery_key, channel) WHERE ok = 1;
+    CREATE INDEX deliveries_key ON deliveries (delivery_key, id);
+    CREATE INDEX deliveries_at ON deliveries (at);
     """,
 )
 
@@ -565,6 +584,64 @@ class SqliteStore:
         params.append(int(limit))
         return [self._report_from_row(r) for r in self._query(sql, params)]
 
+    # -- delivery records -------------------------------------------------------------
+    @staticmethod
+    def _delivery_from_row(row: sqlite3.Row) -> DeliveryRecord:
+        return DeliveryRecord(
+            delivery_key=row["delivery_key"],
+            channel=row["channel"],
+            at=_dt(row["at"]),  # type: ignore[arg-type]
+            ok=bool(row["ok"]),
+            error=row["error"],
+            report_id=row["report_id"],
+            event_source=row["event_source"],
+            event_id=row["event_id"],
+        )
+
+    def record_delivery(
+        self,
+        delivery_key: str,
+        channel: str,
+        *,
+        ok: bool,
+        error: str | None = None,
+        at: datetime | None = None,
+        report_id: int | None = None,
+        event_source: str | None = None,
+        event_id: str | None = None,
+    ) -> bool:
+        """Record one delivery attempt. Returns False when ``ok`` and the message was already recorded as
+        sent on this channel (nothing is written then: a message is sent at most once per channel)."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO deliveries
+                       (delivery_key, channel, report_id, event_source, event_id, at, ok, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (delivery_key, channel, report_id, event_source, event_id, _ts(_now(at)), int(ok), error),
+            )
+            return cur.rowcount > 0
+
+    def delivered_channels(self, delivery_key: str) -> set[str]:
+        """The channels this message was successfully delivered on."""
+        rows = self._query("SELECT channel FROM deliveries WHERE delivery_key = ? AND ok = 1", (delivery_key,))
+        return {r["channel"] for r in rows}
+
+    def delivery_counts(self) -> dict[tuple[str, bool], int]:
+        """Delivery attempts per ``(channel, ok)``, for /metrics."""
+        rows = self._query("SELECT channel, ok, COUNT(*) AS n FROM deliveries GROUP BY channel, ok")
+        return {(r["channel"], bool(r["ok"])): r["n"] for r in rows}
+
+    def list_deliveries(self, delivery_key: str | None = None, *, limit: int = 100) -> list[DeliveryRecord]:
+        """Delivery attempts, newest first, optionally for one message."""
+        sql = "SELECT * FROM deliveries"
+        params: list[Any] = []
+        if delivery_key is not None:
+            sql += " WHERE delivery_key = ?"
+            params.append(delivery_key)
+        sql += " ORDER BY at DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        return [self._delivery_from_row(r) for r in self._query(sql, params)]
+
     # -- scheduler bookkeeping -------------------------------------------------------
     @staticmethod
     def _job_from_row(row: sqlite3.Row) -> JobRun:
@@ -649,7 +726,7 @@ class SqliteStore:
 
     # -- retention -------------------------------------------------------------------
     def prune(self, older_than: datetime) -> dict[str, int]:
-        """Delete events acked (or expired) before ``older_than`` and reports generated before it.
+        """Delete events acked (or expired) before ``older_than``, and reports and delivery records older than it.
 
         Open events, recommendations and their audit trail are never pruned.
         """
@@ -661,9 +738,10 @@ class SqliteStore:
                 (cutoff, cutoff),
             ).rowcount
             reports = conn.execute("DELETE FROM reports WHERE generated_at < ?", (cutoff,)).rowcount
-        if events or reports:
-            log.info("store.pruned", events=events, reports=reports, older_than=cutoff)
-        return {"events": events, "reports": reports}
+            deliveries = conn.execute("DELETE FROM deliveries WHERE at < ?", (cutoff,)).rowcount
+        if events or reports or deliveries:
+            log.info("store.pruned", events=events, reports=reports, deliveries=deliveries, older_than=cutoff)
+        return {"events": events, "reports": reports, "deliveries": deliveries}
 
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION", "SqliteStore", "migrate"]

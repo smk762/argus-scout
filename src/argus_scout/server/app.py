@@ -22,6 +22,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_l
 
 import argus_scout
 from argus_scout.budget import DailyBudget, ManualOriginMiddleware
+from argus_scout.channels import Channels, Delivery, Dispatcher, DispatchReport, Synthesiser, build_dispatcher
 from argus_scout.config import ScoutConfig
 from argus_scout.cycles import register_jobs
 from argus_scout.heartbeat import PolicyFile
@@ -33,7 +34,8 @@ from argus_scout.server.guards import install_guards
 from argus_scout.server.metrics import ScoutCollector, build_registry
 from argus_scout.server.routes import include_routes
 from argus_scout.sources import Sources, build_sources
-from argus_scout.store.base import Store
+from argus_scout.events import StatusEvent
+from argus_scout.store.base import Report, Store
 from argus_scout.store.sqlite import SqliteStore
 from argus_scout.tariff import TariffFile
 
@@ -54,6 +56,18 @@ class Runtime:
     scheduler: Scheduler
     registry: CollectorRegistry
     sources: Sources = field(default_factory=Sources)
+    channels: Channels = field(default_factory=Channels)
+    dispatcher: Dispatcher = field(default_factory=lambda: Dispatcher([]))
+
+    async def deliver(self, report: Report, *, force: bool = False) -> DispatchReport:
+        """Send a stored report to every channel that should get it (the narrative's delivery seam).
+
+        Idempotent: a report already sent on a channel isn't sent there again, even after a restart."""
+        return await self.dispatcher.deliver(Delivery.from_report(report), force=force)
+
+    async def deliver_event(self, event: StatusEvent) -> DispatchReport:
+        """Send one inbox status item (the latest event of a group) to the channels."""
+        return await self.dispatcher.deliver(Delivery.from_event(event))
 
 
 def build_runtime(
@@ -64,6 +78,8 @@ def build_runtime(
     inbox: Inbox | None = None,
     sources: Sources | None = None,
     prometheus: PrometheusClient | None = None,
+    channels: Channels | None = None,
+    synthesiser: Synthesiser | None = None,
     clock: Clock = utc_now,
     sleep: Sleep | None = None,
 ) -> Runtime:
@@ -78,11 +94,37 @@ def build_runtime(
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
     register_jobs(scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus)
+    channels, dispatcher = build_dispatcher(
+        config,
+        store=store,
+        policy_file=policy_file,
+        channels=channels,
+        synthesiser=synthesiser,
+        budget=budget,
+        clock=clock,
+    )
     collector = ScoutCollector(
-        store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
+        store=store,
+        budget=budget,
+        tariff=tariff,
+        scheduler=scheduler,
+        tz=config.schedule.tz,
+        clock=clock,
     )
     registry = build_registry(collector)
-    return Runtime(config, store, policy_file, inbox, tariff, budget, scheduler, registry, sources=sources)
+    return Runtime(
+        config,
+        store,
+        policy_file,
+        inbox,
+        tariff,
+        budget,
+        scheduler,
+        registry,
+        sources=sources,
+        channels=channels,
+        dispatcher=dispatcher,
+    )
 
 
 def create_app(

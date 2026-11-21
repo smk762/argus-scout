@@ -32,6 +32,7 @@ from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
+from argus_cortex.fs import PathRefused, safe_join
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -209,6 +210,96 @@ SourceConfig = Annotated[
 """A ``sources:`` entry. Built-in kinds are validated here; any other kind by its plugin's model."""
 
 
+# --- delivery channels -------------------------------------------------------------------------------------
+
+
+def _check_channel_file(value: str) -> str:
+    # The file is fenced under the channel's dir again at write time (symlinks followed); this catches the
+    # obvious mistakes at load, so `check config` reports them.
+    try:
+        rendered = value.format(kind="kind", date="date")
+    except (KeyError, IndexError, ValueError) as exc:
+        raise ValueError(f"file: only {{kind}} and {{date}} may be filled in ({exc})") from exc
+    try:
+        safe_join("/nonexistent-root", rendered, label="file")
+    except PathRefused as exc:
+        raise ValueError(str(exc)) from exc
+    return value
+
+
+class ChannelSettings(_Section):
+    """The keys every channel has. A channel plugin's ``config_model`` subclasses this (see
+    :mod:`argus_scout.channels`), narrowing ``kind`` to its own name and adding its own keys."""
+
+    kind: Name
+    name: Name
+    enabled: bool = True
+    min_severity: Literal["info", "notice", "warning", "critical"] = "info"
+    """Deliver only messages at or above this severity."""
+    kinds: list[str] = Field(default_factory=list)
+    """Deliver only these kinds (report kinds such as ``morning``, or ``event`` for an inbox item). Empty: all."""
+    timeout: float = Field(default=30.0, gt=0, le=600, description="Seconds one delivery may take, retries included.")
+
+
+class TextChannel(ChannelSettings):
+    """Append each message to a file under ``dir``. The file is fenced under ``dir``: no ``..``, no absolute
+    path, no symlink out."""
+
+    kind: Literal["text"]
+    dir: ConfigPath = Field(default=Path("."), validate_default=True)
+    file: Annotated[str, AfterValidator(_check_channel_file)] = "scout-reports.log"
+    """Relative to ``dir``. ``{kind}`` and ``{date}`` (YYYY-MM-DD, UTC) are filled in per message."""
+    rotate_bytes: int | None = Field(default=None, gt=0)
+    """Rotate the file (``x.log`` -> ``x.log.1`` ...) before it would grow past this size. Unset: never."""
+    keep: int = Field(default=3, ge=1, le=100)
+    """Rotated files to keep."""
+
+
+class WebhookChannel(ChannelSettings):
+    """POST each message as JSON to ``url`` (only that host is allowed)."""
+
+    kind: Literal["webhook"]
+    url: HttpUrl
+    token_env: EnvName | None = None
+    """Env var holding a bearer token to send. Unset: no Authorization header."""
+    secret_env: EnvName | None = None
+    """Env var holding an HMAC-SHA256 key; set, every POST carries an ``X-Scout-Signature`` header."""
+    retries: int = Field(default=2, ge=0, le=5)
+    """Retries after a failed attempt (connection error, 429 or 5xx); a 4xx is not retried."""
+    backoff: float = Field(default=1.0, ge=0, le=60)
+    """Seconds before the first retry; doubles each time."""
+
+
+class PluginChannel(BaseModel):
+    """A channel of a kind that a plugin provides (anything but ``text`` and ``webhook``).
+
+    Only ``kind`` and ``name`` are checked here; :func:`argus_scout.channels.build_channels` validates the
+    whole entry against the plugin's own ``config_model``. A bad entry fails that one channel, never the others.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    kind: Name
+    name: Name
+
+
+BUILTIN_CHANNEL_KINDS = frozenset({"text", "webhook"})
+
+
+def _channel_tag(value: Any) -> str:
+    kind = value.get("kind") if isinstance(value, dict) else getattr(value, "kind", None)
+    return kind if kind in BUILTIN_CHANNEL_KINDS else "plugin"
+
+
+ChannelConfig = Annotated[
+    Annotated[TextChannel, Tag("text")]
+    | Annotated[WebhookChannel, Tag("webhook")]
+    | Annotated[PluginChannel, Tag("plugin")],
+    Discriminator(_channel_tag),
+]
+"""A ``channels:`` entry. Built-in kinds are validated here; any other kind by its plugin's model."""
+
+
 class Briefing(_Section):
     """A scheduled report, e.g. ``{kind: morning, at: "07:30"}`` in the schedule's timezone."""
 
@@ -287,6 +378,7 @@ class ScoutConfig(_Section):
     # A dict default is validated like file input, so the default store path resolves beside the config too.
     store: StoreConfig = Field(default={}, validate_default=True)
     sources: list[SourceConfig] = Field(default_factory=list)
+    channels: list[ChannelConfig] = Field(default_factory=list)
     schedule: ScheduleConfig = ScheduleConfig()
     services: ServicesConfig = ServicesConfig()
     server: ServerConfig = ServerConfig()
@@ -297,7 +389,7 @@ class ScoutConfig(_Section):
     def base_dir(self) -> Path | None:
         """The directory relative paths resolved against (the config file's), when there was one.
 
-        Plugin source configs are validated after loading, so they need it to resolve their paths."""
+        Plugin source and channel configs are validated after loading, so they need it to resolve their paths."""
         return self._base_dir
 
     @model_validator(mode="before")
@@ -305,7 +397,7 @@ class ScoutConfig(_Section):
     def _empty_sections(cls, data: Any) -> Any:
         # A section whose keys are all commented out parses as null: treat it as empty.
         if isinstance(data, dict):
-            data = {k: ([] if k == "sources" else {}) if v is None else v for k, v in data.items()}
+            data = {k: ([] if k in ("sources", "channels") else {}) if v is None else v for k, v in data.items()}
         return data
 
     @model_validator(mode="after")
@@ -317,10 +409,21 @@ class ScoutConfig(_Section):
             seen.add(source.name)
         return self
 
+    @model_validator(mode="after")
+    def _unique_channel_names(self) -> ScoutConfig:
+        seen: set[str] = set()
+        for channel in self.channels:
+            if channel.name in seen:
+                raise ValueError(f"duplicate channel name {channel.name!r}")
+            seen.add(channel.name)
+        return self
+
     def secret_env_names(self) -> list[str]:
         """Every environment variable this config names as holding a secret, in file order."""
         names = [self.server.token_env]
         names += [getattr(s, "token_env", None) or getattr(s, "auth_env", None) for s in self.sources]
+        for channel in self.channels:
+            names += [getattr(channel, "token_env", None), getattr(channel, "secret_env", None)]
         if self.services.llm:
             names.append(self.services.llm.api_key_env)
         return list(dict.fromkeys(n for n in names if n))

@@ -2,6 +2,7 @@
 
 from argus_scout.store.base import (
     UNCHECKED,
+    DeliveryRecord,
     IllegalTransition,
     InboxEntry,
     JobRun,
@@ -15,6 +16,7 @@ from argus_scout.store.sqlite import SqliteStore
 
 __all__ = [
     "UNCHECKED",
+    "DeliveryRecord",
     "IllegalTransition",
     "InboxEntry",
     "JobRun",
