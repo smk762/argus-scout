@@ -11,10 +11,13 @@ from pathlib import Path
 import typer
 
 import argus_scout
-from argus_scout.approvals import load_rules
+from argus_scout.approvals import StandingApprovals, load_rules
 from argus_scout.config import CONFIG_FILE, ENV_FILE, ConfigError, ScoutConfig, load_config, resolve_secret
+from argus_scout.engine import RecommendationEngine
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.inbox import Inbox, InvalidEvent
+from argus_scout.prometheus import PrometheusClient
+from argus_scout.signals import SignalState, evaluate, format_duration, load_signal_rules
 from argus_scout.sources import build_sources
 from argus_scout.store import SqliteStore
 from argus_scout.tariff import coverage_gaps, current_period, load_tariff, next_period_change
@@ -79,6 +82,23 @@ def check_approvals(path: Path = ExistingFile) -> None:
         raise typer.Exit(1)
 
 
+@check_app.command("signals")
+def check_signals(path: Path = ExistingFile) -> None:
+    """Check a signal rules file: every rule must parse, and its templates use only allowed placeholders."""
+    ruleset = load_signal_rules(path)
+    if ruleset.file_error:
+        typer.echo(f"error: {ruleset.file_error}", err=True)
+        raise typer.Exit(1)
+    for error in ruleset.errors:
+        typer.echo(f"error: {error}", err=True)
+    for rule in ruleset.rules:
+        typer.echo(f"  {rule.name}: {rule.op} {rule.threshold:g} for {format_duration(rule.for_)} -> {rule.severity}")
+    count = len(ruleset.rules)
+    typer.echo(f"ok: {count} rules" if not ruleset.errors else f"{count} rules loaded, {len(ruleset.errors)} problems")
+    if ruleset.errors:
+        raise typer.Exit(1)
+
+
 @check_app.command("config")
 def check_config(path: Path = ExistingFile) -> None:
     """Check scout.yaml and every policy file it names. Secrets are reported as set or unset, never shown."""
@@ -92,6 +112,7 @@ def check_config(path: Path = ExistingFile) -> None:
         "heartbeat": check_heartbeat,
         "approvals": check_approvals,
         "tariff": check_tariff,
+        "signals": check_signals,
     }
     for kind, check in checks.items():
         named = getattr(config.files, kind)
@@ -218,6 +239,54 @@ def poll(
     if not ingest:
         typer.echo("dry run: nothing was written (pass --ingest to store these)")
     if failed:
+        raise typer.Exit(1)
+
+
+@app.command()
+def analyze(
+    config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Work on an in-memory copy of the store: show what would change, write nothing."
+    ),
+) -> None:
+    """Run one signal evaluation and engine cycle against the configured Prometheus, and print the report.
+
+    For testing rules; the server runs the same cycle on its schedule. Scout only proposes and (by
+    standing rule) approves: nothing here deploys or acts.
+    """
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not config.services.prometheus_url:
+        typer.echo("error: services.prometheus_url is not set", err=True)
+        raise typer.Exit(1)
+    if config.files.signals is None:
+        typer.echo("error: files.signals is not set", err=True)
+        raise typer.Exit(1)
+    ruleset = load_signal_rules(config.files.signals)
+    if ruleset.file_error:
+        typer.echo(f"error: {config.files.signals}: {ruleset.file_error}", err=True)
+        raise typer.Exit(1)
+    for error in ruleset.errors:
+        typer.echo(f"signals: skipped {error}", err=True)
+    store = SqliteStore.copy_of(config.store.path) if dry_run else SqliteStore(config.store.path)
+    try:
+        approvals = StandingApprovals(config.files.approvals, store=store)
+        engine = RecommendationEngine(store, approvals)
+        client = PrometheusClient(config.services.prometheus_url)
+        hits = asyncio.run(evaluate(ruleset.rules, client, engine.clock(), state=SignalState(store)))
+        report = engine.run_cycle(hits)
+    finally:
+        store.close()
+    typer.echo(f"{len(ruleset.rules)} rules: {len(hits)} firing, {hits.pending} pending")
+    for line in report.lines():
+        typer.echo(f"  {line}")
+    typer.echo(report.summary())
+    if dry_run:
+        typer.echo("dry run: nothing was written")
+    if report.unknown or ruleset.errors:
         raise typer.Exit(1)
 
 

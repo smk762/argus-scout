@@ -10,7 +10,11 @@ These are the seams later phases fill in. The structure is already the real one:
 - :class:`PollJob` polls one polling source and ingests what it returns through
   :meth:`Inbox.ingest <argus_scout.inbox.Inbox.ingest>`. Each source is its own job, so one failing source
   never affects another.
-- :class:`AnalysisCycle` will evaluate signal rules against Prometheus and raise recommendations (phase 2).
+- :class:`AnalysisCycle` reloads the signal rules through :class:`~argus_scout.signals.SignalRulesFile`,
+  evaluates them against Prometheus and hands the hits to the
+  :class:`~argus_scout.engine.RecommendationEngine`. A bad rule is skipped; a file that won't parse skips
+  the cycle (keeping the pending ``for`` clocks); a Prometheus outage makes rules *unknown*, which the
+  engine never reads as cleared.
 - :class:`BriefingJob` will generate a scheduled report (phase 3); for now it only records that it ran.
 """
 
@@ -23,10 +27,14 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from argus_scout.approvals import StandingApprovals
 from argus_scout.config import ScoutConfig
+from argus_scout.engine import CycleReport, RecommendationEngine
 from argus_scout.heartbeat import Decision, HeartbeatPolicy, PolicyFile, explain
 from argus_scout.inbox import EventGroup, Inbox, InvalidEvent
+from argus_scout.prometheus import PrometheusClient
 from argus_scout.scheduler import Clock, DailyAt, Every, Scheduler, utc_now
+from argus_scout.signals import SignalRulesFile, SignalState, evaluate
 from argus_scout.sources import BoundSource, Sources, build_sources
 from argus_scout.store.base import Store
 
@@ -100,16 +108,46 @@ class StatusCycle:
 
 
 class AnalysisCycle:
-    """One analysis tick. Signal rules against Prometheus land here in phase 2."""
+    """One analysis tick: signal rules against Prometheus, hits into the recommendation engine.
 
-    def __init__(self, store: Store, *, clock: Clock = utc_now) -> None:
+    With no Prometheus client or no rules file it does nothing (and says so). It never raises for a
+    Prometheus outage or a bad rules file: an outage makes the rules unknown for this tick, and the
+    engine doesn't treat unknown as cleared, so nothing is retired on its account.
+    """
+
+    def __init__(
+        self,
+        store: Store,
+        *,
+        rules: SignalRulesFile | None = None,
+        client: PrometheusClient | None = None,
+        approvals: StandingApprovals | None = None,
+        clock: Clock = utc_now,
+    ) -> None:
         self.store = store
+        self.rules = rules or SignalRulesFile(None)
+        self.client = client
         self.clock = clock
+        self.state = SignalState(store)
+        self.engine = RecommendationEngine(store, approvals, clock=clock)
         self.last_run: datetime | None = None
+        self.last: CycleReport | None = None
 
-    async def __call__(self) -> None:
-        self.last_run = self.clock()
-        log.info("analysis.cycle", signals=0)
+    async def __call__(self) -> CycleReport | None:
+        now = self.last_run = self.clock()
+        if self.client is None or not self.rules.path:
+            log.info("analysis.skipped", reason="no prometheus_url" if self.client is None else "no signals file")
+            return None
+        ruleset = self.rules.get()
+        if ruleset.file_error:
+            log.warning("analysis.rules_unreadable", path=self.rules.path, error=ruleset.file_error)
+            return None
+        hits = await evaluate(ruleset.rules, self.client, now, state=self.state)
+        report = self.engine.run_cycle(hits)
+        if report.unknown:
+            log.warning("analysis.rules_unknown", rules=sorted(report.unknown))
+        self.last = report
+        return report
 
 
 class BriefingJob:
@@ -161,12 +199,14 @@ def register_jobs(
     *,
     inbox: Inbox | None = None,
     sources: Sources | None = None,
+    prometheus: PrometheusClient | None = None,
 ) -> None:
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source.
 
     Job names are ``status``, ``analysis``, ``briefing:<kind>`` (``briefing:<kind>@HH:MM`` when a kind is
     scheduled more than once) and ``poll:<source>``. The name keys the persisted bookkeeping, so keep it
     stable. A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
+    ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests).
     """
     schedule = config.schedule
     clock = scheduler.clock
@@ -174,7 +214,16 @@ def register_jobs(
     sources = sources if sources is not None else build_sources(config)
     status = StatusCycle(store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock)
     scheduler.add("status", status, Every(schedule.status_interval))
-    scheduler.add("analysis", AnalysisCycle(store, clock=clock), Every(schedule.analysis_interval))
+    if prometheus is None and config.services.prometheus_url:
+        prometheus = PrometheusClient(config.services.prometheus_url)
+    analysis = AnalysisCycle(
+        store,
+        rules=SignalRulesFile(config.files.signals),
+        client=prometheus,
+        approvals=StandingApprovals(config.files.approvals, store=store),
+        clock=clock,
+    )
+    scheduler.add("analysis", analysis, Every(schedule.analysis_interval))
     kinds = Counter(b.kind for b in schedule.briefings)
     for briefing in schedule.briefings:
         name = f"briefing:{briefing.kind}" + (f"@{briefing.at}" if kinds[briefing.kind] > 1 else "")

@@ -19,6 +19,7 @@ $ argus-scout [OPTIONS] COMMAND [ARGS]...
 * `version`: Print the installed version.
 * `init`: Write a commented starter scout.yaml and a...
 * `poll`: Poll sources once and print the events...
+* `analyze`: Run one signal evaluation and engine cycle...
 * `serve`: Run the HTTP server and the scheduler...
 * `check`: Validate config files before scout loads...
 * `tariff`: Inspect a time-of-use tariff.
@@ -73,6 +74,25 @@ $ argus-scout poll [OPTIONS]
 * `--ingest`: Write the events to the store instead of only printing them.
 * `--help`: Show this message and exit.
 
+## `argus-scout analyze`
+
+Run one signal evaluation and engine cycle against the configured Prometheus, and print the report.
+
+For testing rules; the server runs the same cycle on its schedule. Scout only proposes and (by
+standing rule) approves: nothing here deploys or acts.
+
+**Usage**:
+
+```console
+$ argus-scout analyze [OPTIONS]
+```
+
+**Options**:
+
+* `-c, --config <file>`: scout.yaml  [required]
+* `--dry-run`: Work on an in-memory copy of the store: show what would change, write nothing.
+* `--help`: Show this message and exit.
+
 ## `argus-scout serve`
 
 Run the HTTP server and the scheduler (needs the  extra).
@@ -109,6 +129,7 @@ $ argus-scout check [OPTIONS] COMMAND [ARGS]...
 * `tariff`: Check a tariff file loads and its periods...
 * `heartbeat`: Check a heartbeat policy file parses, and...
 * `approvals`: Check a standing-approvals file: every...
+* `signals`: Check a signal rules file: every rule must...
 * `config`: Check scout.yaml and every policy file it...
 
 ### `argus-scout check tariff`
@@ -155,6 +176,24 @@ Check a standing-approvals file: every rule must parse.
 
 ```console
 $ argus-scout check approvals [OPTIONS] {path}
+```
+
+**Arguments**:
+
+* `path <file>`: [required]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+### `argus-scout check signals`
+
+Check a signal rules file: every rule must parse, and its templates use only allowed placeholders.
+
+**Usage**:
+
+```console
+$ argus-scout check signals [OPTIONS] {path}
 ```
 
 **Arguments**:

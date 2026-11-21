@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -179,3 +180,22 @@ def test_impact_levels():
     assert impact_level(Recommendation(impact="High savings, ~20/mo")) == "high"
     assert impact_level(Recommendation(impact="minor")) == "low"
     assert impact_level(Recommendation(impact="3/month")) == "medium"
+
+
+SRC = Path(__file__).resolve().parent.parent / "src" / "argus_scout"
+
+
+def test_no_code_path_sets_deployed():
+    """Only a person records ``deployed``. Outside the lifecycle's own definition (recommendations.py),
+    nothing in src/ may name ``Status.DEPLOYED`` or the "deployed" status string."""
+    offenders = []
+    for path in SRC.rglob("*.py"):
+        rel = path.relative_to(SRC).as_posix()
+        if rel == "recommendations.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Attribute) and node.attr == "DEPLOYED":
+                offenders.append(f"{rel}:{node.lineno}")
+            if isinstance(node, ast.Constant) and node.value == "deployed":
+                offenders.append(f"{rel}:{node.lineno}")
+    assert offenders == []

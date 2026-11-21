@@ -20,6 +20,8 @@ Part of the [Argus suite](https://github.com/smk762/argus-cortex/blob/dev/SUITE.
 | `argus_scout.budget` | Daily usage caps for LLM generations, speech syntheses and spoken deliveries, persisted so a crash loop can't reset them. Background work stops at the cap; requests a person makes still go through unless you block them too. |
 | `argus_scout.tariff` | Time-of-use energy tariffs in any currency: the active period, the next change, block-rate tiers, and gaps in coverage. |
 | `argus_scout.events` | The status-event envelope any source sends to scout. |
+| `argus_scout.signals` | Declarative signal rules in YAML: a PromQL query, a threshold, how long it must hold, a severity and a recommendation template. They replace hard-coded analyzers. Try them once with `argus-scout analyze --config scout.yaml --dry-run`. |
+| `argus_scout.engine` | Turns signal hits into recommendations: one per instance (refreshed, never duplicated), retired when the signal clears or goes stale, standing approvals applied when proposed, and a rejected proposal isn't raised again unless it gets worse. If Prometheus can't answer, the result is "unknown", never "all clear". |
 
 ## Install
 
@@ -53,6 +55,7 @@ it:
 argus-scout check tariff examples/tariff.yaml
 argus-scout check heartbeat examples/heartbeat.yaml
 argus-scout check approvals examples/approvals.yaml
+argus-scout check signals examples/signals.yaml
 argus-scout tariff now examples/tariff.yaml
 ```
 

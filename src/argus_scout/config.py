@@ -15,9 +15,10 @@ and the config model itself holds only variable *names*, so neither its repr nor
 - This top-level file is read once at startup, and :func:`load_config` raises :class:`ConfigError` on
   anything wrong with it (missing file, bad YAML, unknown key, bad value). Scout refuses to start on a
   broken config rather than guess at what you meant.
-- The files it names (heartbeat policy, standing approvals, tariff) are reloaded while scout runs, and a bad
-  edit to one of those degrades to defaults (or skips the bad rule) and is reported, so a typo can't stop
-  status updates. See :mod:`argus_scout.heartbeat` and :mod:`argus_scout.approvals`.
+- The files it names (heartbeat policy, standing approvals, tariff, signal rules) are reloaded while scout
+  runs, and a bad edit to one of those degrades to defaults (or skips the bad rule) and is reported, so a
+  typo can't stop status updates. See :mod:`argus_scout.heartbeat`, :mod:`argus_scout.approvals` and
+  :mod:`argus_scout.signals`.
 """
 
 from __future__ import annotations
@@ -126,6 +127,7 @@ class FilesConfig(_Section):
     heartbeat: ConfigPath | None = None
     approvals: ConfigPath | None = None
     tariff: ConfigPath | None = None
+    signals: ConfigPath | None = None
 
 
 class StoreConfig(_Section):

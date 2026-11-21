@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta, timezone
@@ -12,7 +13,7 @@ from argus_scout.heartbeat import HeartbeatPolicy, reannounce_due
 from argus_scout.recommendations import Confidence, Recommendation, Status
 from argus_scout.severity import Severity
 from argus_scout.store import SqliteStore, Store
-from argus_scout.store.sqlite import SCHEMA_VERSION, migrate
+from argus_scout.store.sqlite import MIGRATIONS, SCHEMA_VERSION, migrate
 
 T0 = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 
@@ -361,3 +362,51 @@ def test_shared_across_threads(db_path):
         assert errors == []
         assert len(s.open_events()) == 100
         assert len(s.list_reports(1000)) == 100
+
+
+def test_key_migration_keeps_old_rows(tmp_path):
+    """A database from before the dedup key: its rows load, with an empty key, and new rows are found by key."""
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(MIGRATIONS[0] + MIGRATIONS[1] + "PRAGMA user_version = 2;")
+    old = proposal().to_dict()
+    for name in ("key", "expires_at", "last_seen_at", "retired_reason"):
+        old.pop(name)
+    conn.execute(
+        "INSERT INTO recommendations (id, status, analyzer, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?, ?)",
+        (old["id"], old["status"], old["analyzer"], old["created_at"], old["updated_at"], json.dumps(old)),
+    )
+    conn.commit()
+    conn.close()
+    with SqliteStore(db) as s:
+        assert s.schema_version == SCHEMA_VERSION
+        [got] = s.list_recommendations()
+        assert got.key == "" and got.expires_at is None
+        keyed = proposal(key='disk{instance="a"}')
+        s.save_recommendation(keyed)
+        assert [r.id for r in s.recommendations_by_key(keyed.key, Status.PROPOSED)] == [keyed.id]
+        assert s.recommendations_by_key(keyed.key, Status.APPROVED) == []
+
+
+def test_copy_of_is_a_detached_snapshot(tmp_path):
+    db = tmp_path / "scout.db"
+    with SqliteStore(db) as s:
+        s.save_recommendation(proposal())
+    copy = SqliteStore.copy_of(db)
+    copy.save_recommendation(proposal())
+    assert len(copy.list_recommendations()) == 2
+    copy.close()
+    with SqliteStore(db) as s:
+        assert len(s.list_recommendations()) == 1
+    assert SqliteStore.copy_of(tmp_path / "missing.db").list_recommendations() == []
+    assert not (tmp_path / "missing.db").exists()
+
+
+def test_signal_pending_round_trip(tmp_path):
+    with SqliteStore(tmp_path / "p.db") as store:
+        store.save_signal_pending("r", {"k": T0})
+        store.save_signal_pending("gone", {"k": T0})
+        assert store.load_signal_pending() == {"r": {"k": T0}, "gone": {"k": T0}}
+        assert store.drop_signal_pending(["r"]) == 1
+        store.save_signal_pending("r", {})
+        assert store.load_signal_pending() == {}

@@ -6,6 +6,7 @@ from argus_cortex.net import FetchFailed, Reply
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+from argus_scout import prometheus
 from argus_scout.cli import app
 from argus_scout.server.app import create_app
 from argus_scout.sources import json_poll
@@ -16,7 +17,7 @@ runner = CliRunner()
 
 
 def test_check_examples_pass():
-    for kind in ("tariff", "heartbeat", "approvals"):
+    for kind in ("tariff", "heartbeat", "approvals", "signals"):
         result = runner.invoke(app, ["check", kind, str(EXAMPLES / f"{kind}.yaml")])
         assert result.exit_code == 0, result.output
         assert "ok:" in result.output
@@ -108,3 +109,84 @@ def test_check_config_reports_bad_sources(write_file):
     result = runner.invoke(app, ["check", "config", str(path)])
     assert result.exit_code == 1
     assert "source coop: error: unknown source kind" in result.output
+
+
+def test_check_signals_reports_bad_rules(write_file):
+    path = write_file(
+        "s.yaml",
+        "rules:\n  - {name: ok, query: up, threshold: 0, recommendation: {title: t, action: a}}\n"
+        "  - {name: bad, query: up, threshold: 0, recommendation: {title: '{x.y}', action: a}}\n",
+    )
+    result = runner.invoke(app, ["check", "signals", str(path)])
+    assert result.exit_code == 1
+    assert "rule 1 (bad)" in result.output and "no attribute or index access" in result.output
+    assert "1 rules loaded, 1 problems" in result.output
+
+
+ANALYZE_CONFIG = """\
+store: {path: scout.db}
+files: {signals: signals.yaml}
+services: {prometheus_url: "http://prometheus.lan:9090"}
+"""
+
+SIGNALS = """\
+rules:
+  - name: disk-filling
+    query: disk_used_percent
+    threshold: 85
+    labels_key: [instance]
+    recommendation: {title: "{instance} is {value:.0f}% full", action: free space}
+"""
+
+
+def _stub_prometheus(monkeypatch, status=200):
+    calls = []
+
+    async def fetch(url, **kwargs):
+        calls.append(url)
+        body = (
+            b'{"status":"success","data":{"resultType":"vector","result":'
+            b'[{"metric":{"instance":"node-a:9100"},"value":[1700000000,"91"]}]}}'
+        )
+        return Reply(status, {}, body, url)
+
+    monkeypatch.setattr(prometheus, "afetch", fetch)
+    return calls
+
+
+def test_analyze_dry_run_writes_nothing(write_file, monkeypatch):
+    calls = _stub_prometheus(monkeypatch)
+    write_file("signals.yaml", SIGNALS)
+    path = write_file("scout.yaml", ANALYZE_CONFIG)
+    result = runner.invoke(app, ["analyze", "--config", str(path), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "new [warning] node-a:9100 is 91% full (proposed)" in result.output
+    assert "dry run" in result.output
+    assert all(url.startswith("http://prometheus.lan:9090/api/v1/query?") for url in calls)
+    assert not (path.parent / "scout.db").exists()
+
+
+def test_analyze_writes_and_dedups(write_file, monkeypatch):
+    _stub_prometheus(monkeypatch)
+    write_file("signals.yaml", SIGNALS)
+    path = write_file("scout.yaml", ANALYZE_CONFIG)
+    assert runner.invoke(app, ["analyze", "-c", str(path)]).exit_code == 0
+    again = runner.invoke(app, ["analyze", "-c", str(path)])
+    assert "refreshed [warning]" in again.output
+    with SqliteStore(path.parent / "scout.db") as store:
+        assert len(store.list_recommendations()) == 1
+
+
+def test_analyze_reports_an_outage_as_unknown(write_file, monkeypatch):
+    _stub_prometheus(monkeypatch, status=503)
+    write_file("signals.yaml", SIGNALS)
+    path = write_file("scout.yaml", ANALYZE_CONFIG)
+    result = runner.invoke(app, ["analyze", "-c", str(path), "--dry-run"])
+    assert result.exit_code == 1
+    assert "unknown disk-filling: prometheus:" in result.output
+
+
+def test_analyze_needs_prometheus_and_signals(write_file):
+    path = write_file("scout.yaml", "store: {path: scout.db}\n")
+    result = runner.invoke(app, ["analyze", "-c", str(path)])
+    assert result.exit_code == 1 and "prometheus_url is not set" in result.output
