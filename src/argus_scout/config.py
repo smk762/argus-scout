@@ -294,10 +294,16 @@ class ServerConfig(_Section):
     host: str = "127.0.0.1"
     port: int = Field(default=8400, ge=1, le=65535)
     read_only: bool = True
-    """Refuse every state-changing route. Turn off only once a token is set."""
+    """Refuse every state-changing route (webhook pushes included). Turn off only once a token is set."""
     allowed_origins: list[str] = Field(default_factory=list)
+    """Browser origins trusted to make writes (``https://ui.example``). No ``Origin`` header (curl, scripts) and
+    a same-host IP or ``localhost`` origin are always allowed; any other cross-origin write is refused."""
     token_env: EnvName | None = "SCOUT_API_TOKEN"
-    """Env var holding the bearer token for write routes."""
+    """Env var holding the bearer token for write routes. Unset or empty means every write route is closed."""
+    read_auth: bool = False
+    """Require the same bearer token on the read API (``/api/*`` GETs and ``/wall``). Off by default: scout binds
+    to loopback, where reaching the port is already host access. Turn it on before binding anywhere else.
+    ``/health`` and ``/metrics`` stay open either way."""
 
 
 class ScoutConfig(_Section):

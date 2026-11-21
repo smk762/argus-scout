@@ -296,7 +296,9 @@ def serve(
         None, "--config", "-c", exists=True, dir_okay=False, help="scout.yaml; refuses to start if it is invalid."
     ),
     host: str | None = typer.Option(
-        None, help="Bind address [default: server.host, else 127.0.0.1]. Scout has no auth yet: keep it on loopback."
+        None,
+        help="Bind address [default: server.host, else 127.0.0.1]. Reads are open unless server.read_auth: "
+        "keep it on loopback.",
     ),
     port: int | None = typer.Option(None, help="[default: server.port, else 8400]"),
 ) -> None:
@@ -310,6 +312,8 @@ def serve(
             raise typer.Exit(1) from exc
     host = host or config.server.host
     port = port or config.server.port
+    if host not in ("127.0.0.1", "::1", "localhost") and not config.server.read_auth:
+        typer.echo(f"warning: binding {host} with server.read_auth off: anyone who reaches it can read", err=True)
     try:
         import uvicorn
 

@@ -7,8 +7,8 @@ touches the hosts it reports on. Anything it recommends is carried out by a pers
 Part of the [Argus suite](https://github.com/smk762/argus-cortex/blob/dev/SUITE.md). Where
 [argus-herald](https://github.com/smk762/argus-herald) broadcasts out to the public, scout reports in to you.
 
-> **Status: pre-alpha.** The policy core is here (below). Prometheus signals, LLM briefings, delivery channels and the
-> HTTP API are being built in phases; see the development epic in this repo's issues.
+> **Status: pre-alpha.** The policy core, signals and the HTTP API are here. LLM briefings and delivery channels are
+> being built in phases; see the development epic in this repo's issues.
 
 ## What's here
 
@@ -45,6 +45,40 @@ argus-scout serve --config config/scout.yaml
 
 Relative paths resolve against the config file's directory. Scout refuses to start on an invalid `scout.yaml` (unknown
 keys included); the policy files it names are reloaded while it runs, and a bad edit to one falls back to defaults.
+
+## HTTP API
+
+`argus-scout serve` runs the scheduler and the API (the `[server]` extra). Reaching the port is host access, so the
+defaults are closed: scout binds to `127.0.0.1`, `server.read_only: true` refuses every write, and with no token set
+every write is refused too.
+
+| Method | Path | Auth | What |
+|---|---|---|---|
+| POST | `/api/events/{source}` | the source's `token_env`, else the server token | Push one status event or a list (256 KiB max, 100 events); all or nothing. Returns each event's inbox outcome. 404 unknown source, 405 a polled source. |
+| POST | `/api/events/{source}/{event_id}/ack` | server token | `{"by": "sam"}` |
+| POST | `/api/recommendations/{id}/approve` | server token | `{"by": "sam", "reason": "..."}`: a manual approval, recorded in the audit trail. Proposed only. |
+| POST | `/api/recommendations/{id}/reject` | server token | `{"by": "sam", "reason": "..."}` |
+| GET | `/api/events` | read auth | Open events, grouped by fingerprint |
+| GET | `/api/recommendations?status=proposed` | read auth | Recommendations; `/api/recommendations/{id}` adds the history |
+| GET | `/api/reports/latest?kind=morning` | read auth | The newest report |
+| GET | `/api/policy/explain` | read auth | The effective heartbeat policy, where each key came from, and the rule deciding each open item now |
+| GET | `/wall` | read auth | The latest report and open items as plain text |
+| GET | `/health`, `/metrics` | none | |
+
+**Writes** need `Authorization: Bearer <token>`, the value of the variable `server.token_env` names
+(`SCOUT_API_TOKEN`); unset is a 503, wrong a 401. A webhook source with its own `token_env` accepts only that
+token, and only for pushes as that source. Every write is also refused (403) while `server.read_only` is on, and
+when a browser sends it from an origin not in `server.allowed_origins`. Bodies are capped (413). Nothing moves a
+recommendation past `approved`: there is no deploy route.
+
+**Reads** are open by default (loopback only). Set `server.read_auth: true` to require the same token on `/api/*`
+and `/wall`, and do that before binding anywhere but `127.0.0.1`.
+
+```bash
+curl -s -X POST localhost:8400/api/events/nas -H "Authorization: Bearer $SCOUT_API_TOKEN" \
+  -d '{"event_id": "disk", "severity": "warning", "summary": "Disk 90% full"}'
+curl -s localhost:8400/wall
+```
 
 ## Try it
 

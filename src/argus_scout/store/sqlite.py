@@ -33,9 +33,18 @@ import structlog
 
 from argus_scout.approvals import StandingRule
 from argus_scout.events import StatusEvent, parse_dt
-from argus_scout.recommendations import Recommendation, Status
+from argus_scout.recommendations import TRANSITIONS, Recommendation, Status
 from argus_scout.severity import Severity
-from argus_scout.store.base import InboxEntry, JobRun, Report, Transition
+from argus_scout.store.base import (
+    UNCHECKED,
+    IllegalTransition,
+    InboxEntry,
+    JobRun,
+    Report,
+    StaleRecommendation,
+    Transition,
+    Unchecked,
+)
 
 log = structlog.get_logger()
 
@@ -355,15 +364,32 @@ class SqliteStore:
         return {r["fingerprint"]: r["n"] for r in rows}
 
     # -- recommendations ---------------------------------------------------------
-    def save_recommendation(self, rec: Recommendation, *, by: str | None = None, reason: str | None = None) -> None:
+    def save_recommendation(
+        self,
+        rec: Recommendation,
+        *,
+        by: str | None = None,
+        reason: str | None = None,
+        expected_status: Status | None | Unchecked = UNCHECKED,
+    ) -> None:
         """Insert or update ``rec``. A new row or a status change appends a transition.
 
         ``by`` names who made the change (a standing approval defaults to
         ``rule:<id>``); ``reason`` defaults to the rejection reason on a reject.
+
+        The check and the write share one ``BEGIN IMMEDIATE`` transaction, so they can't interleave with
+        another writer: a stored status other than ``expected_status`` raises :class:`StaleRecommendation`,
+        and a status change the lifecycle forbids raises :class:`IllegalTransition`, writing nothing.
         """
         with self._tx() as conn:
             row = conn.execute("SELECT status FROM recommendations WHERE id = ?", (rec.id,)).fetchone()
             prior = Status(row["status"]) if row else None
+            if not isinstance(expected_status, Unchecked) and prior != expected_status:
+                stored = prior.value if prior else "absent"
+                expected = expected_status.value if expected_status else "absent"
+                raise StaleRecommendation(f"recommendation {rec.id} is {stored}, not {expected} as loaded")
+            if prior is not None and prior != rec.status and rec.status not in TRANSITIONS[prior]:
+                raise IllegalTransition(f"recommendation {rec.id}: {prior.value} -> {rec.status.value} is not allowed")
             conn.execute(
                 """INSERT INTO recommendations (id, status, analyzer, key, created_at, updated_at, data)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
