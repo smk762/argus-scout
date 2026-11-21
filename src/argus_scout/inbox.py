@@ -5,7 +5,9 @@
 - :meth:`Inbox.ingest` validates and normalises an envelope, upserts it by ``(source, event_id)``
   and says what it was (:class:`Outcome`): new, a duplicate of an open event with the same
   fingerprint, an escalation, an update, or a re-sighting of something already known.
-- :meth:`Inbox.ack` acknowledges one event; :meth:`Inbox.open` lists the unacked, unexpired ones;
+- :meth:`Inbox.ack` acknowledges one event (a person); :meth:`Inbox.resolve_missing` closes the events a
+  polled source stopped reporting (scout: ``resolved_at``, never ``acked_by``); :meth:`Inbox.open` lists the
+  unacked, unresolved, unexpired ones;
   :meth:`Inbox.open_grouped` collapses open events that share a fingerprint.
 
 **It only records.** The inbox never moves a recommendation and never sends anything: deciding
@@ -21,7 +23,7 @@ level is read as ``info``, so a producer with its own vocabulary still gets thro
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -56,6 +58,8 @@ class Outcome(StrEnum):
     """A known event whose content changed without escalating. It is reopened if it was acked."""
     REFRESHED = "refreshed"
     """A known event seen again unchanged (a poller's usual case). Ack and announce state are kept."""
+    RECURRED = "recurred"
+    """A known event that had been resolved (cleared at its source) is back. It is open again, as new news."""
 
 
 @dataclass(frozen=True)
@@ -72,7 +76,7 @@ class IngestResult:
     @property
     def is_news(self) -> bool:
         """Whether this is something not already in the inbox in this form."""
-        return self.outcome in (Outcome.NEW, Outcome.ESCALATED, Outcome.UPDATED)
+        return self.outcome in (Outcome.NEW, Outcome.ESCALATED, Outcome.UPDATED, Outcome.RECURRED)
 
 
 @dataclass
@@ -256,7 +260,9 @@ class Inbox:
             result = IngestResult(Outcome.DUPLICATE if duplicates else Outcome.NEW, event, duplicate_of=duplicates)
         else:
             previous = before.event.severity
-            if before.fingerprint == event.fingerprint:
+            if before.resolved_at is not None:
+                outcome = Outcome.RECURRED
+            elif before.fingerprint == event.fingerprint:
                 outcome = Outcome.REFRESHED
             elif rank(event.severity) > rank(previous):
                 outcome = Outcome.ESCALATED
@@ -283,8 +289,18 @@ class Inbox:
         log.info("inbox.ack", source=source, event_id=event_id, by=by, acked=acked)
         return acked
 
+    def resolve_missing(self, source: str, present: Iterable[str]) -> list[str]:
+        """Resolve ``source``'s events whose ids are not in ``present``: the source's latest full report no longer
+        lists them, so the condition cleared. A system-side close, never an ack; seeing one again reopens it
+        (:attr:`Outcome.RECURRED`). Returns the ids resolved. Call it only with a *complete, successful* view."""
+        with self._lock:
+            resolved = self.store.resolve_missing(source, present, at=self.now())
+        if resolved:
+            log.info("inbox.resolved", source=source, count=len(resolved), event_ids=resolved[:20])
+        return resolved
+
     def open(self) -> list[StatusEvent]:
-        """Unacked, unexpired events, oldest first."""
+        """Unacked, unresolved, unexpired events, oldest first."""
         return self.store.open_events(now=self.now())
 
     def open_grouped(self) -> list[EventGroup]:

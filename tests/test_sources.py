@@ -125,6 +125,82 @@ def test_map_response_with_stable_ids_and_skips():
     assert map_response(POLL, worse).events[0].event_id == mapped.events[1].event_id
 
 
+AM = JsonPollSource(
+    kind="json_poll",
+    name="am",
+    url="http://status.lan:9093/api/alerts",
+    items="alerts",
+    fields={"summary": "labels.alertname", "severity": "labels.severity"},
+)
+
+
+def _am(*instances: tuple[str, str]) -> dict:
+    return {
+        "alerts": [
+            {"labels": {"alertname": "HostDown", "instance": inst, "severity": sev}, "updatedAt": "now"}
+            for inst, sev in instances
+        ]
+    }
+
+
+def test_items_sharing_a_summary_get_distinct_stable_ids():
+    # The same alertname on two instances, nothing else mapped: two events, not one flipping between them.
+    first = map_response(AM, _am(("a", "warning"), ("b", "warning")))
+    ids = [e.event_id for e in first.events]
+    assert len(set(ids)) == 2
+    assert first.warnings and "set id:" in first.warnings[0]
+    assert [e.event_id for e in map_response(AM, _am(("a", "warning"), ("b", "warning"))).events] == ids
+    assert [e.event_id for e in map_response(AM, _am(("b", "warning"), ("a", "warning"))).events] == ids[::-1]
+
+
+def test_configured_id_paths_identify_items_across_severity_changes():
+    cfg = AM.model_copy(update={"id": ["labels.alertname", "labels.instance"]})
+    events = map_response(cfg, _am(("a", "warning"), ("b", "warning"))).events
+    assert [e.event_id for e in events] == ["am:HostDown/a", "am:HostDown/b"]
+    worse = map_response(cfg, _am(("b", "critical"))).events
+    assert [(e.event_id, e.severity) for e in worse] == [("am:HostDown/b", Severity.CRITICAL)]
+    single = AM.model_copy(update={"id": "labels.instance"})
+    assert map_response(single, _am(("a", "info"))).events[0].event_id == "am:a"
+    missing = map_response(single, {"alerts": [{"labels": {"alertname": "X"}}]})
+    assert missing.events == [] and missing.skipped == ["item 0: id: 'labels.instance' is not in the item"]
+
+
+def test_derived_id_ignores_volatile_fields_but_keeps_payload_identity():
+    cfg = JsonPollSource(kind="json_poll", name="jobs", url="http://backups:8080/status", items="jobs")
+    base = {"summary": "Backup late", "payload": {"job": "nas"}}
+    one = map_response(cfg, {"jobs": [{**base, "severity": "notice", "generated_at": 1, "body_md": "3h"}]})
+    two = map_response(cfg, {"jobs": [{**base, "severity": "warning", "generated_at": 2, "body_md": "4h"}]})
+    assert one.events[0].event_id == two.events[0].event_id
+    other = map_response(cfg, {"jobs": [{**base, "payload": {"job": "laptop"}}]})
+    assert other.events[0].event_id != one.events[0].event_id
+    assert not one.warnings
+
+
+def test_a_polled_item_cannot_post_as_another_source():
+    cfg = JsonPollSource(kind="json_poll", name="jobs", url="http://backups:8080/status", items="jobs")
+    mapped = map_response(
+        cfg,
+        {"jobs": [{"source": "ci", "summary": "spoof"}, {"source": "jobs", "summary": "mine"}, {"summary": "ok"}]},
+    )
+    assert [(e.source, e.summary) for e in mapped.events] == [("jobs", "mine"), ("jobs", "ok")]
+    assert mapped.skipped == ["item 0: source: 'ci' does not match polled source 'jobs'"]
+
+
+async def test_poll_result_is_incomplete_when_an_item_was_skipped():
+    cfg = JsonPollSource(kind="json_poll", name="jobs", url="http://backups:8080/status", items="jobs")
+
+    async def fetcher(url, **kw):
+        return reply({"jobs": [{"summary": "ok"}, {"nosummary": 1}]})
+
+    result = await poll_once(cfg, fetcher=fetcher)
+    assert [e.summary for e in result] == ["ok"] and result.complete is False
+
+    async def clean(url, **kw):
+        return reply({"jobs": [{"summary": "ok"}]})
+
+    assert (await poll_once(cfg, fetcher=clean)).complete is True
+
+
 def test_map_response_single_item_without_fields():
     cfg = JsonPollSource(kind="json_poll", name="backups", url="http://backups:8080/status")
     [event] = map_response(cfg, {"summary": "Last backup 3h ago", "severity": "notice", "extra": 1}).events
@@ -207,6 +283,8 @@ def test_allow_host():
 PLUGIN_MODULE = """
 from typing import Literal
 
+from pydantic import field_validator, model_validator
+
 from argus_scout.config import SourceSettings
 from argus_scout.events import StatusEvent
 
@@ -227,6 +305,47 @@ class Pigeon:
 
 class NotASource:
     pass
+
+
+class GrumpyConfig(SourceSettings):
+    kind: Literal["grumpy"]
+    mood: str = "fine"
+
+    @field_validator("mood")
+    @classmethod
+    def _check(cls, value):
+        return {"fine": value}[value]  # KeyError, not a ValueError: pydantic doesn't wrap it
+
+
+class Grumpy(Pigeon):
+    kind = "grumpy"
+    config_model = GrumpyConfig
+
+
+class RenamingConfig(SourceSettings):
+    kind: Literal["renaming"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rename(cls, data):
+        if data.get("name") == "boom":
+            raise TypeError("plugin bug")
+        return {**data, "name": "someone-else"}
+
+
+class Renaming(Pigeon):
+    kind = "renaming"
+    config_model = RenamingConfig
+
+
+class BadIntervalConfig(SourceSettings):
+    kind: Literal["badinterval"]
+    interval: str = "soon"
+
+
+class BadInterval(Pigeon):
+    kind = "badinterval"
+    config_model = BadIntervalConfig
 """
 
 
@@ -305,3 +424,31 @@ def test_bad_source_entries_do_not_stop_the_others(plugin_module):
     assert built.errors["missing"] == "pigeon: loft: Field required"
     assert "did not load" in built.errors["b"]
     assert built.errors["c"].startswith("unknown source kind 'carrier_pigeon' (installed: json_poll, pigeon, webhook")
+
+
+def test_a_plugin_model_raising_anything_fails_only_its_entry(plugin_module):
+    registry = load_registry(
+        [
+            ep("grumpy", f"{plugin_module}:Grumpy"),
+            ep("renaming", f"{plugin_module}:Renaming"),
+            ep("badinterval", f"{plugin_module}:BadInterval"),
+        ]
+    )
+    assert registry.errors == {}
+    config = parse_config(
+        {
+            "sources": [
+                {"kind": "grumpy", "name": "g", "mood": "cross"},
+                {"kind": "renaming", "name": "boom"},
+                {"kind": "renaming", "name": "r"},
+                {"kind": "badinterval", "name": "i"},
+                {"kind": "grumpy", "name": "ok"},
+            ]
+        }
+    )
+    built = build_sources(config, registry)
+    assert [s.name for s in built.sources] == ["ok"]
+    assert built.errors["g"] == "grumpy: KeyError: 'cross'"
+    assert built.errors["boom"] == "renaming: TypeError: plugin bug"
+    assert "must keep name 'r'" in built.errors["r"]
+    assert "interval must be a positive number" in built.errors["i"]

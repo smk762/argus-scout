@@ -12,7 +12,8 @@ These are the seams later phases fill in. The structure is already the real one:
   :func:`deliver`.
 - :class:`PollJob` polls one polling source and ingests what it returns through
   :meth:`Inbox.ingest <argus_scout.inbox.Inbox.ingest>`. Each source is its own job, so one failing source
-  never affects another.
+  never affects another. With the source's ``resolve_missing`` on, a successful, complete poll also resolves
+  the source's events it no longer lists (a cleared condition); a failed or partial poll resolves nothing.
 - :class:`AnalysisCycle` reloads the signal rules through :class:`~argus_scout.signals.SignalRulesFile`,
   evaluates them against Prometheus and hands the hits to the
   :class:`~argus_scout.engine.RecommendationEngine`. A bad rule is skipped; a file that won't parse skips
@@ -258,7 +259,13 @@ class BriefingJob:
 
 class PollJob:
     """Poll one source and ingest what it returns. A failed poll raises, so the scheduler counts and retries
-    it; an event the inbox refuses is logged and skipped, and the rest of the batch still lands."""
+    it; an event the inbox refuses is logged and skipped, and the rest of the batch still lands.
+
+    When the source config's ``resolve_missing`` is true (json_poll's default; a plugin opts in), the poll is
+    the source's whole current state, so its events missing from it are resolved through
+    :meth:`Inbox.resolve_missing <argus_scout.inbox.Inbox.resolve_missing>`: closed by scout, never acked as a
+    person. Only after a poll that returned, and only if the result isn't marked incomplete
+    (:class:`~argus_scout.sources.base.PollResult`): a failed or partial poll must never clear anything."""
 
     def __init__(self, source: BoundSource, inbox: Inbox) -> None:
         self.source = source
@@ -278,6 +285,12 @@ class PollJob:
             except InvalidEvent as exc:
                 batch["refused"] += 1
                 log.warning("poll.refused", source=self.source.name, error=str(exc))
+        if getattr(self.source.config, "resolve_missing", False):
+            if getattr(events, "complete", True):
+                present = [str(e.event_id or "").strip() for e in events]
+                batch["resolved"] += len(self.inbox.resolve_missing(self.source.name, present))
+            else:
+                log.warning("poll.resolve_skipped", source=self.source.name, reason="incomplete poll")
         self.outcomes.update(batch)
         log.info("poll.done", source=self.source.name, events=len(events), **dict(batch))
 
@@ -300,9 +313,9 @@ def register_jobs(
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source, and with a
     ``dispatcher``, the redelivery sweep (:class:`~argus_scout.channels.redeliver.RedeliveryJob`).
 
-    Job names are ``status``, ``analysis``, ``redeliver``, ``briefing:<kind>`` (``briefing:<kind>@HH:MM`` when a kind is
-    scheduled more than once) and ``poll:<source>``. The name keys the persisted bookkeeping, so keep it
-    stable. A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
+    Job names are ``status``, ``analysis``, ``redeliver``, ``briefing:<kind>@HH:MM`` and ``poll:<source>``. The name keys the
+    persisted bookkeeping, so keep it stable: a briefing's name depends only on its own kind and time, never on
+    how many others share the kind (adding one must not rename, and so re-fire, another). A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
     ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests); ``tariff``
     is the runtime's :class:`TariffFile` (one is made from ``files.tariff`` if not given), shared by the
     analysis cycle and the narrative. ``narrator`` overrides the one built from the config (its model calls
@@ -331,9 +344,8 @@ def register_jobs(
         clock=clock,
     )
     scheduler.add("analysis", analysis, Every(schedule.analysis_interval))
-    kinds = Counter(b.kind for b in schedule.briefings)
     for briefing in schedule.briefings:
-        name = f"briefing:{briefing.kind}" + (f"@{briefing.at}" if kinds[briefing.kind] > 1 else "")
+        name = f"briefing:{briefing.kind}@{briefing.at}"
         job = BriefingJob(briefing.kind, store, narrator=narrator, deliver=deliver, clock=clock)
         scheduler.add(name, job, DailyAt(briefing.at_time, schedule.tz))
     for source in sources.polling:

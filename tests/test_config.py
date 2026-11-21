@@ -103,6 +103,21 @@ services:
         ("sources: [{kind: json_poll, name: a, url: ftp://x}]\n", "not an http(s) URL"),
         ("schedule: {briefings: [{kind: morning, at: '7:30'}]}\n", "HH:MM"),
         ("schedule: {timezone: Mars/Olympus}\n", "unknown timezone"),
+        (
+            "schedule: {briefings: [{kind: morning, at: '07:30'}, {kind: morning, at: '07:30'}]}\n",
+            "duplicate briefing: morning at 07:30",
+        ),
+        ("sources: [{kind: [webhook], name: a}]\n", "sources.0.plugin.kind: Input should be a valid string"),
+        ("sources: [{kind: {x: 1}, name: a}]\n", "sources.0.plugin.kind: Input should be a valid string"),
+        (
+            "sources: [{kind: json_poll, name: a, url: http://x, fields: {source: s}}]\n",
+            "source can't be mapped",
+        ),
+        (
+            "sources: [{kind: json_poll, name: a, url: http://status.lan, id: k, fields: {event_id: k}}]\n",
+            "set id or fields.event_id, not both",
+        ),
+        ("sources: [{kind: json_poll, name: a, url: http://x, id: []}]\n", "non-empty list"),
         ("server: {token_env: 'hunter2 is my password'}\n", "not an environment variable name"),
         ("- a list\n", "expected a mapping"),
         ("server: [unclosed\n", "invalid YAML"),
@@ -117,6 +132,31 @@ def test_invalid_config_raises(write_file, text, expected):
 def test_missing_config_raises(tmp_path):
     with pytest.raises(ConfigError, match="cannot read config"):
         load_config(tmp_path / "nope.yaml")
+
+
+def test_entries_commented_out_at_any_depth_read_as_empty(write_file):
+    text = """
+schedule:
+  briefings:
+    # - {kind: morning, at: "07:30"}
+server:
+  allowed_origins:
+    # - https://ui.example
+budget:
+  limits:
+    # llm_calls: 100
+sources:
+  - kind: json_poll
+    name: poll
+    url: http://status.lan/
+    fields:
+      # summary: message
+files:
+"""
+    config = load_config(write_file("scout.yaml", text), load_env=False)
+    assert config.schedule.briefings == [] and config.server.allowed_origins == []
+    assert config.budget.limits == {} and config.sources[0].fields == {}
+    assert config.files.heartbeat is None
 
 
 def test_empty_config_is_all_defaults(write_file):

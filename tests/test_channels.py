@@ -493,6 +493,8 @@ async def test_webhook_refuses_to_send_without_its_secrets_or_to_another_host():
 PLUGIN_MODULE = """
 from typing import Literal
 
+from pydantic import field_validator
+
 from argus_scout.channels import DeliveryResult
 from argus_scout.config import ChannelSettings
 
@@ -532,6 +534,21 @@ class Grumpy(Bell):
 
 class NotAChannel:
     pass
+
+
+class TouchyConfig(ChannelSettings):
+    kind: Literal["touchy"]
+    level: str = "ok"
+
+    @field_validator("level")
+    @classmethod
+    def _check(cls, value):
+        return {"ok": value}[value]  # KeyError: pydantic doesn't wrap it in a ValidationError
+
+
+class Touchy(Bell):
+    kind = "touchy"
+    config_model = TouchyConfig
 """
 
 
@@ -614,6 +631,24 @@ def test_bad_channel_entries_do_not_stop_the_others(plugin_module, tmp_path):
     assert "could not start" in built.errors["grump"]
     assert "did not load" in built.errors["b"]
     assert "unknown channel kind" in built.errors["c"]
+
+
+def test_a_plugin_model_raising_anything_fails_only_its_channel(plugin_module, tmp_path):
+    registry = load_registry([ep("touchy", f"{plugin_module}:Touchy")])
+    config = parse_config(
+        {"channels": [{"kind": "touchy", "name": "t", "level": "cross"}, {"kind": "touchy", "name": "fine"}]},
+        tmp_path,
+    )
+    built = build_channels(config, registry)
+    assert [c.name for c in built.channels] == ["fine"]
+    assert built.errors["t"] == "touchy: KeyError: 'cross'"
+
+
+def test_channel_kind_that_is_not_text_is_a_config_error():
+    for kind in (["text"], {"x": 1}):
+        with pytest.raises(ConfigError, match="channels.0.plugin.kind: Input should be a valid string"):
+            parse_config({"channels": [{"kind": kind, "name": "a"}]})
+    assert parse_config({"channels": [{"kind": "text", "name": "a", "kinds": None}]}).channels[0].kinds == []
 
 
 def test_channel_config():
@@ -703,7 +738,7 @@ async def test_a_briefing_job_writes_its_report_to_the_text_channel_once(tmp_pat
     )
     store = SqliteStore(":memory:")
     runtime = build_runtime(config, store=store, clock=lambda: T0)
-    assert await runtime.scheduler.run_now("briefing:morning")
+    assert await runtime.scheduler.run_now("briefing:morning@07:30")
     [stored] = store.list_reports(kind="morning")
     log = (tmp_path / "scout-reports.log").read_text()
     assert log.count(f"report:{stored.id}") == 1

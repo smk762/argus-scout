@@ -17,6 +17,14 @@ COPY . .
 
 RUN uv pip install --system --no-cache ".[server]"
 
+# Mount a config directory at /config (scout.yaml, its .env, and the files it names). Relative paths in
+# scout.yaml resolve against it, so the default store (scout.db) lands there too and survives restarts.
+# Point SCOUT_CONFIG elsewhere to use another file. `serve` refuses to start without a valid config.
+ENV SCOUT_CONFIG=/config/scout.yaml
+VOLUME ["/config"]
+
 EXPOSE 8400
-CMD ["uvicorn", "argus_scout.server.app:app", "--host", "0.0.0.0", "--port", "8400"]
+# Bound off loopback inside the container: set server.read_auth: true unless only trusted hosts reach the port
+# (serve warns when it is off).
+CMD ["argus-scout", "serve", "--host", "0.0.0.0", "--port", "8400"]
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -433,9 +434,110 @@ async def test_register_jobs_from_config(store):
     clock = FakeClock(local(2026, 6, 1, 7, 29))
     sched = make_scheduler(clock, store)
     register_jobs(sched, config, store, PolicyFile(None), sources=Sources())
-    assert set(sched.jobs) == {"status", "analysis", "briefing:morning", "briefing:evening"}
+    assert set(sched.jobs) == {"status", "analysis", "briefing:morning@07:30", "briefing:evening@19:00"}
     assert sorted(await sched.tick(wait=True)) == ["analysis", "status"]
     clock.set(local(2026, 6, 1, 7, 30))
-    assert await sched.tick(wait=True) == ["briefing:morning"]
-    briefing = sched.jobs["briefing:morning"].func
+    assert await sched.tick(wait=True) == ["briefing:morning@07:30"]
+    briefing = sched.jobs["briefing:morning@07:30"].func
     assert isinstance(briefing, BriefingJob) and briefing.runs == [clock()]
+
+
+def test_briefing_job_names_do_not_depend_on_how_many_share_a_kind(store):
+    def names(briefings):
+        sched = make_scheduler(FakeClock(T0), store)
+        register_jobs(
+            sched, parse_config({"schedule": {"briefings": briefings}}), store, PolicyFile(None), sources=Sources()
+        )
+        return {n for n in sched.jobs if n.startswith("briefing:")}
+
+    one = names([{"kind": "morning", "at": "07:30"}])
+    two = names([{"kind": "morning", "at": "07:30"}, {"kind": "morning", "at": "09:00"}])
+    assert one == {"briefing:morning@07:30"}
+    assert one < two  # adding a second morning briefing doesn't rename (and so re-fire) the first
+
+
+# -- cleared polled conditions -----------------------------------------------------------------------------------
+
+
+class ResolvingConfig(BaseModel):
+    name: str
+    interval: float = 60.0
+    resolve_missing: bool = True
+
+
+async def test_poll_job_resolves_events_missing_from_a_successful_poll(store):
+    clock = FakeClock(T0)
+    inbox = Inbox(store, clock=clock)
+    plugin = FakePoller(
+        {"alerts": [{"event_id": "disk", "summary": "Disk full"}, {"event_id": "ups", "summary": "UPS"}]}
+    )
+    job = PollJob(BoundSource(plugin, ResolvingConfig(name="alerts")), inbox)
+    await job()
+    inbox.ack("alerts", "ups", "sam")
+    plugin.replies["alerts"] = [{"event_id": "ups", "summary": "UPS"}]
+    await job()
+    assert [e.event_id for e in inbox.open()] == []  # disk cleared, ups acked
+    disk = store.get_entry("alerts", "disk")
+    assert disk.resolved_at == T0 and disk.acked_by is None and disk.event.acked_at is None
+    assert store.get_entry("alerts", "ups").acked_by == "sam" and store.get_entry("alerts", "ups").resolved_at is None
+    assert store.open_event_counts(now=clock())["warning"] == 0
+    assert job.outcomes["resolved"] == 1
+
+    # A failed poll resolves nothing.
+    plugin.replies["alerts"] = SourceError("503")
+    with pytest.raises(SourceError):
+        await job()
+    assert store.get_entry("alerts", "ups").resolved_at is None
+
+    # It comes back: open again, as news.
+    clock.set(T0 + timedelta(minutes=5))
+    plugin.replies["alerts"] = [{"event_id": "disk", "summary": "Disk full"}]
+    await job()
+    assert [e.event_id for e in inbox.open()] == ["disk"]
+    assert job.outcomes["recurred"] == 1
+    assert store.get_entry("alerts", "disk").resolved_at is None
+    assert store.get_entry("alerts", "ups").resolved_at == clock()  # ups (acked) cleared now; its ack is kept
+    assert store.get_entry("alerts", "ups").acked_by == "sam"
+
+
+async def test_poll_job_resolves_nothing_on_an_incomplete_poll_or_when_off(store):
+    from argus_scout.sources import PollResult
+
+    inbox = Inbox(store)
+    event = StatusEvent.from_dict({"source": "alerts", "event_id": "disk", "summary": "Disk full"})
+
+    class Partial(FakePoller):
+        async def poll(self, cfg):
+            return PollResult([], complete=False)
+
+    inbox.ingest(event)
+    await PollJob(BoundSource(Partial({}), ResolvingConfig(name="alerts")), inbox)()
+    await PollJob(BoundSource(FakePoller({"alerts": []}), FakeConfig(name="alerts")), inbox)()  # no resolve_missing
+    off = ResolvingConfig(name="alerts", resolve_missing=False)
+    await PollJob(BoundSource(FakePoller({"alerts": []}), off), inbox)()
+    assert [e.event_id for e in inbox.open()] == ["disk"]
+
+
+async def test_json_poll_cleared_item_resolves_end_to_end(store):
+    from argus_cortex.net import Reply
+
+    from argus_scout.config import JsonPollSource
+    from argus_scout.sources.json_poll import JsonPoll, poll_once
+
+    cfg = JsonPollSource(kind="json_poll", name="jobs", url="http://backups:8080/status", items="jobs")
+    assert cfg.resolve_missing is True
+    body = {"jobs": [{"summary": "nas late"}, {"summary": "laptop late"}]}
+
+    class Poller(JsonPoll):
+        async def poll(self, cfg):
+            async def fetcher(url, **kw):
+                return Reply(200, {}, json.dumps(body).encode(), url)
+
+            return await poll_once(cfg, fetcher=fetcher)
+
+    inbox = Inbox(store)
+    job = PollJob(BoundSource(Poller(), cfg), inbox)
+    await job()
+    body = {"jobs": [{"summary": "laptop late"}]}
+    await job()
+    assert [e.summary for e in inbox.open()] == ["laptop late"]
