@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
 import argus_scout
+from argus_scout.approvals import StandingApprovals
 from argus_scout.budget import USAGE_STATE_FILE, DailyBudget, ManualOriginMiddleware, budget_from_config
 from argus_scout.channels import Channels, Delivery, Dispatcher, DispatchReport, Synthesiser, build_dispatcher
 from argus_scout.config import ScoutConfig
@@ -55,6 +56,8 @@ class Runtime:
     sources: Sources = field(default_factory=Sources)
     channels: Channels = field(default_factory=Channels)
     dispatcher: Dispatcher = field(default_factory=lambda: Dispatcher([]))
+    approvals: StandingApprovals = field(default_factory=StandingApprovals)
+    """File and runtime standing rules, shared by the analysis cycle and the approval routes."""
 
     async def deliver(self, report: Report, *, force: bool = False) -> DispatchReport:
         """Send a stored report to every channel that should get it. The scheduler's briefing and status jobs
@@ -107,6 +110,7 @@ def build_runtime(
         budget=budget,
         clock=clock,
     )
+    approvals = StandingApprovals(config.files.approvals, store=store)
     register_jobs(
         scheduler,
         config,
@@ -119,6 +123,7 @@ def build_runtime(
         budget=budget,
         deliver=deliver_reports(dispatcher),
         dispatcher=dispatcher,
+        approvals=approvals,
     )
     collector = ScoutCollector(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
@@ -136,6 +141,7 @@ def build_runtime(
         sources=sources,
         channels=channels,
         dispatcher=dispatcher,
+        approvals=approvals,
     )
 
 

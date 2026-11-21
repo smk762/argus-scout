@@ -184,6 +184,15 @@ Two guardrails no rule can override, both enforced by tests:
   where a guardrail applies, the engine retires it ("escalated past standing approval: critical signal") and
   raises a fresh `proposed` one for the same key at the new severity, which no rule can approve.
 
+Rules come from two places, both listed by `GET /api/approvals/rules` with their `origin`:
+
+- **The file** (`origin: file`): edit `files.approvals`; it is reloaded when it changes. The API can't delete these.
+- **Runtime** (`origin: api`): an approve with `standing` ("approve, and keep approving things like this, for this
+  analyzer, until a date") creates one from the recommendation it approves, kept in the store (so it survives a
+  restart) with `created_by`. `DELETE /api/approvals/rules/{rule_id}` removes one. The guardrails apply when it is
+  created too: asking for a standing rule from a high-impact or critical proposal is a 422 and approves nothing, so
+  the person isn't left with half of what they asked for. See [api.md](api.md#standing-rules).
+
 People approve and reject through the API (`POST /api/recommendations/{id}/approve` or `/reject`, with `by` and
 an optional `reason`); see [api.md](api.md). The lifecycle is draft, then proposed, then approved, rejected or
 retired, with every transition in the audit trail (`GET /api/recommendations/{id}`). `deployed` exists in the
