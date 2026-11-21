@@ -41,6 +41,7 @@ from argus_scout.store.base import (
     IllegalTransition,
     InboxEntry,
     JobRun,
+    PendingDelivery,
     Report,
     StaleRecommendation,
     Transition,
@@ -172,6 +173,14 @@ MIGRATIONS: tuple[str, ...] = (
         used INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (day, kind)
     );
+    """,
+    # 8: failed deliveries the channel refused permanently (a 4xx), which the redelivery sweep never retries: one
+    # row per such attempt. A side table, not a column, so replaying the migration is harmless.
+    """
+    CREATE TABLE IF NOT EXISTS delivery_refusals (
+        delivery_id INTEGER PRIMARY KEY REFERENCES deliveries (id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS deliveries_report ON deliveries (report_id, channel);
     """,
 )
 
@@ -632,6 +641,7 @@ class SqliteStore:
             report_id=row["report_id"],
             event_source=row["event_source"],
             event_id=row["event_id"],
+            permanent=bool(row["permanent"]),
         )
 
     def record_delivery(
@@ -645,9 +655,11 @@ class SqliteStore:
         report_id: int | None = None,
         event_source: str | None = None,
         event_id: str | None = None,
+        permanent: bool = False,
     ) -> bool:
         """Record one delivery attempt. Returns False when ``ok`` and the message was already recorded as
-        sent on this channel (nothing is written then: a message is sent at most once per channel)."""
+        sent on this channel (nothing is written then: a message is sent at most once per channel).
+        ``permanent`` marks a failure the channel refused for good, which is never retried."""
         with self._tx() as conn:
             cur = conn.execute(
                 """INSERT OR IGNORE INTO deliveries
@@ -655,7 +667,34 @@ class SqliteStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (delivery_key, channel, report_id, event_source, event_id, _ts(_now(at)), int(ok), error),
             )
+            if cur.rowcount > 0 and permanent and not ok:
+                conn.execute("INSERT INTO delivery_refusals (delivery_id) VALUES (?)", (cur.lastrowid,))
             return cur.rowcount > 0
+
+    def undelivered_reports(self, since: datetime, *, max_failures: int) -> list[PendingDelivery]:
+        """Report deliveries worth retrying: a report written at or after ``since`` and a channel it was tried on
+        with no success, no permanent refusal and fewer than ``max_failures`` failed attempts. Oldest first.
+        A channel the report was never tried on (filtered, held back, added later) is not listed."""
+        rows = self._query(
+            """SELECT r.id, r.kind, r.generated_at, r.text, r.meta,
+                      d.channel, COUNT(*) AS failures, MAX(d.at) AS last_at
+                 FROM deliveries d JOIN reports r ON r.id = d.report_id
+                 LEFT JOIN delivery_refusals x ON x.delivery_id = d.id
+                WHERE r.generated_at >= ? AND d.delivery_key = 'report:' || r.id
+                GROUP BY r.id, d.channel
+               HAVING SUM(d.ok) = 0 AND COUNT(x.delivery_id) = 0 AND COUNT(*) < ?
+                ORDER BY r.generated_at, r.id, d.channel""",
+            (_ts(since), int(max_failures)),
+        )
+        return [
+            PendingDelivery(
+                report=self._report_from_row(r),
+                channel=r["channel"],
+                failures=r["failures"],
+                last_at=_dt(r["last_at"]),  # type: ignore[arg-type]
+            )
+            for r in rows
+        ]
 
     def delivered_channels(self, delivery_key: str) -> set[str]:
         """The channels this message was successfully delivered on."""
@@ -669,12 +708,15 @@ class SqliteStore:
 
     def list_deliveries(self, delivery_key: str | None = None, *, limit: int = 100) -> list[DeliveryRecord]:
         """Delivery attempts, newest first, optionally for one message."""
-        sql = "SELECT * FROM deliveries"
+        sql = (
+            "SELECT d.*, x.delivery_id IS NOT NULL AS permanent FROM deliveries d"
+            " LEFT JOIN delivery_refusals x ON x.delivery_id = d.id"
+        )
         params: list[Any] = []
         if delivery_key is not None:
-            sql += " WHERE delivery_key = ?"
+            sql += " WHERE d.delivery_key = ?"
             params.append(delivery_key)
-        sql += " ORDER BY at DESC, id DESC LIMIT ?"
+        sql += " ORDER BY d.at DESC, d.id DESC LIMIT ?"
         params.append(int(limit))
         return [self._delivery_from_row(r) for r in self._query(sql, params)]
 

@@ -15,7 +15,9 @@ A channel that speaks is a :class:`VoiceChannel`, which also has
   speakers cost one synthesis and say exactly the same thing.
 
 A channel fails by raising (any exception; :class:`ChannelError` for an expected failure) or by returning
-a result with ``ok=False``. Either way the dispatcher records it and the other channels carry on.
+a result with ``ok=False``. Either way the dispatcher records it and the other channels carry on. A failure
+that retrying can't fix is ``ChannelError(..., permanent=True)`` (or ``DeliveryResult(permanent=True)``): the
+redelivery sweep then leaves it alone.
 
 **Delivery only.** A channel sends a message to the place its config names. It never triggers an action on
 a monitored host, and outbound HTTP goes only to the channel's configured URL through ``argus_cortex.net``.
@@ -63,7 +65,20 @@ def plain_speech(text: str) -> str:
 
 
 class ChannelError(Exception):
-    """A channel could not deliver (an expected failure: refused, unreachable, misconfigured)."""
+    """A channel could not deliver (an expected failure: refused, unreachable, misconfigured).
+
+    ``permanent=True`` says trying the same message again can't help (the receiver refused it: a 4xx other than
+    408 or 429). The redelivery sweep never retries a permanent failure; anything else it retries.
+    """
+
+    def __init__(self, message: str = "", *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+class SynthesisError(ChannelError):
+    """Speech could not be synthesised. The dispatcher records it as a failure on every voice channel in play
+    (permanent if this is), and text channels are unaffected."""
 
 
 @dataclass(frozen=True)
@@ -153,6 +168,10 @@ class SpeechAudio:
     text: str = ""
     """What was said."""
     voice: str | None = None
+    cloned: bool = False
+    """The voice is a clone (possibly of a real person), not a synthetic one. A channel that can't disclose that to
+    its audience refuses such audio unless its config allows it (``mask``: ``allow_cloned_voice``). A synthesiser
+    that can't tell sets it whenever it asked for a clone."""
 
 
 DeliveryStatus = Literal["sent", "failed", "duplicate", "filtered", "disabled", "suppressed", "skipped"]
@@ -179,6 +198,8 @@ class DeliveryResult:
     error: str | None = None
     channel: str = ""
     status: DeliveryStatus | None = None
+    permanent: bool = False
+    """A failure (or a skip) retrying can't fix (see :class:`ChannelError`); the redelivery sweep leaves it alone."""
 
 
 @runtime_checkable
@@ -199,7 +220,10 @@ class Synthesiser(Protocol):
     """Text to speech. argus-echo implements it; scout calls it at most once per delivery."""
 
     async def synthesise(self, text: str, message: Delivery) -> SpeechAudio | None:
-        """Speech for ``text``, or None when nothing can be synthesised (voice is then skipped)."""
+        """Speech for ``text``, or None when there is no engine to ask (voice is then skipped, unrecorded).
+
+        An engine that is configured but fails (down, busy, refused) raises, preferably :class:`SynthesisError`:
+        the dispatcher then records a failure on every voice channel, which the redelivery sweep may retry."""
         ...
 
 
@@ -220,6 +244,7 @@ __all__ = [
     "DeliveryStatus",
     "NullSynthesiser",
     "SpeechAudio",
+    "SynthesisError",
     "Synthesiser",
     "VoiceChannel",
     "plain_speech",

@@ -121,6 +121,7 @@ def build_runtime(
         tariff=tariff,
         budget=budget,
         deliver=deliver_reports(dispatcher),
+        dispatcher=dispatcher,
     )
     collector = ScoutCollector(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock

@@ -211,6 +211,7 @@ class Dispatcher:
                 bound.name,
                 ok=result.status == "sent",
                 error=result.error,
+                permanent=result.permanent and result.status != "sent",
                 at=self.clock(),
                 report_id=message.report_id,
                 event_source=event.source if event else None,
@@ -229,7 +230,11 @@ class Dispatcher:
         except TimeoutError:
             result = DeliveryResult(ok=False, error=f"timed out after {bound.timeout:g}s")
         except Exception as exc:  # noqa: BLE001 — a failing channel never affects the others
-            result = DeliveryResult(ok=False, error=f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
+            result = DeliveryResult(
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+                permanent=bool(getattr(exc, "permanent", False)),
+            )
         skipped = result.ok and result.status == "skipped"  # the channel declined (device not ready): not a failure
         result = replace(result, channel=bound.name, status="skipped" if skipped else "sent" if result.ok else "failed")
         if not result.ok and not result.error:
@@ -262,9 +267,13 @@ class Dispatcher:
             audio = await self._synthesise(message)
         except Exception as exc:  # noqa: BLE001 — a synthesis failure fails voice, not text
             error = "speech synthesis timed out" if isinstance(exc, TimeoutError) else f"speech synthesis failed: {exc}"
+            permanent = bool(getattr(exc, "permanent", False))
+            log.warning("dispatch.synthesis_failed", key=message.key, error=error, permanent=permanent)
             failures = []
             for bound in voice:
-                failure = DeliveryResult(ok=False, error=error, channel=bound.name, status="failed")
+                failure = DeliveryResult(
+                    ok=False, error=error, channel=bound.name, status="failed", permanent=permanent
+                )
                 self._record(bound, message, failure)
                 failures.append(failure)
             return failures

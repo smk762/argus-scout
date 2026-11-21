@@ -7,7 +7,7 @@
       url: https://hooks.example/scout
       token_env: SCOUT_CHAT_TOKEN       # optional: sent as "Authorization: Bearer <token>"
       secret_env: SCOUT_CHAT_SECRET     # optional: HMAC-SHA256 key for X-Scout-Signature
-      retries: 2                        # after a connection error, 429 or 5xx; a 4xx is final
+      retries: 2                        # after a connection error, 408, 429 or 5xx; other 4xx are permanent
       backoff: 1.0                      # seconds before the first retry, doubling
       min_severity: notice
       kinds: [morning, evening, event]
@@ -90,7 +90,12 @@ def sign(secret: str, timestamp: str, body: bytes) -> str:
 
 
 def _retryable(status: int) -> bool:
-    return status == 429 or status >= 500
+    return status in (408, 429) or status >= 500
+
+
+def refused_permanently(status: int) -> bool:
+    """A 4xx other than 408 and 429: the receiver refused this message, and sending it again won't change that."""
+    return 400 <= status < 500 and not _retryable(status)
 
 
 async def post(
@@ -124,6 +129,7 @@ async def post(
         headers["X-Scout-Signature"] = sign(secret.get_secret_value(), timestamp, body)
     attempts = cfg.retries + 1
     error = ""
+    permanent = False
     for attempt in range(attempts):
         try:
             reply = await (fetcher or afetch)(
@@ -138,19 +144,20 @@ async def post(
                 max_redirects=0,
             )
         except UrlRefused as exc:
-            error, retry = str(exc), True
+            error, retry, permanent = str(exc), True, False
         else:
             if reply.ok:
                 tries = f" after {attempt + 1} attempts" if attempt else ""
                 return DeliveryResult(ok=True, detail=f"POST answered {reply.status}{tries}")
             error, retry = f"POST answered {reply.status}", _retryable(reply.status)
+            permanent = refused_permanently(reply.status)
         if not retry or attempt + 1 == attempts:
             break
         delay = min(MAX_BACKOFF_S, cfg.backoff * 2**attempt)
         log.info("channel.webhook.retry", channel=cfg.name, attempt=attempt + 1, error=error, delay=delay)
         await sleep(delay)
     tries = f" ({attempt + 1} attempt{'s' * (attempt > 0)})"
-    raise ChannelError(f"webhook {cfg.name}: {error}{tries}")
+    raise ChannelError(f"webhook {cfg.name}: {error}{tries}", permanent=permanent)
 
 
 class WebhookChannel:
