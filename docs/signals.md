@@ -78,7 +78,9 @@ refreshed each cycle while it holds.
 - `{value}`: the current reading
 - `{threshold}`: the threshold of the step that sets the recommendation's severity: an `escalate` step's when one
   set it, else the base `threshold` (see [Escalation wording](#escalation-wording))
-- `{peak}`: the most severe reading while the recommendation has been open (the current one, for a new one)
+- `{peak}`: the worst reading in the rule's direction while the recommendation has been open: the highest for
+  `>`/`>=`, the lowest for `<`/`<=` (the current one, for a new one). `==` and `!=` have no direction, so their
+  peak stays the reading the recommendation was raised at
 - `{op}`, `{rule}`, `{severity}`, `{for}`
 - any label in `labels_key` or `labels` (a label missing from a sample renders as `?`)
 - the extra ones a tariff kind adds (below)
@@ -93,10 +95,20 @@ they are only ever substituted as text.
 
 An open recommendation's severity is raised, never lowered, so it can come from an earlier, worse reading than
 the current one. Its text follows one rule: **it states the current reading, and the threshold of the step that
-set its severity.** When the severity is held above what the current reading would set, the title gets
-"(peaked at ...)", the peak formatted like the title's `{value}` and followed by whatever is written straight
-after it (`{value:.0f}°C` gives "(peaked at 91°C)"), unless the title already quotes `{peak}`. The evidence line
-for that reading ends "severity held at critical (peak 91)".
+set its severity.** When the severity is held above what the current reading would set, the title names the peak
+in the rule's direction, formatted like the title's `{value}` and followed by whatever is written straight after
+it, unless the title already quotes `{peak}`:
+
+| Rule `op` | Title suffix | Evidence line ends |
+|---|---|---|
+| `>`, `>=` | "(peaked at 91°C)" | "severity held at critical (peak 91)" |
+| `<`, `<=` | "(fell to 12%)" | "severity held at critical (lowest 12)" |
+| `==`, `!=` | none: no direction, and no `escalate` steps, so never shown as held | |
+
+**A peak is never invented.** A recommendation raised before scout kept a peak (before 0.1.3) has `peak: null`.
+While its severity is held, the current reading is by definition milder than the step that set it, so it can't
+stand in for the peak: the title keeps the plain wording and the evidence line ends "severity held at critical".
+The first reading at least as severe as that step isn't held, and becomes the peak from then on.
 
 With `threshold: 75` and `escalate: [{threshold: 85, severity: critical}]`, a cpu rule that read 91 °C and then
 78 °C reads:

@@ -350,6 +350,40 @@ def test_a_held_severity_renders_the_current_value_and_the_peak():
     assert own.rerender(Severity.CRITICAL, 91.0).title == "78°C, peak 91°C"
 
 
+def _ups(op: str, threshold: float, escalate: float | None) -> SignalRule:
+    steps = [] if escalate is None else [{"threshold": escalate, "severity": "critical"}]
+    return SignalRule.model_validate(
+        {
+            "name": "ups-battery",
+            "query": "ups_battery_percent",
+            "op": op,
+            "threshold": threshold,
+            "escalate": steps,
+            "recommendation": {"title": "UPS battery at {value:.0f}%", "action": "Check the UPS."},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("op", "threshold", "escalate", "now", "peak", "title"),
+    [
+        (">=", 75, 85, 78.0, 91.0, "UPS battery at 78% (peaked at 91%)"),
+        (">", 75, 85, 78.0, 91.0, "UPS battery at 78% (peaked at 91%)"),
+        ("<", 50, 20, 40.0, 12.0, "UPS battery at 40% (fell to 12%)"),
+        ("<=", 50, 20, 40.0, 12.0, "UPS battery at 40% (fell to 12%)"),
+        # == and != have no direction (and can't escalate): never shown as held past a peak, so no suffix,
+        # even for a severity raised some other way.
+        ("==", 0, None, 0.0, 1.0, "UPS battery at 0%"),
+        ("!=", 100, None, 40.0, 12.0, "UPS battery at 40%"),
+    ],
+)
+def test_held_peak_wording_follows_the_rule_direction(op, threshold, escalate, now, peak, title):
+    from argus_scout.signals import make_hit
+
+    hit = make_hit(_ups(op, threshold, escalate), Sample({"instance": "ups-a"}, now, T0), T0)
+    assert hit.rerender(Severity.CRITICAL, peak).title == title
+
+
 def test_peak_is_a_numeric_placeholder():
     assert template_fields("{peak:.1f}", {"peak"}) == ["peak"]
     assert render("{peak:.1f}", {"peak": 91.04}, {"peak"}) == "91.0"

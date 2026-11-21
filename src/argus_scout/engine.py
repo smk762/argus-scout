@@ -48,7 +48,7 @@ import structlog
 from argus_scout.approvals import StandingApprovals, guardrail_block
 from argus_scout.recommendations import Recommendation, Status
 from argus_scout.severity import Severity, rank
-from argus_scout.signals import Evaluation, SignalHit, further
+from argus_scout.signals import Evaluation, SignalHit, further, peak_words
 from argus_scout.store.base import Store, StoreConflict
 
 log = structlog.get_logger()
@@ -226,7 +226,10 @@ class RecommendationEngine:
         loaded = rec.status
         held = rank(rec.severity) > rank(hit.severity)
         if held and rec.peak is None:
-            peak = None  # raised before scout kept a peak: it isn't known, so don't invent one
+            # Raised before scout kept a peak (pre-0.1.3 rows). Held means the current reading is less severe than
+            # the step that set the severity, so it can't stand in for the peak: leave it unknown, never invent one.
+            # A reading at least as severe isn't held, and the next branch takes it as the peak.
+            peak = None
         elif rec.peak is None or further(hit.op, hit.value, rec.peak):
             peak = hit.value
         else:
@@ -247,7 +250,9 @@ class RecommendationEngine:
             rec.severity = hit.severity
         evidence = hit.evidence
         if held:
-            evidence += f"; severity held at {rec.severity.value}" + (f" (peak {peak:g})" if peak is not None else "")
+            evidence += f"; severity held at {rec.severity.value}"
+            if peak is not None:
+                evidence += f" ({peak_words(hit.op)[1]} {peak:g})"
         rec.peak = peak
         rec.evidence = [*rec.evidence, evidence][-MAX_EVIDENCE:]
         rec.last_seen_at = now

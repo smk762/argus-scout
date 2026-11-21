@@ -289,7 +289,7 @@ def test_a_refused_answer_is_readable_over_the_api_and_never_delivered(store, tm
         rig = Rig(client)
         rig.runtime.briefings.narrator.generator = FakeGenerator(hollow)
         body = rig.post(kind="morning").json()
-        assert body["meta"]["fallback_reason"] == "hollow" and body["meta"]["rejected_check"]["missing"] == ["e1"]
+        assert body["meta"]["fallback_reason"] == "hollow" and body["meta"]["rejected_check"]["missing"] == ["e1", "p1"]
         one = client.get(f"/api/reports/{body['id']}").json()
         assert one["meta"]["rejected_text"] == hollow.strip()
         [sent] = rig.log.got

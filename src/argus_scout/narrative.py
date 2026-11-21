@@ -21,12 +21,22 @@ Three steps, each its own function so it can be tested and explained:
    is never silently skipped. The report's ``meta.path`` says which ran (``llm`` or ``template``) and
    ``meta.fallback_reason`` why.
 4. **Check** (:func:`assess_completion`). A model answer is used only if it is whole: not cut off by the token
-   limit (``truncated``), and not hollow: at least :data:`MIN_NARRATIVE_CHARS` for its kind, and naming every
-   open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`). Otherwise the
+   limit (``truncated``), and not hollow: past a low near-empty backstop (:data:`MIN_NARRATIVE_CHARS`), and naming every
+   open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`), and for a briefing
+   every open recommendation at warning or above (:func:`must_mention_recs`), of those the prompt held
+   (:func:`required`). Otherwise the
    template writes the report from the same facts, so a model failure never drops one of those items. The
    check is a floor, not a judgement of quality (:func:`mentions` says what counts as naming an item). A refused
    answer is kept for audit, never delivered: ``meta.rejected_text`` holds a cleaned, clipped copy and
-   ``meta.rejected_check`` the rule that failed and the item ids it found missing (:func:`rejection_meta`).
+   ``meta.rejected_check`` the rule that failed and the item ids it found missing (:func:`rejection_meta`). A
+   report whose severity is ``warning`` or above also refuses an answer that calls things all clear
+   (:data:`ALL_CLEAR_PHRASES`, rule ``contradicts_severity``).
+
+**Grounding.** The facts open with the local time, its timezone and the report kind, and scout's own rules
+(:data:`~argus_scout.persona.RULES`, first in the system prompt) say to greet for the report kind, never the
+clock, and to lead with the most severe item and never call things nominal while warnings or criticals are open.
+A persona can't override them: when the report is ``warning`` or above, persona lines (voice, style, do, sign-off)
+that carry an all-clear phrase are withheld from the prompt and the template (:func:`ground_persona`).
 
 Every report is saved to the store with ``meta`` recording the facts used (event, recommendation and
 rejection ids, the tariff period, note names, what was left out), the persona and the model.
@@ -39,6 +49,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -63,7 +74,7 @@ from argus_scout.llm import (
     estimate_tokens,
 )
 from argus_scout.memory import Memory, MemoryPathError, Note, render_rejection
-from argus_scout.persona import Persona, PersonaFile
+from argus_scout.persona import DEFAULT_PERSONA, Persona, PersonaFile
 from argus_scout.recommendations import Recommendation, Status
 from argus_scout.scheduler import Clock, utc_now
 from argus_scout.severity import Severity, rank
@@ -118,10 +129,20 @@ INSTRUCTIONS: dict[str, str] = {
 
 TITLES = {"morning": "Morning briefing", "evening": "Evening review", "status": "Status update"}
 
-MIN_NARRATIVE_CHARS: dict[str, int] = {"morning": 160, "evening": 160, "status": 40}
-"""The shortest model answer accepted for a report with something in it. A 150-word briefing is about 900
-characters and an 80-word status update about 480; an answer under these is a sentence or two and is taken as
-hollow (the model ran out of budget, or wrote a pleasantry instead of the report)."""
+GREETING: dict[str, str] = {
+    "morning": 'If you greet, say "Good morning", whatever the time.',
+    "evening": 'If you greet, say "Good evening", whatever the time.',
+    "status": "No greeting.",
+}
+"""How each kind may greet. **A report greets for its kind, never for the clock**: a ``morning`` briefing written
+at 23:00 by hand is still the morning briefing, so it says "Good morning" or nothing, never "Evening"."""
+
+MIN_NARRATIVE_CHARS: dict[str, int] = {"morning": 60, "evening": 60, "status": 40}
+"""A low backstop for a report with something in it: under this an answer is near-empty (the model ran out of
+budget, or wrote a pleasantry instead of the report). It is deliberately low. Whether an answer covers what
+matters is the ``missing_items`` rule's job, which checks the content directly: a terse answer that names every
+warning, critical and needs-ack item is whole, however short (a real 156-character briefing naming three critical
+items was once refused by a 160-character floor)."""
 MIN_EMPTY_NARRATIVE_CHARS = 20
 """The shortest answer accepted when there is nothing to report: one short sentence saying so."""
 
@@ -233,10 +254,19 @@ def _rec_line(rec: Recommendation) -> str:
     return text
 
 
+def now_line(facts: Facts) -> str:
+    """The first fact: local time with its timezone, and which report this is, so the model never guesses the time
+    of day: ``Saturday 21 November 2026, 22:56 local time (Europe/London, GMT). This is the morning briefing.``"""
+    key, abbrev = getattr(facts.at.tzinfo, "key", None), facts.at.strftime("%Z")
+    zone = f"{key}, {abbrev}" if key and abbrev and key != abbrev else (key or abbrev or "UTC")
+    title = TITLES.get(facts.kind, "report").lower()
+    return f"{facts.at:%A %d %B %Y, %H:%M} local time ({zone}). This is the {title}."
+
+
 def fact_lines(facts: Facts) -> list[Line]:
     """Every fact as a prioritised line, in display order within each section (most severe first)."""
     sections = KIND_SECTIONS.get(facts.kind, tuple(SECTIONS))
-    lines: list[Line] = [Line("now", f"{facts.at:%A %d %B %Y, %H:%M %Z}.", 0)]
+    lines: list[Line] = [Line("now", now_line(facts), 0)]
     if "items" in sections:
         groups = sorted(facts.groups, key=lambda g: (-rank(g.latest.severity), -g.latest.generated_at.timestamp()))
         for g in groups:
@@ -321,10 +351,17 @@ def build_prompt(
     notes_chars: int | None = 2000,
 ) -> tuple[Prompt, Selection]:
     """The system and user messages for ``facts``, cut to fit the model's context (see the module docstring)."""
+    persona, _ = ground_persona(persona, facts)
     system = persona.system_prompt()
-    instructions = INSTRUCTIONS.get(facts.kind, INSTRUCTIONS["status"])
+    instructions = f"{INSTRUCTIONS.get(facts.kind, INSTRUCTIONS['status'])} {GREETING.get(facts.kind, '')}".strip()
     if facts.empty:
         instructions += " There are no open items or recommendations."
+    severity = _worst_severity(facts)
+    if rank(severity) >= rank(Severity.WARNING):
+        instructions += (
+            f" The facts include {severity.value} items: open with the most severe one. Do not call anything "
+            "nominal, fine, normal, calm or quiet, and do not say there are no crises."
+        )
     header = f"{instructions}\n\nFacts:\n"
     fixed = len(system) + len(header)
     budget = int((context_tokens - max_tokens) * CHARS_PER_TOKEN * PROMPT_MARGIN) - fixed
@@ -491,8 +528,13 @@ def mentions(text: str, group: EventGroup) -> bool:
     named by one of its strong words (its source's parts, host and label values) or by two distinct words of its
     summary (one, if the summary has only one). An item with no distinctive words at all is taken as named."""
     words = item_words(group)
+    return names(text, words)
+
+
+def names(text: str, words: ItemWords) -> bool:
+    """Whether ``text`` names something described by ``words`` (the matching rules are :func:`mentions`')."""
     if not (words.strong or words.weak):
-        return True  # nothing to look for (a summary of generic words): don't refuse every answer over it
+        return True
     said = {_stem(w) for w in _tokens(text)}
     if words.strong & said:
         return True
@@ -504,10 +546,107 @@ def must_mention(facts: Facts) -> list[EventGroup]:
     return [g for g in facts.groups if rank(g.latest.severity) >= rank(Severity.WARNING) or g.latest.requires_ack]
 
 
+def must_mention_recs(facts: Facts) -> list[Recommendation]:
+    """The open recommendations (proposed or approved) no briefing may drop: those at ``warning`` or above. A status
+    update lists no recommendations (:data:`KIND_SECTIONS`), so it has none."""
+    sections = KIND_SECTIONS.get(facts.kind, tuple(SECTIONS))
+    recs = [*(facts.proposed if "proposed" in sections else []), *(facts.approved if "approved" in sections else [])]
+    return [r for r in recs if rank(r.severity) >= rank(Severity.WARNING)]
+
+
+_KEY_LABEL = re.compile(r'[A-Za-z_][A-Za-z0-9_]*="((?:[^"\\]|\\.)*)"')
+
+
+def rec_words(rec: Recommendation) -> ItemWords:
+    """What names a recommendation: **strong**, the label values in its dedup key (its rule's ``labels_key``, such
+    as the host or instance); **weak**, the words of its title. Same matching as an item (:func:`mentions`)."""
+    strong = frozenset(k for value in _KEY_LABEL.findall(rec.key) for k in _keywords(value))
+    return ItemWords(strong, frozenset(_keywords(rec.title) - strong))
+
+
+MAX_REQUIRED = 12
+"""At most this many things an answer must name, most severe first: a briefing of 150 words can't name more."""
+
+
+@dataclass(frozen=True)
+class Required:
+    """One thing an answer must name: an open item or a recommendation, by its fact-line ref."""
+
+    ref: str
+    severity: Severity
+    words: ItemWords
+
+
+def required(facts: Facts, shown: Collection[str] | None = None) -> list[Required]:
+    """What an answer must name: every :func:`must_mention` item and :func:`must_mention_recs` recommendation,
+    most severe first, capped at :data:`MAX_REQUIRED`. With ``shown`` (the refs of the fact lines that made it into
+    the prompt), only those: the model is never held to a fact it wasn't given."""
+    found = [Required(g.latest.event_id, g.latest.severity, item_words(g)) for g in must_mention(facts)]
+    found += [Required(r.id, r.severity, rec_words(r)) for r in must_mention_recs(facts)]
+    if shown is not None:
+        found = [r for r in found if r.ref in shown]
+    found.sort(key=lambda r: -rank(r.severity))  # stable: items before recommendations within a severity
+    return found[:MAX_REQUIRED]
+
+
+ALL_CLEAR_PHRASES: tuple[str, ...] = (
+    r"all systems (?:are )?(?:nominal|normal|green|go)",
+    r"all clear",
+    r"all quiet",
+    r"nothing to report",
+    r"nothing (?:is )?exploding",
+    r"nothing needs (?:your )?attention",
+    r"no (?:immediate |urgent |major |real )?(?:crisis|crises)",
+    r"everything(?: is|'s|’s) (?:fine|ok|okay|good|normal|nominal|calm|quiet)",
+)
+"""Phrases that say nothing is wrong. An answer for a report of ``warning`` or above that contains one is refused
+(rule ``contradicts_severity``). Matched case-insensitively, as whole words. Kept tight on purpose: these are
+absolute claims ("all clear", "everything is fine"), so qualified ones that follow the severe items ("nothing else
+is urgent", "the rest is fine", "otherwise quiet") pass. A phrase in the list is refused wherever it appears,
+even after the severe items ("host-a is critical; otherwise all clear"): the safe side is the template."""
+_ALL_CLEAR = re.compile(r"\b(?:" + "|".join(ALL_CLEAR_PHRASES) + r")\b", re.IGNORECASE)
+
+
+def all_clear_phrases(text: str) -> list[str]:
+    """The all-clear phrases (:data:`ALL_CLEAR_PHRASES`) in ``text``, as written (whitespace runs as one space)."""
+    return [m.group(0) for m in _ALL_CLEAR.finditer(" ".join(text.split()))]
+
+
+def ground_persona(persona: Persona, facts: Facts) -> tuple[Persona, list[str]]:
+    """``persona`` with every line that would contradict a report of ``warning`` or above withheld: a voice,
+    style or do entry, or a sign-off, that carries an all-clear phrase (a catchphrase like "All systems nominal").
+    Returns the persona to use and the withheld lines. Below ``warning`` the persona is returned as it is.
+
+    Scout's rules come first in the system prompt and say they win over the persona; this makes sure a persona
+    can't keep asking for the contradiction anyway, and keeps an all-clear sign-off off the template too."""
+    if rank(_worst_severity(facts)) < rank(Severity.WARNING):
+        return persona, []
+    withheld: list[str] = []
+
+    def keep(line: str) -> bool:
+        if all_clear_phrases(line):
+            withheld.append(line)
+            return False
+        return True
+
+    update: dict[str, Any] = {
+        "style": [s for s in persona.style if keep(s)],
+        "do": [s for s in persona.do if keep(s)],
+    }
+    if not keep(persona.voice):
+        update["voice"] = DEFAULT_PERSONA.voice
+    if persona.sign_off and not keep(persona.sign_off):
+        update["sign_off"] = ""
+    if not withheld:
+        return persona, []
+    return persona.model_copy(update=update), withheld
+
+
 @dataclass(frozen=True)
 class Verdict:
-    """Why a model answer was refused: :attr:`reason` is ``truncated`` or ``hollow``; :attr:`rule` the check that
-    failed (``token_limit``, ``too_short`` or ``missing_items``)."""
+    """Why a model answer was refused: :attr:`reason` is ``truncated``, ``hollow`` or ``contradicted``;
+    :attr:`rule` the check that failed (``token_limit``, ``too_short``, ``missing_items`` or
+    ``contradicts_severity``)."""
 
     reason: str
     rule: str
@@ -518,9 +657,11 @@ class Verdict:
         return {"reason": self.reason, "rule": self.rule, "detail": self.detail, "missing": list(self.missing)}
 
 
-def check_completion(completion: Completion, facts: Facts) -> Verdict | None:
+def check_completion(completion: Completion, facts: Facts, shown: Collection[str] | None = None) -> Verdict | None:
     """``None`` when the answer may be delivered; otherwise the :class:`Verdict`: ``truncated`` (the token limit
-    cut it off) or ``hollow`` (too short for its kind, or missing an item :func:`must_mention` names)."""
+    cut it off), ``hollow`` (near-empty, or missing an item or recommendation :func:`required` names; ``shown`` is
+    the refs of the fact lines the prompt held) or ``contradicted`` (an all-clear phrase in a report of ``warning``
+    or above, :data:`ALL_CLEAR_PHRASES`)."""
     if completion.truncated:
         detail = f"the model hit its token limit ({completion.completion_tokens} tokens)"
         return Verdict("truncated", "token_limit", detail)
@@ -529,9 +670,14 @@ def check_completion(completion: Completion, facts: Facts) -> Verdict | None:
     if len(text) < floor:
         detail = f"the model's answer was {len(text)} characters, under {floor} for a {facts.kind} report"
         return Verdict("hollow", "too_short", detail)
-    missing = tuple(g.latest.event_id for g in must_mention(facts) if not mentions(text, g))
+    missing = tuple(r.ref for r in required(facts, shown) if not names(text, r.words))
     if missing:
         return Verdict("hollow", "missing_items", f"the model's answer left out {', '.join(missing)}", missing)
+    severity = _worst_severity(facts)
+    if rank(severity) >= rank(Severity.WARNING) and (found := all_clear_phrases(text)):
+        quoted = ", ".join(f'"{p}"' for p in dict.fromkeys(f.lower() for f in found))
+        detail = f"the model's answer called things all clear ({quoted}) in a {severity.value} report"
+        return Verdict("contradicted", "contradicts_severity", detail)
     return None
 
 
@@ -567,9 +713,10 @@ def rejection_meta(completion: Completion, verdict: Verdict) -> dict[str, Any]:
 
 def render_template(facts: Facts, persona: Persona, *, reason: str = "") -> str:
     """A plain-text report from the facts alone, no model: deterministic, and never empty. At most
-    :data:`TEMPLATE_MAX_PER_SECTION` lines a section, except that every item :func:`must_mention` names is listed."""
+    :data:`TEMPLATE_MAX_PER_SECTION` lines a section, except that every item :func:`must_mention` and every
+    recommendation :func:`must_mention_recs` names is listed, uncapped."""
     lines = fact_lines(facts)
-    keep = {g.latest.event_id for g in must_mention(facts)}
+    keep = {g.latest.event_id for g in must_mention(facts)} | {r.id for r in must_mention_recs(facts)}
     out = [f"{TITLES.get(facts.kind, 'Report')}, {facts.at:%a %d %b %H:%M}."]
     headings = {
         "items": "Needs attention:",
@@ -607,6 +754,7 @@ _REASON_TEXT = {
     "no_llm": "no model is configured",
     "truncated": "the model's answer was cut off",
     "hollow": "the model's answer left out what needs attention",
+    "contradicted": "the model's answer called things all clear while items need attention",
 }
 
 
@@ -700,7 +848,7 @@ class Narrator:
         facts = self.gather(kind, groups=groups)
         if write_memory:
             self._sync_memory(facts.rejections)
-        persona = self.persona.get()
+        persona, withheld = ground_persona(self.persona.get(), facts)
         max_tokens = self.max_tokens_for(kind)
         prompt, selection = build_prompt(
             facts,
@@ -712,6 +860,7 @@ class Narrator:
         meta: dict[str, Any] = {
             "persona": persona.name,
             "persona_error": self.persona.error,
+            "persona_withheld": withheld,
             "prompt_tokens_est": estimate_tokens(prompt.system + prompt.user),
             "context_tokens": self.context_tokens,
             "max_tokens": max_tokens,
@@ -736,7 +885,7 @@ class Narrator:
                     "finish_reason": completion.finish_reason,
                     "llm_chars": len(completion.text),
                 }
-                verdict = check_completion(completion, facts)
+                verdict = check_completion(completion, facts, {ln.ref for ln in selection.lines})
                 if verdict is None:
                     meta |= {
                         "path": "llm",
@@ -874,6 +1023,8 @@ def build_narrator(
 
 
 __all__ = [
+    "ALL_CLEAR_PHRASES",
+    "GREETING",
     "INSTRUCTIONS",
     "MIN_EMPTY_NARRATIVE_CHARS",
     "MIN_NARRATIVE_CHARS",
@@ -886,6 +1037,7 @@ __all__ = [
     "Selection",
     "TariffFact",
     "Verdict",
+    "all_clear_phrases",
     "assess_completion",
     "check_completion",
     "clean_rejected",
@@ -893,8 +1045,16 @@ __all__ = [
     "build_prompt",
     "delivery_meta",
     "fact_lines",
+    "ground_persona",
     "mentions",
+    "MAX_REQUIRED",
+    "Required",
     "must_mention",
+    "must_mention_recs",
+    "names",
+    "rec_words",
+    "required",
+    "now_line",
     "numbers_to_digits",
     "rejection_meta",
     "render_facts",

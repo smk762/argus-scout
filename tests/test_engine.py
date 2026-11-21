@@ -423,3 +423,44 @@ def test_a_held_severity_without_a_known_peak_keeps_the_plain_wording(engine, st
     [rec] = engine.run_cycle(ran(hit(value=90.0))).refreshed
     assert rec.severity == Severity.CRITICAL and rec.peak is None
     assert rec.title == "/data on node-a:9100 is 90% full" and rec.evidence[-1].endswith("severity held at critical")
+
+
+def test_a_null_peak_is_initialised_only_from_a_reading_at_least_as_severe(engine, store, clock):
+    """A pre-0.1.3 row (peak null) takes the current reading as its peak when that reading is itself at the held
+    severity, and keeps the plain wording until then: a milder, held reading can't stand in for a past peak."""
+    [rec] = engine.run_cycle(ran(hit(value=97.0, severity=Severity.CRITICAL))).new
+    rec.peak = None
+    store.save_recommendation(rec, by="test")
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(hit(value=90.0))).refreshed  # milder: held, the peak stays unknown
+    assert rec.peak is None
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(hit(value=96.0, severity=Severity.CRITICAL))).refreshed  # as severe: known now
+    assert rec.severity == Severity.CRITICAL and rec.peak == 96.0
+    assert store.get_recommendation(rec.id).peak == 96.0
+
+
+def test_a_held_minimum_says_fell_to(engine, store, clock):
+    """For a less-than rule the peak is the lowest reading: the title says "fell to", the evidence "lowest"."""
+    from argus_scout.signals import SignalRule, make_hit
+
+    rule = SignalRule.model_validate(
+        {
+            "name": "ups-battery",
+            "query": "ups_battery_percent",
+            "op": "<",
+            "threshold": 50,
+            "escalate": [{"threshold": 20, "severity": "critical"}],
+            "recommendation": {"title": "UPS battery at {value:.0f}%", "action": "Check the UPS."},
+        }
+    )
+
+    def reading(value: float):
+        return make_hit(rule, Sample({"instance": "ups-a"}, value, T0), T0)
+
+    engine.run_cycle(ran(reading(12.0), rules=("ups-battery",)))
+    clock.advance(minutes=5)
+    [rec] = engine.run_cycle(ran(reading(40.0), rules=("ups-battery",))).refreshed
+    assert rec.severity == Severity.CRITICAL and rec.peak == 12.0
+    assert rec.title == "UPS battery at 40% (fell to 12%)"
+    assert rec.evidence[-1].endswith("; severity held at critical (lowest 12)")

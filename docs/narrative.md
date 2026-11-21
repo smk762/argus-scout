@@ -38,6 +38,27 @@ Only facts from scout's store reach the model: open inbox items (grouped), recom
 approved ones, recent rejections with the reasons people gave, the tariff period and its next change, and your
 notes. Nothing else, so nothing else can be claimed. Each fact line is clipped to 300 characters.
 
+### Time and greeting
+
+The facts open with the local time, its timezone (`schedule.timezone`) and which report this is:
+
+```text
+Saturday 21 November 2026, 22:56 local time (Europe/London, GMT). This is the morning briefing.
+```
+
+**A report greets for its kind, never for the clock.** A `morning` briefing is the morning briefing whatever time
+it runs, so one written by hand at 22:56 says "Good morning" or doesn't greet, never "Evening". The instructions
+say so per kind: `morning` may say "Good morning", `evening` "Good evening", and a `status` update has no
+greeting. Scout's rules also tell the model never to guess the time of day.
+
+### Severity first, no all-clear
+
+When the facts hold a warning or critical item (an open item, or for a briefing a recommendation), scout's rules
+and the instructions say: lead with the most severe item, and never call things nominal, fine, normal, calm or
+quiet, or say there are no crises or nothing to report. "The rest is fine" or "nothing else is urgent" is fine
+once every warning and critical item has been named. The answer check enforces the worst of it
+([`contradicts_severity`](#a-model-answer-is-checked-before-its-used)).
+
 The prompt is sized for a small local model. The room for facts is `context_tokens` minus `max_tokens`, the system
 prompt and the instructions (estimated at four characters a token, with a 10% margin). Lines go in by priority
 (critical items, warnings, rejections, notices, info, notes) until the next doesn't fit, and the prompt says how
@@ -120,6 +141,7 @@ the bottom. `meta.fallback_reason` is one of:
 | `error` | the model was unreachable, failed, timed out or returned nothing |
 | `truncated` | the model hit its token limit (Ollama `done_reason`, OpenAI `finish_reason`: `length`), so its answer was cut off |
 | `hollow` | the answer was too short for its kind, or left out an item that needs attention (below) |
+| `contradicted` | the answer called things all clear in a report that is `warning` or above (below) |
 
 The model's output is cleaned before it's stored: control characters and `<think>` blocks are stripped and its
 length capped.
@@ -130,13 +152,22 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
 
 - **it was cut off** (`truncated`): the server said it stopped at the token limit. Whatever came after the cut,
   an item that needs acknowledgement included, is missing.
-- **it is too short** (`hollow`): under 160 characters for a `morning` or `evening` report, or 40 for `status`
-  (about a sentence; a 150-word briefing is about 900 characters). When there's nothing to report, one short
-  sentence (20 characters) is enough. An answer that was all `<think>` block is empty after cleaning, so it lands
-  here.
-- **it leaves out an item that needs attention** (`hollow`): every open item that is a warning or critical, or
-  needs an acknowledgement, must be named. This is a floor, not a judgement of quality: a model that paraphrases
-  every word away gets the template, which is the safe side. How an item counts as named:
+- **it is near-empty** (`hollow`, rule `too_short`): under 60 characters for a `morning` or `evening` report, or
+  40 for `status`. This is only a backstop for output that is next to nothing; whether an answer covers what
+  matters is the next rule's job, which checks content directly. So a terse answer that names every item needing
+  attention passes, however short: "Good morning. Three critical CPU temperatures: host-a at 91°C, host-b at 88°C,
+  host-c at 87°C. All exceed 85°C. Check cooling on all three. No other issues." (156 characters) is whole, while
+  "All quiet." is not. When there's nothing to report, one short sentence (20 characters) is enough. An answer
+  that was all `<think>` block is empty after cleaning, so it lands here.
+- **it leaves out something that needs attention** (`hollow`, rule `missing_items`): it must name
+  - every open item that is a warning or critical, or needs an acknowledgement, and
+  - in a `morning` or `evening` briefing, every open recommendation (proposed or approved) at warning or above. A
+    `status` update lists only open items and rejections, so only its items are required.
+
+  Only what the prompt actually held is required: a fact the budget cut (above) was never shown to the model, so
+  it can't be held to it. At most 12 things are required, most severe first. This is a floor, not a judgement of
+  quality: a model that paraphrases every word away gets the template, which is the safe side. How an item counts
+  as named:
   - The answer and the item are split into words on anything that isn't a letter or digit, so source
     `ai-code-auditor` is `ai`, `code`, `auditor`, and `decision(s)` is `decision`.
   - Spelled-out numbers become digits first (0 to 999: "twenty-seven" is 27, "one hundred and five" is 105), since
@@ -149,14 +180,40 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
     `hostname`, `instance`, `node`, `device`, `mountpoint`, `service`, `job`, `container`, and every value of
     `labels`). One strong word names the item. Its **weak** words come from its summary, and it takes two distinct
     ones (one, if the summary has only one).
+  - A recommendation's **strong** words are the label values in its key (its rule's `labels_key`, such as the
+    `instance` or host), and its **weak** words come from its title. A recommendation for `instance="orion"` titled
+    "CPU on orion at 91°C" is named by "orion", or by "CPU" and "91".
 
   For an item from source `ai-code-auditor` with the summary "Rest completed: 27 confirmed, 0 draft PRs, 4
   decision(s)", "The code auditor finished its rest run with twenty-seven confirmed and four decisions to
   acknowledge" names it (`code`, `auditor`); "Twenty-seven findings were confirmed" names it (27 and `confirm`);
   "Systems are fine; restarting nothing" doesn't, and neither does "Get some rest tonight" (one weak word).
+- **it calls things all clear while warnings or criticals are open** (`contradicted`, rule
+  `contradicts_severity`): the report's `severity` (its worst open item, and for a briefing its worst
+  recommendation too) is `warning` or `critical`, and the answer contains one of these phrases, matched
+  case-insensitively and as whole words (any run of spaces or newlines counts as one space):
 
-The template lists the items from the same facts (ten a section, but every warning, critical and item awaiting
-acknowledgement however many there are), so a model that fails never costs the report one of those. The stored `meta` still records what the model did:
+  | Phrase | Also matches |
+  |---|---|
+  | all systems nominal | "all systems are nominal", "... normal", "... green", "... go" |
+  | all clear | |
+  | all quiet | |
+  | nothing to report | |
+  | nothing exploding | "nothing is exploding" |
+  | nothing needs attention | "nothing needs your attention" |
+  | no crises | "no crisis", "no immediate / urgent / major / real crises" |
+  | everything is fine | "everything's fine"; "... ok", "okay", "good", "normal", "nominal", "calm", "quiet" |
+
+  The list is kept tight, to absolute claims, so it doesn't refuse good answers: "nothing else is urgent", "the
+  rest is fine" and "otherwise quiet" pass, as do "all clearances" and "all quietly" (whole words only). A listed
+  phrase is refused wherever it appears, even after the critical items ("host-a is critical; otherwise all
+  clear"): the template is the safe side. Below `warning` the phrases are allowed. A real answer this catches, a
+  morning briefing written at 22:56 with three critical recommendations open: "Evening. All systems nominal,
+  nothing exploding. For once. host-a's CPU is at 91°C ... No immediate crises, but keep an eye on host-a."
+
+The template lists the items and recommendations from the same facts (ten a section, but every warning, critical
+and item awaiting acknowledgement, and every warning or critical recommendation, however many there are), so a
+model that fails never costs the report one of those. The stored `meta` still records what the model did:
 `completion_tokens` (the raw count, thinking included), `finish_reason`, `llm_chars` (what was left after
 cleaning), and `error` naming the check that failed. Scout logs `narrative.rejected_completion` with the same.
 
@@ -165,9 +222,9 @@ report's `meta` also holds:
 
 - `rejected_text`: the model's answer, cleaned (newlines normalised, control and format characters such as
   terminal escapes and bidi overrides stripped) and clipped to 2000 characters;
-- `rejected_check`: `{reason, rule, detail, missing}`, where `reason` is `truncated` or `hollow`, `rule` is the
-  check that failed (`token_limit`, `too_short` or `missing_items`) and `missing` the ids of the items the answer
-  didn't name.
+- `rejected_check`: `{reason, rule, detail, missing}`, where `reason` is `truncated`, `hollow` or `contradicted`,
+  `rule` is the check that failed (`token_limit`, `too_short`, `missing_items` or `contradicts_severity`, whose
+  `detail` quotes the phrases found) and `missing` the ids of the items the answer didn't name.
 
 Channels read the report's text, which is the template's. `rejected_text` is also dropped from the `meta` every
 delivery carries (webhook payloads included): it is unvetted text that the check refused, possibly dropping or
@@ -209,9 +266,19 @@ Speech is not scout's GPU work: argus-echo takes its own leases, and scout never
 
 ## Persona
 
-A persona (`files.persona`) sets how reports sound, never what scout may do. Scout's own rules come first in every
-system prompt and a persona can't remove them: advisory only, use only the facts given, don't propose rejected
-items again or argue with the reason, respect the operator's notes.
+A persona (`files.persona`) sets how reports sound, never what scout may do or what is true. Scout's own rules come
+first in every system prompt and a persona can't remove them: advisory only, use only the facts given, don't
+propose rejected items again or argue with the reason, respect the operator's notes, lead with the most severe
+item and never call things nominal while warnings or criticals are open, greet for the report kind and never guess
+the time of day. The last rule says they win wherever the persona's voice, style, catchphrases or sign-off
+conflict with them.
+
+That isn't left to the model alone. When a report is `warning` or above, any persona line that carries an
+all-clear phrase (the [list above](#a-model-answer-is-checked-before-its-used)) is withheld from that report: a
+`style` or `do` entry is dropped, a `voice` falls back to the default one, and a `sign_off` is left off, from the
+template as well as the prompt. A catchphrase like "All systems nominal, nothing exploding. For once." still signs
+off a quiet briefing, but never one with a critical item. The report's `meta.persona_withheld` lists what was held
+back. Whatever a persona says, an answer that calls things all clear is then refused by the check.
 
 ```yaml
 name: Scout
