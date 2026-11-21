@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from argus_scout.cli import app
-from argus_scout.server.app import app as server
+from argus_scout.server.app import create_app
 from argus_scout.sources import json_poll
 from argus_scout.store import SqliteStore
 
@@ -44,7 +44,7 @@ def test_tariff_now():
 
 
 def test_health():
-    assert TestClient(server).get("/health").json()["status"] == "ok"
+    assert TestClient(create_app()).get("/health").json()["status"] == "ok"
 
 
 POLL_CONFIG = """\
