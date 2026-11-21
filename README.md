@@ -50,6 +50,15 @@ argus-scout serve --config config/scout.yaml
 Relative paths resolve against the config file's directory. Scout refuses to start on an invalid `scout.yaml` (unknown
 keys included); the policy files it names are reloaded while it runs, and a bad edit to one falls back to defaults.
 
+**Container.** The image runs `argus-scout serve --host 0.0.0.0 --port 8400` with `SCOUT_CONFIG=/config/scout.yaml`:
+mount your config directory at `/config` (the default store, `scout.db`, lands beside it) or point `SCOUT_CONFIG`
+elsewhere. Inside the container scout is off loopback, so set `server.read_auth: true` unless only trusted hosts reach
+the port.
+
+```bash
+docker run -v ./config:/config -p 127.0.0.1:8400:8400 ghcr.io/smk762/argus-scout
+```
+
 ## HTTP API
 
 `argus-scout serve` runs the scheduler and the API (the `[server]` extra). Reaching the port is host access, so the

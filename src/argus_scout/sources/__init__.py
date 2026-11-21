@@ -4,7 +4,7 @@ See :mod:`argus_scout.sources.base` for the interface and :mod:`argus_scout.sour
 how kinds are found (the ``argus_scout.sources`` entry-point group) and bound to config entries.
 """
 
-from argus_scout.sources.base import PollingSource, PushSource, Source, SourceAuthError, SourceError
+from argus_scout.sources.base import PollingSource, PollResult, PushSource, Source, SourceAuthError, SourceError
 from argus_scout.sources.registry import (
     ENTRY_POINT_GROUP,
     BoundSource,
@@ -17,6 +17,7 @@ from argus_scout.sources.registry import (
 __all__ = [
     "ENTRY_POINT_GROUP",
     "BoundSource",
+    "PollResult",
     "PollingSource",
     "PushSource",
     "Registry",

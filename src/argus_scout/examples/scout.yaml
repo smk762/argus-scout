@@ -44,6 +44,8 @@ sources:
   #     event_id: id
   #     summary: message
   #     severity: level
+  #   # id: [labels.alertname, labels.instance]  # what identifies an item when it has no event_id
+  #   # resolve_missing: true     # close events a successful poll no longer lists (the default)
   #   auth_header: Authorization
   #   auth_env: SCOUT_BACKUPS_AUTH  # value sent in auth_header, e.g. "Bearer ..."
   #
