@@ -13,3 +13,7 @@ build
 .mypy_cache
 .coverage
 htmlcov
+# The quickstart's secrets and runtime state (deploy/quickstart/config) stay out of the image.
+**/.env
+deploy/quickstart/config/scout.db*
+deploy/quickstart/config/scout-reports.log*

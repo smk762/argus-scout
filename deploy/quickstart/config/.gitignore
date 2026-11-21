@@ -1,0 +1,6 @@
+# What scout writes at runtime, and the real secrets.
+.env
+scout.db
+scout.db-*
+scout-reports.log*
+memory/
