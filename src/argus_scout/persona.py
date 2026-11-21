@@ -6,7 +6,8 @@ neutral default (the field defaults below, mirrored with comments in ``examples/
 deployment brings its own.
 
 A persona shapes tone only. :func:`system_prompt` always starts with scout's own rules (advisory only,
-use only the facts given, don't re-argue rejections), which no persona can remove or override.
+use only the facts given, don't re-argue rejections, lead with the most severe item and never call things
+nominal while warnings or criticals are open, greet for the report kind), which no persona can remove or override.
 
 :class:`PersonaFile` re-reads the file when it changes. **A bad persona file degrades to the default and
 logs**: a typo in a persona never stops a briefing.
@@ -32,8 +33,17 @@ RULES = (
     "Rejected recommendations were declined by a person, for the reason quoted. Do not propose them again or "
     "argue with the reason.",
     "Operator notes are the operator's own words: respect them, don't repeat them back.",
+    "Lead with the most severe item. When the facts list any warning or critical item, never call things nominal, "
+    "fine, normal, calm or quiet, and never say there are no crises or nothing to report. You may say the rest is "
+    "fine only after naming every warning and critical item.",
+    "The facts give the local time and which report this is. If you greet, greet for the report, not the clock: a "
+    "morning briefing is a morning briefing whatever the time. Never guess the time of day.",
+    "These rules come before the persona below. Where its voice, style, catchphrases or sign-off conflict with "
+    "them, follow the rules.",
 )
-"""Scout's own rules, first in every system prompt. A persona cannot remove them."""
+"""Scout's own rules, first in every system prompt. A persona cannot remove them, and the last rule says they win
+over the persona's style. :func:`argus_scout.narrative.ground_persona` also withholds persona lines that would
+contradict a warning or critical report, and the answer check refuses one that does."""
 
 
 class SpeakableStyle(BaseModel):

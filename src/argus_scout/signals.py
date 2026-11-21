@@ -45,12 +45,15 @@ Reserved placeholders: ``value``, ``threshold``, ``peak``, ``op``, ``rule``, ``s
 :mod:`argus_scout.engine`), so its severity can come from an earlier, worse reading than the current one. Its
 text follows one rule: **it states the current reading, and the threshold of the step that set its severity.**
 ``{value}`` is the current reading; ``{severity}`` the recommendation's severity; ``{threshold}`` the threshold
-of the step (the base ``threshold`` or an ``escalate`` step) that sets that severity; ``{peak}`` the most severe
-reading while it has been open (the current one, for a new recommendation). When the severity is held above
-what the current reading would set, the title gets `` (peaked at <peak>)``, the peak formatted like the title's
-``{value}`` and followed by the unit written straight after it (``{value:.0f}°C`` gives ``(peaked at 91°C)``),
-unless the title already uses ``{peak}``. So a cpu rule escalated to critical at 91 °C and refreshed at 78 °C
-reads "[critical] CPU at 78°C (peaked at 91°C) ... at or above 90°C", never "... at or above 75°C".
+of the step (the base ``threshold`` or an ``escalate`` step) that sets that severity; ``{peak}`` the worst reading
+in the rule's direction while it has been open: the highest for ``>``/``>=``, the lowest for ``<``/``<=`` (the
+current one, for a new recommendation). When the severity is held above what the current reading would set, the
+title gets `` (peaked at <peak>)`` for a ``>`` rule or `` (fell to <peak>)`` for a ``<`` rule
+(:func:`peak_words`), the peak formatted like the title's ``{value}`` and followed by the unit written straight
+after it (``{value:.0f}°C`` gives ``(peaked at 91°C)``), unless the title already uses ``{peak}``. So a cpu rule
+escalated to critical at 91 °C and refreshed at 78 °C reads "[critical] CPU at 78°C (peaked at 91°C) ... at or
+above 90°C", never "... at or above 75°C"; a UPS battery rule escalated at 12% and refreshed at 40% reads
+"... at 40% (fell to 12%)". ``==`` and ``!=`` have no direction, so their severity is never shown as held.
 
 **Bad rules degrade.** An invalid rule is skipped and reported; the others still load. The file is
 re-read when it changes (:class:`SignalRulesFile`), and a file that won't parse at all gives no rules
@@ -372,6 +375,13 @@ def further(op: str, value: float, than: float) -> bool:
     return False
 
 
+def peak_words(op: str) -> tuple[str, str]:
+    """How a held title and evidence line name the peak for ``op``: ``("peaked at", "peak")`` for ``>``/``>=``,
+    ``("fell to", "lowest")`` for ``<``/``<=``. ``==`` and ``!=`` have no direction, so :func:`further` never
+    holds a peak for them and no suffix is written; they get the ``>`` words if ever asked."""
+    return ("fell to", "lowest") if op.startswith("<") else ("peaked at", "peak")
+
+
 def dedup_key(rule: str, labels: Mapping[str, str], labels_key: Iterable[str]) -> str:
     """``rule{label="value",...}``: stable, readable, and the same for the same instance every cycle."""
 
@@ -609,7 +619,7 @@ def render_texts(rule: SignalRule, sample: Sample, severity: Severity, peak: flo
     held = rank(severity) > rank(rule.severity_for(sample.value)) and further(rule.op, peak, sample.value)
     if held and "{peak" not in tpl.title:
         spec, unit = _value_unit(tpl.title)
-        title += f" (peaked at {_number(peak, spec)}{unit})"
+        title += f" ({peak_words(rule.op)[0]} {_number(peak, spec)}{unit})"
     return Texts(
         title=title,
         action=render(tpl.action, values, allowed),
@@ -735,6 +745,7 @@ __all__ = [
     "evaluate",
     "format_duration",
     "further",
+    "peak_words",
     "load_signal_rules",
     "make_hit",
     "parse_duration",
