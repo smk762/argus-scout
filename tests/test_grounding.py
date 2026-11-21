@@ -44,6 +44,10 @@ def store(tmp_path):
         yield s
 
 
+def one_critical_item() -> Facts:
+    return Facts(kind="morning", at=LATE, groups=[_group("e0", "critical", "CPU on host-a at 91°C")])
+
+
 def critical_facts(kind: str = "morning", at: datetime = LATE) -> Facts:
     recs = [
         Recommendation(id=f"c{i}", title=f"CPU on {host} at {t}°C", severity=Severity.CRITICAL, status=Status.PROPOSED)
@@ -108,7 +112,7 @@ def test_no_severity_nudge_when_nothing_is_a_warning():
             True,
         ),
         (
-            "Nothing to report beyond host-a, host-b and host-c running critically hot, host-a at 91°C. Check cooling.",
+            "Nothing to report beyond host-a, host-b and host-c CPUs running critically hot, host-a at 91°C. Check cooling.",
             True,
         ),
         (
@@ -139,9 +143,10 @@ def test_no_severity_nudge_when_nothing_is_a_warning():
     ],
 )
 def test_all_clear_in_a_critical_report_is_refused(text, refused):
+    # One critical item every row names (CPU, 91), so only the all-clear rule can refuse a row.
     while len(text) < 160:  # well past the too_short backstop, so only this rule can refuse it
         text += PAD
-    verdict = check_completion(completion(text), critical_facts())
+    verdict = check_completion(completion(text), one_critical_item())
     if refused:
         assert verdict is not None and verdict.reason == "contradicted" and verdict.rule == "contradicts_severity"
     else:
@@ -256,8 +261,6 @@ def critical_items(kind: str = "morning") -> Facts:
 @pytest.mark.parametrize("facts", [critical_items(), critical_facts()], ids=["items", "recommendations"])
 def test_length_is_only_a_near_empty_backstop(text, rule, facts):
     assert len(LIVE_ANSWER) == 156
-    if rule == "missing_items" and not facts.groups:
-        rule = None  # recommendations aren't items an answer must name
     verdict = check_completion(completion(text), facts)
     assert (verdict.rule if verdict else None) == rule
 
@@ -273,3 +276,81 @@ async def test_a_short_whole_answer_is_delivered_and_a_near_empty_one_is_not(sto
     empty = await narrator(store, FakeGenerator("All quiet. Nothing to see here")).report("morning")
     assert empty.meta["path"] == "template" and empty.meta["rejected_check"]["rule"] == "too_short"
     assert all(f"CPU on {h}" in empty.text for h in ("host-a", "host-b", "host-c"))
+
+
+# --- recommendations an answer must name ------------------------------------------------------------------------
+
+HOSTS = ("orion", "vega", "lyra")
+
+
+def keyed_rec(host: str, temp: int, severity: Severity = Severity.CRITICAL) -> Recommendation:
+    return Recommendation(id=f"r-{host}", title=f"CPU on {host} at {temp}°C", key=f'cpu-hot{{instance="{host}"}}',
+                          severity=severity, status=Status.PROPOSED)  # fmt: skip
+
+
+def keyed_facts(kind: str = "morning") -> Facts:
+    recs = [keyed_rec(h, t) for h, t in zip(HOSTS, (91, 88, 87), strict=True)]
+    return Facts(kind=kind, at=LATE, proposed=recs[:2], approved=recs[2:])
+
+
+def test_a_recommendation_is_named_by_its_key_labels_or_title():
+    from argus_scout.narrative import rec_words
+
+    words = rec_words(keyed_rec("orion", 91))
+    assert words.strong == {"orion"} and words.weak == {"cpu", "91"}
+
+
+@pytest.mark.parametrize(
+    ("text", "missing"),
+    [
+        ("Good morning. orion, vega and lyra are running critically hot; check their fans first.", ()),
+        (
+            "Good morning. orion and vega are running critically hot; check their fans before anything else.",
+            ("r-lyra",),
+        ),  # fmt: skip
+        # Named by title words instead of the host: CPU and the temperature.
+        ("Good morning. Three CPUs are critical: 91°C, 88°C and 87°C. Check their cooling before anything else.", ()),
+    ],
+)
+def test_every_open_warning_recommendation_must_be_named(text, missing):
+    verdict = check_completion(completion(text), keyed_facts())
+    assert (verdict.missing if verdict else ()) == missing
+
+
+def test_a_status_update_requires_only_its_items():
+    """A status update lists no recommendations, so it can't be held to them."""
+    from argus_scout.narrative import required
+
+    facts = keyed_facts("status")
+    facts.groups = [_group("e1", "warning", "Disk on deneb at 91%")]
+    assert [r.ref for r in required(facts)] == ["e1"]
+
+
+def test_a_recommendation_cut_from_the_prompt_is_not_required():
+    from argus_scout.narrative import MAX_REQUIRED, required
+
+    recs = [keyed_rec(f"node{i:02d}x", 90, Severity.WARNING) for i in range(30)]
+    facts = Facts(kind="morning", at=LATE, proposed=recs)
+    _, selection = build_prompt(facts, DEFAULT_PERSONA, context_tokens=1100, max_tokens=300)
+    shown = {ln.ref for ln in selection.lines}
+    kept = [r for r in recs if r.id in shown]
+    assert 0 < len(kept) < len(recs) and selection.omitted["proposed"] == len(recs) - len(kept)
+    assert {r.ref for r in required(facts, shown)} == {r.id for r in kept[:MAX_REQUIRED]}
+    assert len(required(facts)) == MAX_REQUIRED  # capped, even with nothing cut
+    text = "Good morning. Warnings on " + ", ".join(r.title.split()[2] for r in kept) + "; check their cooling."
+    assert check_completion(completion(text), facts, shown) is None
+    assert check_completion(completion(text), facts).rule == "missing_items"  # held to what it never saw
+
+
+async def test_an_answer_missing_a_recommendation_falls_back_to_a_template_listing_all(store):
+    recs = [keyed_rec(f"node{i:02d}x", 90, Severity.WARNING) for i in range(12)]
+    recs += [keyed_rec(h, t) for h, t in zip(HOSTS, (91, 88, 87), strict=True)]
+    for rec in recs:
+        store.save_recommendation(rec)
+    answer = "Good morning. orion and vega are running critically hot; check their fans before anything else."
+    report = await narrator(store, FakeGenerator(answer)).report("morning")
+    meta = report.meta
+    assert meta["path"] == "template" and meta["rejected_check"]["rule"] == "missing_items"
+    assert "r-lyra" in meta["rejected_check"]["missing"]
+    assert all(r.title in report.text for r in recs)  # every one, past the ten-a-section cap
+    assert "more" not in report.text

@@ -159,9 +159,15 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
   host-c at 87°C. All exceed 85°C. Check cooling on all three. No other issues." (156 characters) is whole, while
   "All quiet." is not. When there's nothing to report, one short sentence (20 characters) is enough. An answer
   that was all `<think>` block is empty after cleaning, so it lands here.
-- **it leaves out an item that needs attention** (`hollow`): every open item that is a warning or critical, or
-  needs an acknowledgement, must be named. This is a floor, not a judgement of quality: a model that paraphrases
-  every word away gets the template, which is the safe side. How an item counts as named:
+- **it leaves out something that needs attention** (`hollow`, rule `missing_items`): it must name
+  - every open item that is a warning or critical, or needs an acknowledgement, and
+  - in a `morning` or `evening` briefing, every open recommendation (proposed or approved) at warning or above. A
+    `status` update lists only open items and rejections, so only its items are required.
+
+  Only what the prompt actually held is required: a fact the budget cut (above) was never shown to the model, so
+  it can't be held to it. At most 12 things are required, most severe first. This is a floor, not a judgement of
+  quality: a model that paraphrases every word away gets the template, which is the safe side. How an item counts
+  as named:
   - The answer and the item are split into words on anything that isn't a letter or digit, so source
     `ai-code-auditor` is `ai`, `code`, `auditor`, and `decision(s)` is `decision`.
   - Spelled-out numbers become digits first (0 to 999: "twenty-seven" is 27, "one hundred and five" is 105), since
@@ -174,6 +180,9 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
     `hostname`, `instance`, `node`, `device`, `mountpoint`, `service`, `job`, `container`, and every value of
     `labels`). One strong word names the item. Its **weak** words come from its summary, and it takes two distinct
     ones (one, if the summary has only one).
+  - A recommendation's **strong** words are the label values in its key (its rule's `labels_key`, such as the
+    `instance` or host), and its **weak** words come from its title. A recommendation for `instance="orion"` titled
+    "CPU on orion at 91°C" is named by "orion", or by "CPU" and "91".
 
   For an item from source `ai-code-auditor` with the summary "Rest completed: 27 confirmed, 0 draft PRs, 4
   decision(s)", "The code auditor finished its rest run with twenty-seven confirmed and four decisions to
@@ -202,8 +211,9 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
   morning briefing written at 22:56 with three critical recommendations open: "Evening. All systems nominal,
   nothing exploding. For once. host-a's CPU is at 91°C ... No immediate crises, but keep an eye on host-a."
 
-The template lists the items from the same facts (ten a section, but every warning, critical and item awaiting
-acknowledgement however many there are), so a model that fails never costs the report one of those. The stored `meta` still records what the model did:
+The template lists the items and recommendations from the same facts (ten a section, but every warning, critical
+and item awaiting acknowledgement, and every warning or critical recommendation, however many there are), so a
+model that fails never costs the report one of those. The stored `meta` still records what the model did:
 `completion_tokens` (the raw count, thinking included), `finish_reason`, `llm_chars` (what was left after
 cleaning), and `error` naming the check that failed. Scout logs `narrative.rejected_completion` with the same.
 

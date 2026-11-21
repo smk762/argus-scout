@@ -22,7 +22,9 @@ Three steps, each its own function so it can be tested and explained:
    ``meta.fallback_reason`` why.
 4. **Check** (:func:`assess_completion`). A model answer is used only if it is whole: not cut off by the token
    limit (``truncated``), and not hollow: past a low near-empty backstop (:data:`MIN_NARRATIVE_CHARS`), and naming every
-   open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`). Otherwise the
+   open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`), and for a briefing
+   every open recommendation at warning or above (:func:`must_mention_recs`), of those the prompt held
+   (:func:`required`). Otherwise the
    template writes the report from the same facts, so a model failure never drops one of those items. The
    check is a floor, not a judgement of quality (:func:`mentions` says what counts as naming an item). A refused
    answer is kept for audit, never delivered: ``meta.rejected_text`` holds a cleaned, clipped copy and
@@ -47,6 +49,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -525,8 +528,13 @@ def mentions(text: str, group: EventGroup) -> bool:
     named by one of its strong words (its source's parts, host and label values) or by two distinct words of its
     summary (one, if the summary has only one). An item with no distinctive words at all is taken as named."""
     words = item_words(group)
+    return names(text, words)
+
+
+def names(text: str, words: ItemWords) -> bool:
+    """Whether ``text`` names something described by ``words`` (the matching rules are :func:`mentions`')."""
     if not (words.strong or words.weak):
-        return True  # nothing to look for (a summary of generic words): don't refuse every answer over it
+        return True
     said = {_stem(w) for w in _tokens(text)}
     if words.strong & said:
         return True
@@ -536,6 +544,49 @@ def mentions(text: str, group: EventGroup) -> bool:
 def must_mention(facts: Facts) -> list[EventGroup]:
     """The open items no report may drop: warnings, criticals, and anything that needs an acknowledgement."""
     return [g for g in facts.groups if rank(g.latest.severity) >= rank(Severity.WARNING) or g.latest.requires_ack]
+
+
+def must_mention_recs(facts: Facts) -> list[Recommendation]:
+    """The open recommendations (proposed or approved) no briefing may drop: those at ``warning`` or above. A status
+    update lists no recommendations (:data:`KIND_SECTIONS`), so it has none."""
+    sections = KIND_SECTIONS.get(facts.kind, tuple(SECTIONS))
+    recs = [*(facts.proposed if "proposed" in sections else []), *(facts.approved if "approved" in sections else [])]
+    return [r for r in recs if rank(r.severity) >= rank(Severity.WARNING)]
+
+
+_KEY_LABEL = re.compile(r'[A-Za-z_][A-Za-z0-9_]*="((?:[^"\\]|\\.)*)"')
+
+
+def rec_words(rec: Recommendation) -> ItemWords:
+    """What names a recommendation: **strong**, the label values in its dedup key (its rule's ``labels_key``, such
+    as the host or instance); **weak**, the words of its title. Same matching as an item (:func:`mentions`)."""
+    strong = frozenset(k for value in _KEY_LABEL.findall(rec.key) for k in _keywords(value))
+    return ItemWords(strong, frozenset(_keywords(rec.title) - strong))
+
+
+MAX_REQUIRED = 12
+"""At most this many things an answer must name, most severe first: a briefing of 150 words can't name more."""
+
+
+@dataclass(frozen=True)
+class Required:
+    """One thing an answer must name: an open item or a recommendation, by its fact-line ref."""
+
+    ref: str
+    severity: Severity
+    words: ItemWords
+
+
+def required(facts: Facts, shown: Collection[str] | None = None) -> list[Required]:
+    """What an answer must name: every :func:`must_mention` item and :func:`must_mention_recs` recommendation,
+    most severe first, capped at :data:`MAX_REQUIRED`. With ``shown`` (the refs of the fact lines that made it into
+    the prompt), only those: the model is never held to a fact it wasn't given."""
+    found = [Required(g.latest.event_id, g.latest.severity, item_words(g)) for g in must_mention(facts)]
+    found += [Required(r.id, r.severity, rec_words(r)) for r in must_mention_recs(facts)]
+    if shown is not None:
+        found = [r for r in found if r.ref in shown]
+    found.sort(key=lambda r: -rank(r.severity))  # stable: items before recommendations within a severity
+    return found[:MAX_REQUIRED]
 
 
 ALL_CLEAR_PHRASES: tuple[str, ...] = (
@@ -606,10 +657,11 @@ class Verdict:
         return {"reason": self.reason, "rule": self.rule, "detail": self.detail, "missing": list(self.missing)}
 
 
-def check_completion(completion: Completion, facts: Facts) -> Verdict | None:
+def check_completion(completion: Completion, facts: Facts, shown: Collection[str] | None = None) -> Verdict | None:
     """``None`` when the answer may be delivered; otherwise the :class:`Verdict`: ``truncated`` (the token limit
-    cut it off), ``hollow`` (too short for its kind, or missing an item :func:`must_mention` names) or
-    ``contradicted`` (an all-clear phrase in a report of ``warning`` or above, :data:`ALL_CLEAR_PHRASES`)."""
+    cut it off), ``hollow`` (near-empty, or missing an item or recommendation :func:`required` names; ``shown`` is
+    the refs of the fact lines the prompt held) or ``contradicted`` (an all-clear phrase in a report of ``warning``
+    or above, :data:`ALL_CLEAR_PHRASES`)."""
     if completion.truncated:
         detail = f"the model hit its token limit ({completion.completion_tokens} tokens)"
         return Verdict("truncated", "token_limit", detail)
@@ -618,7 +670,7 @@ def check_completion(completion: Completion, facts: Facts) -> Verdict | None:
     if len(text) < floor:
         detail = f"the model's answer was {len(text)} characters, under {floor} for a {facts.kind} report"
         return Verdict("hollow", "too_short", detail)
-    missing = tuple(g.latest.event_id for g in must_mention(facts) if not mentions(text, g))
+    missing = tuple(r.ref for r in required(facts, shown) if not names(text, r.words))
     if missing:
         return Verdict("hollow", "missing_items", f"the model's answer left out {', '.join(missing)}", missing)
     severity = _worst_severity(facts)
@@ -661,9 +713,10 @@ def rejection_meta(completion: Completion, verdict: Verdict) -> dict[str, Any]:
 
 def render_template(facts: Facts, persona: Persona, *, reason: str = "") -> str:
     """A plain-text report from the facts alone, no model: deterministic, and never empty. At most
-    :data:`TEMPLATE_MAX_PER_SECTION` lines a section, except that every item :func:`must_mention` names is listed."""
+    :data:`TEMPLATE_MAX_PER_SECTION` lines a section, except that every item :func:`must_mention` and every
+    recommendation :func:`must_mention_recs` names is listed, uncapped."""
     lines = fact_lines(facts)
-    keep = {g.latest.event_id for g in must_mention(facts)}
+    keep = {g.latest.event_id for g in must_mention(facts)} | {r.id for r in must_mention_recs(facts)}
     out = [f"{TITLES.get(facts.kind, 'Report')}, {facts.at:%a %d %b %H:%M}."]
     headings = {
         "items": "Needs attention:",
@@ -832,7 +885,7 @@ class Narrator:
                     "finish_reason": completion.finish_reason,
                     "llm_chars": len(completion.text),
                 }
-                verdict = check_completion(completion, facts)
+                verdict = check_completion(completion, facts, {ln.ref for ln in selection.lines})
                 if verdict is None:
                     meta |= {
                         "path": "llm",
@@ -994,7 +1047,13 @@ __all__ = [
     "fact_lines",
     "ground_persona",
     "mentions",
+    "MAX_REQUIRED",
+    "Required",
     "must_mention",
+    "must_mention_recs",
+    "names",
+    "rec_words",
+    "required",
     "now_line",
     "numbers_to_digits",
     "rejection_meta",
