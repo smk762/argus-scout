@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/smk762/argus-cortex/dev/brand/packages/scout/argus-scout-lockup-dark.svg">
+  <img alt="argus scout" src="https://raw.githubusercontent.com/smk762/argus-cortex/dev/brand/packages/scout/argus-scout-lockup-light.svg" height="52">
+</picture>
+
 # argus-scout
 
 Homelab intelligence for the Argus suite. Scout reads your telemetry, reasons about it, and reports back with
