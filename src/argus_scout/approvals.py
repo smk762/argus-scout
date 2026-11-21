@@ -293,10 +293,10 @@ class StandingApprovals:
             return None
         return match
 
-    def apply(self, rec: Recommendation) -> StandingRule | None:
+    def apply(self, rec: Recommendation, now: datetime | None = None) -> StandingRule | None:
         """Approve ``rec`` if a standing rule covers it. Never deploys."""
-        rule = self.find_match(rec)
-        if rule is None or not rec.approve(rule_id=rule.rule_id):
+        rule = self.find_match(rec, now)
+        if rule is None or not rec.approve(rule_id=rule.rule_id, now=now):
             return None
         self.match_counts[rule.rule_id] = self.match_counts.get(rule.rule_id, 0) + 1
         return rule

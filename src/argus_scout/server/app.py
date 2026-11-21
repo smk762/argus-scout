@@ -24,6 +24,7 @@ from argus_scout.config import ScoutConfig
 from argus_scout.cycles import register_jobs
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.inbox import Inbox
+from argus_scout.prometheus import PrometheusClient
 from argus_scout.scheduler import Clock, Scheduler, Sleep, utc_now
 from argus_scout.server.metrics import ScoutCollector, build_registry
 from argus_scout.sources import Sources
@@ -56,6 +57,7 @@ def build_runtime(
     budget: DailyBudget | None = None,
     inbox: Inbox | None = None,
     sources: Sources | None = None,
+    prometheus: PrometheusClient | None = None,
     clock: Clock = utc_now,
     sleep: Sleep | None = None,
 ) -> Runtime:
@@ -68,7 +70,7 @@ def build_runtime(
     tariff = TariffFile(config.files.tariff)
     scheduler = Scheduler(store, clock=clock, **({"sleep": sleep} if sleep else {}))
     inbox = inbox or Inbox(store, clock=clock)
-    register_jobs(scheduler, config, store, policy_file, inbox=inbox, sources=sources)
+    register_jobs(scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus)
     collector = ScoutCollector(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
     )

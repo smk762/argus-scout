@@ -1,0 +1,256 @@
+# Signal rules: PromQL questions that raise recommendations.
+#
+# Scout asks Prometheus (services.prometheus_url) and never contacts the hosts
+# themselves. Each cycle, every rule's query is run as an instant query; each
+# series whose value crosses `op threshold` is pending, and once the same
+# instance has crossed it on every cycle for `for`, scout proposes the rule's
+# recommendation. Proposals are advice: scout never acts on them.
+#
+# The file is re-read when it changes. A bad rule is skipped and reported; the
+# rest still load. Check with:
+#   argus-scout check signals examples/signals.yaml
+# Try the rules once against your Prometheus without writing anything:
+#   argus-scout analyze --config scout.yaml --dry-run
+#
+# Fields:
+#   name            unique; letters, digits, . _ -. Standing approvals match it as `analyzer`
+#   query           PromQL instant query; one sample per instance you care about
+#   op              > (default) | >= | < | <= | == | !=
+#   threshold       number the value is compared with
+#   for             how long it must hold before it's raised: 30s, 15m, 1h30m, 2d (default 0)
+#                   (kept in the store, so a restart doesn't reset it)
+#   severity        info | notice | warning (default) | critical
+#   escalate        optional list of {threshold, severity}: further thresholds that raise the severity
+#   labels_key      labels that make an instance distinct (default [instance]); one open
+#                   recommendation per rule + these label values, refreshed while it holds
+#   labels          extra labels the text may quote, without affecting identity
+#   rejection_ttl   optional: a rejected proposal may be raised again after this long.
+#                   Without it a rejection holds until the signal escalates past the rejected severity
+#   expires_after   optional: an unanswered proposal is retired this long after the signal was last
+#                   seen (default 7d). It is also retired once the signal has cleared for an hour
+#   recommendation  title, action, rationale, impact (low | medium | high...), confidence (low | medium | high)
+#
+# Text placeholders: {value} {threshold} {op} {rule} {severity} {for}, plus any
+# label in labels_key or labels. Numbers take a precision, like {value:.1f} or
+# {value:.0%}; nothing else (no attribute access, no other format specs).
+#
+# High-impact proposals and critical signals are never auto-approved by a
+# standing approval, whatever approvals.yaml says.
+#
+# The thresholds below are starting points, not advice for your hardware.
+
+rules:
+  # --- storage ---------------------------------------------------------------
+  - name: disk-filling
+    query: >-
+      100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+             / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"})
+    op: ">"
+    threshold: 85
+    for: 15m
+    severity: warning
+    escalate:
+      - {threshold: 95, severity: critical}
+    labels_key: [instance, mountpoint]
+    rejection_ttl: 14d
+    recommendation:
+      title: "{mountpoint} on {instance} is {value:.0f}% full"
+      action: Free space on {mountpoint} (old snapshots, logs, caches) or grow the volume.
+      rationale: Used space has been above {threshold:.0f}% for {for}.
+      impact: low
+      confidence: high
+
+  # Linear extrapolation of the last 6h: full within a day.
+  - name: disk-full-soon
+    query: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 86400)
+    op: "<"
+    threshold: 0
+    for: 30m
+    severity: warning
+    labels_key: [instance, mountpoint]
+    recommendation:
+      title: "{mountpoint} on {instance} will fill within a day at this rate"
+      action: Find what is writing to {mountpoint} and free space before it fills.
+      rationale: The last 6h of writes, extrapolated, run out of space in under 24h.
+      impact: medium
+      confidence: medium
+
+  # --- availability ----------------------------------------------------------
+  - name: node-exporter-down
+    query: up{job="node"}
+    op: "=="
+    threshold: 0
+    for: 5m
+    severity: warning
+    labels_key: [instance]
+    labels: [job]
+    recommendation:
+      title: "{instance} has stopped reporting to Prometheus"
+      action: Check that {instance} is up and its {job} exporter is running.
+      rationale: The scrape target has been down for {for}; scout knows nothing about it meanwhile.
+      impact: low
+      confidence: high
+
+  # --- load and memory -------------------------------------------------------
+  - name: high-load
+    query: >-
+      node_load15
+      / on (instance) count by (instance) (node_cpu_seconds_total{mode="idle"})
+    op: ">"
+    threshold: 1.5
+    for: 30m
+    severity: notice
+    escalate:
+      - {threshold: 3, severity: warning}
+    labels_key: [instance]
+    recommendation:
+      title: "{instance} is overloaded ({value:.1f}x its CPUs)"
+      action: Find the busiest workloads on {instance}; move or reschedule what can wait.
+      rationale: The 15-minute load per CPU has stayed above {threshold:.1f} for {for}.
+      impact: low
+      confidence: medium
+
+  - name: memory-low
+    query: 100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+    op: "<"
+    threshold: 10
+    for: 15m
+    severity: warning
+    escalate:
+      - {threshold: 3, severity: critical}
+    labels_key: [instance]
+    recommendation:
+      title: "{instance} is low on memory ({value:.0f}% available)"
+      action: Find what is using memory on {instance}; restart or limit the leak, or add memory.
+      rationale: Available memory has been under {threshold:.0f}% for {for}.
+      impact: medium
+      confidence: medium
+
+  # --- backups ---------------------------------------------------------------
+  # Assumes the backup job writes a last-success timestamp (e.g. via node
+  # exporter's textfile collector). Rename the metric to whatever yours exports.
+  - name: backup-stale
+    query: (time() - backup_last_success_timestamp_seconds) / 3600
+    op: ">"
+    threshold: 26
+    for: 0s
+    severity: warning
+    escalate:
+      - {threshold: 72, severity: critical}
+    labels_key: [instance, job]
+    recommendation:
+      title: "The {job} backup on {instance} last succeeded {value:.0f}h ago"
+      action: Check the {job} backup's logs and run it by hand once the cause is fixed.
+      rationale: The last successful run is older than {threshold:.0f}h.
+      impact: low
+      confidence: high
+
+  # --- thermal ---------------------------------------------------------------
+  - name: cpu-hot
+    query: max by (instance) (node_hwmon_temp_celsius{chip=~".*coretemp.*|.*k10temp.*"})
+    op: ">="
+    threshold: 75
+    for: 10m
+    severity: warning
+    escalate:
+      - {threshold: 85, severity: critical}
+    labels_key: [instance]
+    recommendation:
+      title: "CPU on {instance} is running hot ({value:.0f}°C)"
+      action: Check airflow and fans on {instance}, and what is keeping it busy.
+      rationale: The hottest CPU sensor has been at or above {threshold:.0f}°C for {for}.
+      impact: low
+      confidence: medium
+
+  # Rate of rise, °C per minute over the last 10 minutes.
+  - name: cpu-heating-fast
+    query: 60 * max by (instance) (deriv(node_hwmon_temp_celsius{chip=~".*coretemp.*|.*k10temp.*"}[10m]))
+    op: ">"
+    threshold: 2
+    for: 0s
+    severity: notice
+    labels_key: [instance]
+    recommendation:
+      title: "CPU on {instance} is heating quickly ({value:.1f}°C/min)"
+      action: Check whether a fan has stopped or a job has started on {instance}.
+      rationale: The CPU temperature is rising faster than {threshold:.0f}°C a minute.
+      impact: low
+      confidence: low
+
+  - name: gpu-hot
+    query: DCGM_FI_DEV_GPU_TEMP
+    op: ">="
+    threshold: 80
+    for: 10m
+    severity: warning
+    escalate:
+      - {threshold: 90, severity: critical}
+    labels_key: [instance, gpu]
+    recommendation:
+      title: "GPU {gpu} on {instance} is running hot ({value:.0f}°C)"
+      action: Check the GPU's fans and airflow, or cap its power limit.
+      rationale: The GPU has been at or above {threshold:.0f}°C for {for}.
+      impact: low
+      confidence: medium
+
+  # --- network ---------------------------------------------------------------
+  - name: dns-slow
+    query: 1000 * avg_over_time(probe_dns_lookup_time_seconds[5m])
+    op: ">="
+    threshold: 50
+    for: 10m
+    severity: notice
+    escalate:
+      - {threshold: 200, severity: warning}
+    labels_key: [instance]
+    recommendation:
+      title: "DNS lookups via {instance} are slow ({value:.0f} ms)"
+      action: Check the resolver at {instance} and its upstreams.
+      rationale: The 5-minute average lookup time has been over {threshold:.0f} ms for {for}.
+      impact: low
+      confidence: medium
+
+  - name: interface-errors
+    query: rate(node_network_receive_errs_total{device!~"lo|veth.*|docker.*|br-.*"}[5m])
+    op: ">"
+    threshold: 0
+    for: 15m
+    severity: notice
+    labels_key: [instance, device]
+    recommendation:
+      title: "{device} on {instance} is receiving errors ({value:.2f}/s)"
+      action: Check the cable, port and negotiated speed for {device} on {instance}.
+      rationale: Receive errors have been counted continuously for {for}.
+      impact: low
+      confidence: medium
+
+  # --- power -----------------------------------------------------------------
+  - name: ups-battery-low
+    query: network_ups_tools_battery_charge_percent
+    op: "<"
+    threshold: 30
+    for: 0s
+    severity: warning
+    escalate:
+      - {threshold: 15, severity: critical}
+    labels_key: [instance]
+    recommendation:
+      title: "UPS battery at {value:.0f}%"
+      action: Check whether mains power is out; plan a clean shutdown of non-essential hosts.
+      rationale: The UPS battery is below {threshold:.0f}%.
+      impact: high
+      confidence: high
+
+  - name: ups-load-high
+    query: network_ups_tools_ups_load_percent
+    op: ">"
+    threshold: 80
+    for: 15m
+    severity: warning
+    labels_key: [instance]
+    recommendation:
+      title: "UPS load is high ({value:.0f}%)"
+      action: Move a non-essential load off the UPS so its runtime covers a clean shutdown.
+      rationale: The UPS has been above {threshold:.0f}% load for {for}.
+      impact: low
+      confidence: medium

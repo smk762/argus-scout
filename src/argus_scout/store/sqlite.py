@@ -114,6 +114,21 @@ MIGRATIONS: tuple[str, ...] = (
         error_count     INTEGER NOT NULL DEFAULT 0
     );
     """,
+    # 3: recommendation dedup key (rule + distinguishing labels). Older rows have no key.
+    """
+    ALTER TABLE recommendations ADD COLUMN key TEXT NOT NULL DEFAULT '';
+    UPDATE recommendations SET key = COALESCE(json_extract(data, '$.key'), '');
+    CREATE INDEX recommendations_key ON recommendations (key, status, updated_at);
+    """,
+    # 4: signal rules' pending ``for`` state, so a restart doesn't reset how long a condition has held
+    """
+    CREATE TABLE signal_pending (
+        rule  TEXT NOT NULL,
+        key   TEXT NOT NULL,
+        since TEXT NOT NULL,
+        PRIMARY KEY (rule, key)
+    );
+    """,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -150,6 +165,23 @@ def migrate(conn: sqlite3.Connection) -> int:
 
 class SqliteStore:
     """The default :class:`~argus_scout.store.base.Store`. ``path`` may be ``":memory:"``."""
+
+    @classmethod
+    def copy_of(cls, path: Path | str) -> SqliteStore:
+        """An in-memory copy of the database at ``path`` (read-only open; empty if it doesn't exist).
+
+        Writes to the copy never reach the file: a dry run sees real history without changing it.
+        """
+        store = cls(":memory:")
+        if str(path) != ":memory:" and Path(path).is_file():
+            src = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                with store._lock:
+                    src.backup(store._conn)
+                    migrate(store._conn)
+            finally:
+                src.close()
+        return store
 
     def __init__(self, path: Path | str) -> None:
         self.path = str(path)
@@ -333,14 +365,15 @@ class SqliteStore:
             row = conn.execute("SELECT status FROM recommendations WHERE id = ?", (rec.id,)).fetchone()
             prior = Status(row["status"]) if row else None
             conn.execute(
-                """INSERT INTO recommendations (id, status, analyzer, created_at, updated_at, data)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO recommendations (id, status, analyzer, key, created_at, updated_at, data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (id) DO UPDATE SET status = excluded.status, analyzer = excluded.analyzer,
-                       updated_at = excluded.updated_at, data = excluded.data""",
+                       key = excluded.key, updated_at = excluded.updated_at, data = excluded.data""",
                 (
                     rec.id,
                     rec.status.value,
                     rec.analyzer,
+                    rec.key,
                     _ts(rec.created_at),
                     _ts(rec.updated_at),
                     json.dumps(rec.to_dict()),
@@ -354,7 +387,8 @@ class SqliteStore:
             if by is None and source == "standing" and rule_id:
                 by = f"rule:{rule_id}"
             if reason is None:
-                reason = rec.rejection_reason if rec.status == Status.REJECTED else ""
+                reasons = {Status.REJECTED: rec.rejection_reason, Status.RETIRED: rec.retired_reason}
+                reason = reasons.get(rec.status, "")
             at = (rec.approved_at if approved else None) or rec.updated_at
             conn.execute(
                 """INSERT INTO recommendation_transitions
@@ -382,6 +416,25 @@ class SqliteStore:
             sql += " LIMIT ?"
             params.append(int(limit))
         return [Recommendation.from_dict(json.loads(r["data"])) for r in self._query(sql, params)]
+
+    def recommendations_by_key(self, key: str, status: Status | Iterable[Status] | None = None) -> list[Recommendation]:
+        """Recommendations with this dedup key, most recently updated first."""
+        sql = "SELECT data FROM recommendations WHERE key = ?"
+        params: list[Any] = [key]
+        if status is not None:
+            statuses = [status] if isinstance(status, str) else list(status)
+            sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+            params.extend(Status(s).value for s in statuses)
+        sql += " ORDER BY updated_at DESC, id"
+        return [Recommendation.from_dict(json.loads(r["data"])) for r in self._query(sql, params)]
+
+    def recent_rejections(self, limit: int = 10) -> list[Recommendation]:
+        """Rejected recommendations, most recently rejected first (with their reasons)."""
+        rows = self._query(
+            "SELECT data FROM recommendations WHERE status = ? ORDER BY updated_at DESC, id LIMIT ?",
+            (Status.REJECTED.value, int(limit)),
+        )
+        return [Recommendation.from_dict(json.loads(r["data"])) for r in rows]
 
     def recommendation_history(self, rec_id: str) -> list[Transition]:
         rows = self._query("SELECT * FROM recommendation_transitions WHERE rec_id = ? ORDER BY id", (rec_id,))
@@ -421,6 +474,32 @@ class SqliteStore:
     def delete_runtime_rule(self, rule_id: str) -> bool:
         with self._tx() as conn:
             return conn.execute("DELETE FROM standing_rules WHERE rule_id = ?", (rule_id,)).rowcount > 0
+
+    # -- signal rules' pending state ---------------------------------------------------
+    def load_signal_pending(self) -> dict[str, dict[str, datetime]]:
+        """Since when each (rule, instance key) condition has held, for rules still pending."""
+        pending: dict[str, dict[str, datetime]] = {}
+        for r in self._query("SELECT rule, key, since FROM signal_pending"):
+            pending.setdefault(r["rule"], {})[r["key"]] = _dt(r["since"])  # type: ignore[assignment]
+        return pending
+
+    def save_signal_pending(self, rule: str, pending: dict[str, datetime]) -> None:
+        """Replace one rule's pending state."""
+        with self._tx() as conn:
+            conn.execute("DELETE FROM signal_pending WHERE rule = ?", (rule,))
+            conn.executemany(
+                "INSERT INTO signal_pending (rule, key, since) VALUES (?, ?, ?)",
+                [(rule, key, _ts(since)) for key, since in pending.items()],
+            )
+
+    def drop_signal_pending(self, keep: Iterable[str]) -> int:
+        """Forget the pending state of every rule not in ``keep`` (rules removed from the file)."""
+        keep = list(keep)
+        sql = "DELETE FROM signal_pending"
+        if keep:
+            sql += f" WHERE rule NOT IN ({', '.join('?' * len(keep))})"
+        with self._tx() as conn:
+            return conn.execute(sql, keep).rowcount
 
     # -- reports -------------------------------------------------------------------
     @staticmethod

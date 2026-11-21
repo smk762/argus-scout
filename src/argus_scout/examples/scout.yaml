@@ -15,6 +15,7 @@ files:
   # heartbeat: heartbeat.yaml   # what is worth interrupting for
   # approvals: approvals.yaml   # standing approvals (approve only, never deploy)
   # tariff: tariff.yaml         # time-of-use energy tariff
+  # signals: signals.yaml       # PromQL rules that raise recommendations
 
 # Where scout keeps events, recommendations, approvals and reports.
 store:
