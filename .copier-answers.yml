@@ -1,0 +1,22 @@
+# Managed by Copier — do not edit by hand.
+# Run `copier update` in this repo to pull template changes.
+_commit: aec30cd
+_src_path: gh:smk762/argus-pkg-template
+author: smk762
+brand_mark: false
+cli_name: argus-scout
+description: 'Homelab intelligence for the Argus suite: reads your telemetry, reasons
+    about it, and reports back with briefings and recommendations it never acts on'
+dockerfile: Dockerfile
+github_owner: smk762
+has_cli: true
+has_server: true
+image_name: argus-scout
+package_name: argus_scout
+post_test: ''
+project_name: argus-scout
+python_min: '3.12'
+ruff_pin: 0.15.16
+test_extras: dev
+version_build_arg: false
+
