@@ -152,10 +152,13 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
 
 - **it was cut off** (`truncated`): the server said it stopped at the token limit. Whatever came after the cut,
   an item that needs acknowledgement included, is missing.
-- **it is too short** (`hollow`): under 160 characters for a `morning` or `evening` report, or 40 for `status`
-  (about a sentence; a 150-word briefing is about 900 characters). When there's nothing to report, one short
-  sentence (20 characters) is enough. An answer that was all `<think>` block is empty after cleaning, so it lands
-  here.
+- **it is near-empty** (`hollow`, rule `too_short`): under 60 characters for a `morning` or `evening` report, or
+  40 for `status`. This is only a backstop for output that is next to nothing; whether an answer covers what
+  matters is the next rule's job, which checks content directly. So a terse answer that names every item needing
+  attention passes, however short: "Good morning. Three critical CPU temperatures: host-a at 91°C, host-b at 88°C,
+  host-c at 87°C. All exceed 85°C. Check cooling on all three. No other issues." (156 characters) is whole, while
+  "All quiet." is not. When there's nothing to report, one short sentence (20 characters) is enough. An answer
+  that was all `<think>` block is empty after cleaning, so it lands here.
 - **it leaves out an item that needs attention** (`hollow`): every open item that is a warning or critical, or
   needs an acknowledgement, must be named. This is a floor, not a judgement of quality: a model that paraphrases
   every word away gets the template, which is the safe side. How an item counts as named:

@@ -139,7 +139,7 @@ def test_no_severity_nudge_when_nothing_is_a_warning():
     ],
 )
 def test_all_clear_in_a_critical_report_is_refused(text, refused):
-    while len(text) < 160:  # past the too_short floor, so only this rule can refuse it
+    while len(text) < 160:  # well past the too_short backstop, so only this rule can refuse it
         text += PAD
     verdict = check_completion(completion(text), critical_facts())
     if refused:
@@ -222,3 +222,54 @@ async def test_withheld_persona_lines_are_recorded(store, write_file):
     report = await narrator(store, gen, persona=PersonaFile(path)).report("morning")
     assert report.meta["persona_withheld"] == [CATCHPHRASE]
     assert CATCHPHRASE not in gen.prompts[0].system
+
+
+# --- length: a backstop, not a judge of coverage -----------------------------------------------------------------
+
+LIVE_ANSWER = (
+    "Good morning. Three critical CPU temperatures: host-a at 91°C, host-b at 88°C, host-c at 87°C. "
+    "All exceed 85°C. Check cooling on all three. No other issues."
+)
+"""A real qwen3:8b answer (hosts replaced): whole and correct, and refused by the old 160-character floor."""
+
+
+def critical_items(kind: str = "morning") -> Facts:
+    groups = [_group(f"e{i}", "critical", f"CPU on {host} at {t}°C") for i, (host, t) in
+              enumerate((("host-a", 91), ("host-b", 88), ("host-c", 87)))]  # fmt: skip
+    return Facts(kind=kind, at=LATE, groups=groups)
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"),
+    [
+        (LIVE_ANSWER, None),  # 156 characters, every critical item named
+        ("All quiet. Nothing to see here", "too_short"),  # 30 characters: near-empty
+        ("All quiet.", "too_short"),
+        ("", "too_short"),
+        # Past the backstop but leaving out host-c: the content rule refuses it, not the length.
+        (
+            "Good morning. Two critical CPU temperatures: host-a at 91°C and host-b at 88°C. Check cooling.",
+            "missing_items",
+        ),
+    ],
+)
+@pytest.mark.parametrize("facts", [critical_items(), critical_facts()], ids=["items", "recommendations"])
+def test_length_is_only_a_near_empty_backstop(text, rule, facts):
+    assert len(LIVE_ANSWER) == 156
+    if rule == "missing_items" and not facts.groups:
+        rule = None  # recommendations aren't items an answer must name
+    verdict = check_completion(completion(text), facts)
+    assert (verdict.rule if verdict else None) == rule
+
+
+async def test_a_short_whole_answer_is_delivered_and_a_near_empty_one_is_not(store):
+    from argus_scout.inbox import Inbox
+
+    inbox = Inbox(store, clock=lambda: T0)
+    for group in critical_items().groups:
+        inbox.ingest(group.latest)
+    whole = await narrator(store, FakeGenerator(LIVE_ANSWER)).report("morning")
+    assert whole.meta["path"] == "llm" and whole.text == LIVE_ANSWER
+    empty = await narrator(store, FakeGenerator("All quiet. Nothing to see here")).report("morning")
+    assert empty.meta["path"] == "template" and empty.meta["rejected_check"]["rule"] == "too_short"
+    assert all(f"CPU on {h}" in empty.text for h in ("host-a", "host-b", "host-c"))

@@ -21,7 +21,7 @@ Three steps, each its own function so it can be tested and explained:
    is never silently skipped. The report's ``meta.path`` says which ran (``llm`` or ``template``) and
    ``meta.fallback_reason`` why.
 4. **Check** (:func:`assess_completion`). A model answer is used only if it is whole: not cut off by the token
-   limit (``truncated``), and not hollow: at least :data:`MIN_NARRATIVE_CHARS` for its kind, and naming every
+   limit (``truncated``), and not hollow: past a low near-empty backstop (:data:`MIN_NARRATIVE_CHARS`), and naming every
    open item that is a warning, critical or needs an acknowledgement (:func:`must_mention`). Otherwise the
    template writes the report from the same facts, so a model failure never drops one of those items. The
    check is a floor, not a judgement of quality (:func:`mentions` says what counts as naming an item). A refused
@@ -134,10 +134,12 @@ GREETING: dict[str, str] = {
 """How each kind may greet. **A report greets for its kind, never for the clock**: a ``morning`` briefing written
 at 23:00 by hand is still the morning briefing, so it says "Good morning" or nothing, never "Evening"."""
 
-MIN_NARRATIVE_CHARS: dict[str, int] = {"morning": 160, "evening": 160, "status": 40}
-"""The shortest model answer accepted for a report with something in it. A 150-word briefing is about 900
-characters and an 80-word status update about 480; an answer under these is a sentence or two and is taken as
-hollow (the model ran out of budget, or wrote a pleasantry instead of the report)."""
+MIN_NARRATIVE_CHARS: dict[str, int] = {"morning": 60, "evening": 60, "status": 40}
+"""A low backstop for a report with something in it: under this an answer is near-empty (the model ran out of
+budget, or wrote a pleasantry instead of the report). It is deliberately low. Whether an answer covers what
+matters is the ``missing_items`` rule's job, which checks the content directly: a terse answer that names every
+warning, critical and needs-ack item is whole, however short (a real 156-character briefing naming three critical
+items was once refused by a 160-character floor)."""
 MIN_EMPTY_NARRATIVE_CHARS = 20
 """The shortest answer accepted when there is nothing to report: one short sentence saying so."""
 
