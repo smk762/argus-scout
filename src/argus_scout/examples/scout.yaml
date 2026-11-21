@@ -105,10 +105,15 @@ services:
   #   timeout: 120                           # seconds per call
   #   max_tokens: 400                        # most tokens one report may generate
   #   context_tokens: 3072                   # the model's context window; prompts are cut to fit
+  #   gpu:                                   # hold an argus-iris GPU lease around each call; leave out when hosted
+  #     min_vram_mb: 6000                    # weights plus working set, MiB
+  #     model_mb: 5200                       # the part that stays loaded in the model server
+  #     priority: background                 # briefings can wait; no grant in time means the template
+  #     # target: vllm:<MODEL>               # required for openai: the broker service serving the model
   # echo_url: http://<TTS_HOST>:8034
 
 # Daily usage caps: a ceiling in case a loop misbehaves. 0 or a missing kind is unlimited.
-# Counts reset at local midnight and are kept in usage.json beside the store.
+# Counts reset at local midnight and are kept in the store, shared by the server and the CLI.
 budget:
   limits:
     llm_calls: 48                 # model calls for reports (briefings and status updates)
