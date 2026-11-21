@@ -228,8 +228,9 @@ NETWORK_MODULES = {"httpx", "requests", "aiohttp", "urllib3", "socket", "http.cl
 FETCH_NAMES = {"afetch", "fetch"}
 # The only modules allowed to fetch at all: the Prometheus client, and the JSON status poller
 # (which GETs status endpoints the config names; it is a source of status events, not a scraper), and the
-# webhook channel (which POSTs messages to the one URL its config names; delivery, never a monitored host).
-FETCHERS = {"prometheus.py", "sources/json_poll.py", "channels/webhook.py"}
+# webhook channel (which POSTs messages to the one URL its config names; delivery, never a monitored host), and
+# the argus-echo synthesiser (which asks the one speech server ``services.echo.url`` names for audio).
+FETCHERS = {"prometheus.py", "sources/json_poll.py", "channels/webhook.py", "channels/echo.py"}
 
 
 def test_no_module_contacts_hosts_directly():

@@ -18,8 +18,8 @@ from argus_scout.channels.base import (
     DeliveryResult,
     NullSynthesiser,
     SpeechAudio,
-    SynthesisError,
     Synthesiser,
+    SynthesisError,
     VoiceChannel,
 )
 from argus_scout.channels.dispatcher import (

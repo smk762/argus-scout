@@ -421,6 +421,8 @@ def test_resolved_column_migration_keeps_open_events_open(tmp_path):
     conn = sqlite3.connect(db)
     conn.execute("DROP TABLE events")  # rebuild at the pre-resolved_at schema
     conn.executescript(MIGRATIONS[0].split("CREATE TABLE recommendations")[0])
+    conn.execute("DROP TABLE deliveries")  # and undo the later migrations that touch it
+    conn.executescript(MIGRATIONS[4])
     conn.execute(f"PRAGMA user_version = {before}")
     conn.commit()
     conn.close()

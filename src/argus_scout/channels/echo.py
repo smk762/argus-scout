@@ -200,9 +200,7 @@ class EchoSynthesiser:
         return self._allow[0]
 
     async def _fetch(self, path: str, **kw: Any) -> Reply:
-        return await (self.fetcher or afetch)(
-            self.config.url + path, allow_hosts=self._allow, max_redirects=0, **kw
-        )
+        return await (self.fetcher or afetch)(self.config.url + path, allow_hosts=self._allow, max_redirects=0, **kw)
 
     async def readiness(self) -> Readiness:
         """``warm`` or ``cold`` from echo's ``GET /health``; raises :class:`SynthesisError` when it is down or in
