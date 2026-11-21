@@ -9,6 +9,7 @@
       wait_ready: 0                   # seconds to wait for a screen that can be heard; 0: skip at once
       token_env: SCOUT_MASK_TOKEN     # optional: a bearer token for a proxy in front of mask
       transport: http                 # http (POST /push) or websocket (the source socket, which can disclose)
+      cloned_voice_consented: false   # websocket only: attest a cloned voice's owner consented (mask shows it)
       allow_cloned_voice: false       # http only: push a cloned voice with no disclosure (not recommended)
 
 argus-mask's agent contract (its README, "Agent clients: HTTP push and speak") is used as published:
@@ -28,8 +29,8 @@ argus-mask's agent contract (its README, "Agent clients: HTTP push and speak") i
   messages of raw PCM, paced at real time plus a one-second lead (as mask's own client does: the socket has no
   server-side pacing), then ``{"type": "end"}``; mask answers ``{"type": "done", "frames", "duration_ms"}`` and
   closes. A refusal is ``{"type": "error", "detail"}`` and a close (1013 for a face that already has a source,
-  which is skipped; anything else fails). ``disclose`` is true exactly when the audio is ``SpeechAudio.cloned``:
-  viewers then show mask's fixed label, "An AI voice of a real person, used with their consent." The socket has
+  which is skipped; anything else fails). ``disclose`` is true exactly when the audio is ``SpeechAudio.cloned``
+  (pushed only with ``cloned_voice_consented``): viewers then show mask's fixed label, "An AI voice of a real person, used with their consent." The socket has
   no ``require_screen``, so the ``/health`` check just before connecting is the only readiness check.
 
 **Not ready is skipped, not failed**: no screen (or a busy face) returns a ``skipped`` result unless
@@ -39,13 +40,15 @@ argus-mask has no authentication of its own (reaching its port is access, and it
 that sends no ``Origin`` through). ``token_env`` is for a reverse proxy that adds one. Mask takes its own GPU
 lease (argus-iris) for the stream; scout holds none.
 
-**Cloned voices are disclosed or refused.** Over the socket, speech marked ``SpeechAudio.cloned`` (argus-echo with
-a ``voice_clone_id``) goes with ``disclose: true``. ``/push`` carries no disclosure flag, so over http a clone is
+**Cloned voices are disclosed on attestation, or refused.** Over the socket, speech marked ``SpeechAudio.cloned``
+(argus-echo with a ``voice_clone_id``) goes with ``disclose: true`` only when the operator attests consent with
+``cloned_voice_consented: true``: the label asserts consent, which scout can't verify. Otherwise it is skipped,
+permanently and with a reason, before mask is contacted. ``/push`` carries no disclosure flag, so over http a clone is
 skipped, permanently and with a reason, before mask is contacted, unless the channel sets
 ``allow_cloned_voice: true`` (logged as a warning on every push: the face speaks a possibly real person's voice
 with nothing telling the viewer). The hello carries no consent reference: mask checks consent records only for
 voices it synthesises itself, and trusts a source's ``disclose``. Scout can't see whether a clone is consented,
-so the operator stays responsible for using only a consented clone; the label says it is.
+so it never asserts that on its own: ``cloned_voice_consented`` is the operator's attestation.
 
 Fetching (``/health``, ``/push``) goes through ``argus_cortex.net.afetch`` with only the configured host allowed and
 no redirects. The socket can't use ``afetch``, so it is pinned the same way here: the configured host is resolved
@@ -128,12 +131,22 @@ class MaskConfig(ChannelSettings):
     """http only: push speech in a cloned voice (``SpeechAudio.cloned``) anyway. Off by default: ``/push`` can't
     set mask's disclosure label, so a face would speak in a possibly real person's voice with no disclosure. Use
     ``transport: websocket`` instead, which discloses it. Ignored over websocket."""
+    cloned_voice_consented: bool = False
+    """websocket only: setting this attests that the owner of the cloned voice (``services.echo.voice_clone_id``)
+    consented to its use. Cloned speech is then pushed with mask's disclosure label, which every viewer sees as
+    "An AI voice of a real person, used with their consent": mask displays your claim. Scout can't verify it.
+    Unset, cloned speech is skipped over websocket. Synthetic voices are unaffected."""
 
 
 CLONED_REFUSAL = (
     "refused: the speech is in a cloned voice and argus-mask's /push cannot carry a disclosure; "
-    "use transport: websocket (which discloses it), or set allow_cloned_voice: true on this channel only if the "
+    "use transport: websocket with cloned_voice_consented: true (which discloses it), or set allow_cloned_voice: true on this channel only if the "
     "clone is consented and disclosed some other way"
+)
+UNATTESTED_REFUSAL = (
+    "refused: the speech is in a cloned voice, and argus-mask would label it as a real person's voice used with "
+    "their consent, which scout can't verify; set cloned_voice_consented: true on this channel only if the voice's "
+    "owner consented"
 )
 BUSY_MARK = "already has a source"
 """How mask's socket says the face is taken (close code 1013, which a driver that is down shares)."""
@@ -412,6 +425,9 @@ class MaskChannel:
 
     async def play(self, audio: SpeechAudio, message: Delivery) -> DeliveryResult:
         cfg = self.config
+        if audio.cloned and cfg.transport == "websocket" and not cfg.cloned_voice_consented:
+            log.warning("channel.mask.cloned_voice_unattested", channel=cfg.name, face=cfg.face, voice=audio.voice)
+            return DeliveryResult(ok=True, status="skipped", permanent=True, detail=UNATTESTED_REFUSAL)
         if audio.cloned and cfg.transport == "http":
             if not cfg.allow_cloned_voice:
                 log.warning("channel.mask.cloned_voice_refused", channel=cfg.name, face=cfg.face, voice=audio.voice)

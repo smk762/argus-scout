@@ -106,7 +106,7 @@ How scout uses echo's contracts:
 
 Echo's contract has no flag saying a voice is a clone, so scout decides from its own request: speech made with
 a `voice_clone_id` is marked as cloned. The `mask` channel shows it with mask's disclosure label over
-`transport: websocket`, and over http refuses it unless `allow_cloned_voice` is set (see `mask` below).
+`transport: websocket` when you attest consent (`cloned_voice_consented: true`), and over http refuses it unless `allow_cloned_voice` is set (see `mask` below).
 
 Echo has no speaker of its own, so there is no `echo` channel. Voice channels such as Snapcast and argus-mask
 play the audio.
@@ -323,6 +323,7 @@ watching it. It uses mask's published agent contracts: HTTP `POST /push` by defa
   face: <FACE_ID>
   wait_ready: 0
   transport: websocket   # recommended if scout ever speaks in a cloned voice
+  cloned_voice_consented: false   # true attests the clone's owner consented; mask shows that claim
 ```
 
 | Key | Default | Meaning |
@@ -335,6 +336,7 @@ watching it. It uses mask's published agent contracts: HTTP `POST /push` by defa
 | `token_env` | unset | Env var holding a bearer token, for a reverse proxy in front of mask. If it is set in the config but missing from the environment, nothing is sent. |
 | `timeout` | `120` | Seconds the whole delivery may take. Mask answers a push when the speech ends. |
 | `transport` | `http` | `http` (`POST /push`) or `websocket` (the source socket, `ws://` or `wss://` from `url`). See below. |
+| `cloned_voice_consented` | `false` | websocket only: your attestation that a cloned voice's owner consented. Mask displays that claim. Unset, cloned speech is skipped. See below. |
 | `allow_cloned_voice` | `false` | http only: push speech in a cloned voice with no disclosure. Not recommended: see below. |
 
 **Readiness** comes from `GET /health`, whichever transport is used. The face is ready when the driver is
@@ -353,7 +355,8 @@ that as skipped too, so speech never goes to a face no one can hear. Mask caps a
 **Speech over the socket** (`transport: websocket`) goes to `WS /session/<face>/source`:
 
 1. Scout sends a JSON hello: `{"sample_rate": …, "channels": …, "format": "s16le", "seed": …, "disclose": …}`.
-   `disclose` is `true` exactly when the speech is in a cloned voice, and `false` otherwise.
+   `disclose` is `true` exactly when the speech is in a cloned voice, and `false` otherwise. A cloned voice gets
+   this far only with `cloned_voice_consented: true`.
 2. Mask answers `{"type": "ready", …}` once its driver is open. If the face already has a source, mask answers
    `{"type": "error", …}` and closes, and the delivery is **skipped**. Any other refusal (a driver that is down, a
    face it doesn't serve, a read-only server) is a failure.
@@ -377,24 +380,28 @@ argus-mask has no authentication of its own. Reaching its port is access, so kee
 a proxy (`token_env`, sent on both transports). Mask takes its own GPU lease (argus-iris) for the stream, and scout
 takes none.
 
-**Cloned voices are disclosed, or refused.** argus-echo can speak in a cloned voice
+**Cloned voices are disclosed on your attestation, or refused.** argus-echo can speak in a cloned voice
 (`services.echo.voice_clone_id`), which may be a real person's. Speech synthesised with a `voice_clone_id` is marked
-as cloned. Built-in speakers and Qwen's designed voices aren't clones.
+as cloned. Built-in speakers and Qwen's designed voices aren't clones, and none of this applies to them.
 
-- Over **websocket**, a cloned voice goes with `disclose: true`. Every screen watching the face, and every recording,
-  shows mask's fixed label: *An AI voice of a real person, used with their consent.* `allow_cloned_voice` isn't
-  needed and is ignored.
+- Over **websocket**, a cloned voice is pushed only when you set `cloned_voice_consented: true`. That setting is
+  your attestation that the voice's owner consented. The speech then goes with `disclose: true`, and every screen
+  watching the face, and every recording, shows mask's fixed label: *An AI voice of a real person, used with their
+  consent.* Mask displays your claim, and scout can't verify it. Without the attestation, the channel **skips**
+  cloned speech (permanently, so it's never retried) with a reason naming the option, before contacting mask at
+  all. `allow_cloned_voice` plays no part here.
 - Over **http**, `/push` has no way to carry that label. The channel **skips** cloned speech (permanently, so it's
-  never retried) with a reason saying why, before contacting mask at all.
+  never retried) with a reason saying why, before contacting mask at all. `cloned_voice_consented` doesn't change
+  that.
 - `allow_cloned_voice: true` makes http push the clone anyway, with **no disclosure**. Scout logs a warning
   (`channel.mask.cloned_voice_undisclosed`) on every such push. It exists for a clone whose owner consented and
   whose viewers are told some other way. Prefer `transport: websocket`.
 
-**Consent stays your responsibility.** The hello's only consent field is `disclose`. It carries no consent record
-or owner id. Mask checks its consent records (signed releases, revocation) only for voices it synthesises itself,
+**Why it takes an attestation.** The hello's only consent field is `disclose`. It carries no consent record or
+owner id. Mask checks its consent records (signed releases, revocation) only for voices it synthesises itself,
 through `/speak` and `say`, from the voice's record in its Voices directory. A source on the socket is trusted to
-say whether to disclose. Scout can't see whether the echo clone it asked for is consented, so it doesn't invent a
-consent reference. It discloses every clone, and the label says the voice is used with consent. Use only a clone of
+say whether to disclose. Scout can't see whether the echo clone it asked for is consented, so it never asserts
+consent on its own and doesn't invent a consent reference. Set `cloned_voice_consented: true` only for a clone of
 someone who consented (mask's *A consenting speaker*, covered by a release). A *Personal use* clone shown on a face
 would claim a consent that doesn't exist, so use a synthetic `speaker` instead.
 

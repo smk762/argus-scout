@@ -635,7 +635,7 @@ def cloned(pcm: Pcm | None = None) -> SpeechAudio:
 async def test_mask_ws_discloses_a_cloned_voice_and_not_a_synthetic_one(source_server):
     fake = FakeSource()
     port = await source_server(fake)
-    channel, _ = ws_channel(port, seed=7)
+    channel, _ = ws_channel(port, seed=7, cloned_voice_consented=True)
     clone = await channel.play(cloned(), message())
     assert clone.ok and clone.status is None and "disclosed" in clone.detail
     plain = await channel.play(speech(), message())
@@ -644,14 +644,29 @@ async def test_mask_ws_discloses_a_cloned_voice_and_not_a_synthetic_one(source_s
     assert fake.hellos[0] == {"sample_rate": 22050, "channels": 1, "format": "s16le", "seed": 7, "disclose": True}
 
 
-async def test_mask_ws_cloned_voice_needs_no_allow_flag_but_http_still_refuses_it(source_server):
+async def test_mask_ws_cloned_voice_needs_the_consent_attestation(source_server):
+    """Mask's label asserts consent, which scout can't verify: a clone goes over the socket only on attestation."""
     fake = FakeSource()
-    channel, _ = ws_channel(await source_server(fake))
-    assert channel.config.allow_cloned_voice is False
-    assert (await channel.play(cloned(), message())).status is None
+    port = await source_server(fake)
+    unattested, health = ws_channel(port)
+    refused = await unattested.play(cloned(), message())
+    assert refused.ok and refused.status == "skipped" and refused.permanent
+    assert "cloned_voice_consented" in refused.detail
+    assert health.requests == [] and fake.requests == []  # mask is never contacted
+    assert (await unattested.play(speech(), message())).status is None  # a synthetic voice is unaffected
+    assert [h["disclose"] for h in fake.hellos] == [False]
+
+    attested, _ = ws_channel(port, cloned_voice_consented=True)
+    assert attested.config.allow_cloned_voice is False  # the http flag plays no part
+    pushed = await attested.play(cloned(), message())
+    assert pushed.ok and pushed.status is None and "disclosed" in pushed.detail
+    assert [h["disclose"] for h in fake.hellos] == [False, True]
+
+
+async def test_mask_http_still_refuses_a_clone_whatever_the_attestation():
     http = FakeMask(mask_health(screens=READY))
-    refused = await mask_channel(http).play(cloned(), message())
-    assert refused.status == "skipped" and refused.permanent and "transport: websocket" in refused.detail
+    refused = await mask_channel(http, cloned_voice_consented=True).play(cloned(), message())
+    assert refused.status == "skipped" and refused.permanent and "allow_cloned_voice" in refused.detail
     assert http.requests == []  # mask is never asked
 
 
@@ -683,7 +698,7 @@ async def test_mask_ws_busy_face_is_skipped_and_a_refusal_fails(source_server):
 
 async def test_mask_ws_not_ready_is_skipped_before_connecting(source_server):
     fake = FakeSource()
-    channel, _ = ws_channel(await source_server(fake), healths=[mask_health()])
+    channel, _ = ws_channel(await source_server(fake), healths=[mask_health()], cloned_voice_consented=True)
     result = await channel.play(cloned(), message())
     assert result.status == "skipped" and "not ready" in result.detail
     assert fake.requests == []
