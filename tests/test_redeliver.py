@@ -20,7 +20,8 @@ from argus_scout.channels import (
     SpeechAudio,
 )
 from argus_scout.channels.webhook import WebhookChannel
-from argus_scout.config import DeliveryConfig, TextChannel, WebhookChannel as WebhookChannelConfig, parse_config
+from argus_scout.config import DeliveryConfig, TextChannel, parse_config
+from argus_scout.config import WebhookChannel as WebhookChannelConfig
 from argus_scout.cycles import register_jobs
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.scheduler import Scheduler

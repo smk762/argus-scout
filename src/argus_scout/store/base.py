@@ -8,7 +8,7 @@ transition audit trail, reports).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
@@ -241,6 +241,18 @@ class Store(Protocol):
     def record_job_run(
         self, name: str, *, started_at: datetime, finished_at: datetime, error: str | None = None
     ) -> JobRun: ...
+
+    # -- daily usage counts (:class:`~argus_scout.budget.UsageCounter`) ------------------------
+    def usage_counts(self, day: str) -> dict[str, int]: ...
+
+    def consume_usage(self, day: str, kind: str, limit: int, *, allow_over: bool = False) -> tuple[bool, int]:
+        """Atomically charge one ``kind`` on ``day`` unless it is at ``limit`` (0: unlimited); safe across
+        processes sharing the store. Returns (charged, count after)."""
+        ...
+
+    def merge_usage(self, day: str, counts: Mapping[str, int]) -> None:
+        """Raise each count to at least the given one (importing an old ``usage.json``)."""
+        ...
 
     # -- counts for /metrics ------------------------------------------------------------
     def recommendation_counts(self) -> dict[Status, int]: ...

@@ -1,0 +1,33 @@
+# argus-iris GPU tenant manifest for argus-scout.
+# Validated by argus-cortex's TenantManifest (gpu-tenant-schema.json, tenant_version 1.0); tests/test_gpu.py fails if
+# it stops validating or drifts from the defaults in src/argus_scout/config.py (LLMGpuConfig) and gpu.py.
+#
+# With ARGUS_GPU_COORDINATOR=broker, scout registers this with the broker on its first lease
+# (ARGUS_GPU_TENANT_MANIFEST points at it; the Docker image ships it at /app/gpu-tenant.yaml). Tokens never go here:
+# ARGUS_GPU_BROKER_TOKEN lives in the host's .env.
+#
+# VRAM figures are MiB, for an 8B model and its KV cache; services.llm.gpu in scout.yaml overrides them per lease,
+# and the broker uses its learned p95 per kind when that is larger.
+#
+# Scout leases only around a report's model call, never around speech: synthesis is argus-echo's GPU work, under
+# echo's own manifest.
+tenant_version: "1.0"
+tenant: argus-scout
+description: Homelab briefings and status reports, written by a local language model.
+repo: smk762/argus-scout
+
+kinds:
+  # One report's model call (morning, evening or status). The lease names the configured model
+  # (ollama:<services.llm.model>, or services.llm.gpu.target for an OpenAI-compatible server). A briefing can wait,
+  # and with no grant in time the report is written from its template instead.
+  - kind: narrative
+    target: ollama
+    vram_mb: 6000
+    model_mb: 5200 # the model, which stays loaded in the model server
+    priority: background
+    preemptible: true
+    description: Writing one report with the configured language model.
+
+# Scout keeps no model loaded itself: the model server (Ollama, vLLM...) holds the weights and declares them in its own
+# manifest or the broker's config.
+residents: []

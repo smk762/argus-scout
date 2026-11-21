@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -163,10 +163,24 @@ MIGRATIONS: tuple[str, ...] = (
     """
     ALTER TABLE events ADD COLUMN resolved_at TEXT;
     """,
-    # 7: a failed delivery the channel refused permanently (a 4xx), which the redelivery sweep never retries
+    # 7: daily usage counts (budget caps: llm_calls, tts, speak, any kind), one row per local day and kind. Each
+    # charge is one atomic upsert, so the server and a CLI run sharing this file can't lose a count or exceed a cap
+    # together (was usage.json).
     """
-    ALTER TABLE deliveries ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0;
-    CREATE INDEX deliveries_report ON deliveries (report_id, channel);
+    CREATE TABLE IF NOT EXISTS usage_counts (
+        day  TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, kind)
+    );
+    """,
+    # 8: failed deliveries the channel refused permanently (a 4xx), which the redelivery sweep never retries: one
+    # row per such attempt. A side table, not a column, so replaying the migration is harmless.
+    """
+    CREATE TABLE IF NOT EXISTS delivery_refusals (
+        delivery_id INTEGER PRIMARY KEY REFERENCES deliveries (id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS deliveries_report ON deliveries (report_id, channel);
     """,
 )
 
@@ -649,20 +663,12 @@ class SqliteStore:
         with self._tx() as conn:
             cur = conn.execute(
                 """INSERT OR IGNORE INTO deliveries
-                       (delivery_key, channel, report_id, event_source, event_id, at, ok, error, permanent)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    delivery_key,
-                    channel,
-                    report_id,
-                    event_source,
-                    event_id,
-                    _ts(_now(at)),
-                    int(ok),
-                    error,
-                    int(permanent and not ok),
-                ),
+                       (delivery_key, channel, report_id, event_source, event_id, at, ok, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (delivery_key, channel, report_id, event_source, event_id, _ts(_now(at)), int(ok), error),
             )
+            if cur.rowcount > 0 and permanent and not ok:
+                conn.execute("INSERT INTO delivery_refusals (delivery_id) VALUES (?)", (cur.lastrowid,))
             return cur.rowcount > 0
 
     def undelivered_reports(self, since: datetime, *, max_failures: int) -> list[PendingDelivery]:
@@ -673,9 +679,10 @@ class SqliteStore:
             """SELECT r.id, r.kind, r.generated_at, r.text, r.meta,
                       d.channel, COUNT(*) AS failures, MAX(d.at) AS last_at
                  FROM deliveries d JOIN reports r ON r.id = d.report_id
+                 LEFT JOIN delivery_refusals x ON x.delivery_id = d.id
                 WHERE r.generated_at >= ? AND d.delivery_key = 'report:' || r.id
                 GROUP BY r.id, d.channel
-               HAVING SUM(d.ok) = 0 AND MAX(d.permanent) = 0 AND COUNT(*) < ?
+               HAVING SUM(d.ok) = 0 AND COUNT(x.delivery_id) = 0 AND COUNT(*) < ?
                 ORDER BY r.generated_at, r.id, d.channel""",
             (_ts(since), int(max_failures)),
         )
@@ -701,12 +708,15 @@ class SqliteStore:
 
     def list_deliveries(self, delivery_key: str | None = None, *, limit: int = 100) -> list[DeliveryRecord]:
         """Delivery attempts, newest first, optionally for one message."""
-        sql = "SELECT * FROM deliveries"
+        sql = (
+            "SELECT d.*, x.delivery_id IS NOT NULL AS permanent FROM deliveries d"
+            " LEFT JOIN delivery_refusals x ON x.delivery_id = d.id"
+        )
         params: list[Any] = []
         if delivery_key is not None:
-            sql += " WHERE delivery_key = ?"
+            sql += " WHERE d.delivery_key = ?"
             params.append(delivery_key)
-        sql += " ORDER BY at DESC, id DESC LIMIT ?"
+        sql += " ORDER BY d.at DESC, d.id DESC LIMIT ?"
         params.append(int(limit))
         return [self._delivery_from_row(r) for r in self._query(sql, params)]
 
@@ -760,6 +770,37 @@ class SqliteStore:
             row = conn.execute("SELECT * FROM job_runs WHERE name = ?", (name,)).fetchone()
         return self._job_from_row(row)
 
+    # -- daily usage counts (DailyBudget's UsageCounter) ---------------------------------------
+    def usage_counts(self, day: str) -> dict[str, int]:
+        return {r["kind"]: r["used"] for r in self._query("SELECT kind, used FROM usage_counts WHERE day = ?", (day,))}
+
+    def consume_usage(self, day: str, kind: str, limit: int, *, allow_over: bool = False) -> tuple[bool, int]:
+        """Charge one ``kind`` on ``day`` unless it is at ``limit``; returns (charged, count after).
+
+        The limit check is the upsert's own ``WHERE``, so check and increment are one statement inside one
+        ``BEGIN IMMEDIATE`` transaction: another connection (another process) can't slip in between them.
+        """
+        unlimited = allow_over or limit <= 0
+        with self._tx() as conn:
+            row = conn.execute(
+                """INSERT INTO usage_counts (day, kind, used) VALUES (?, ?, 1)
+                   ON CONFLICT (day, kind) DO UPDATE SET used = used + 1 WHERE ? OR used < ?
+                   RETURNING used""",
+                (day, kind, unlimited, limit),
+            ).fetchone()
+            if row is not None:
+                return True, row["used"]
+            used = conn.execute("SELECT used FROM usage_counts WHERE day = ? AND kind = ?", (day, kind)).fetchone()
+        return False, used["used"] if used else 0
+
+    def merge_usage(self, day: str, counts: Mapping[str, int]) -> None:
+        with self._tx() as conn:
+            conn.executemany(
+                """INSERT INTO usage_counts (day, kind, used) VALUES (?, ?, ?)
+                   ON CONFLICT (day, kind) DO UPDATE SET used = MAX(used, excluded.used)""",
+                [(day, str(kind), max(0, int(n))) for kind, n in counts.items()],
+            )
+
     # -- counts (read at scrape time by /metrics) ----------------------------------------
     def recommendation_counts(self) -> dict[Status, int]:
         """Recommendations per status; every status is present, zero when empty."""
@@ -794,8 +835,8 @@ class SqliteStore:
 
     # -- retention -------------------------------------------------------------------
     def prune(self, older_than: datetime) -> dict[str, int]:
-        """Delete events acked, resolved or expired before ``older_than``, and reports and delivery records older
-        than it.
+        """Delete events acked, resolved or expired before ``older_than``, reports and delivery records older
+        than it, and usage counts of earlier days.
 
         Open events, recommendations and their audit trail are never pruned.
         """
@@ -809,9 +850,12 @@ class SqliteStore:
             ).rowcount
             reports = conn.execute("DELETE FROM reports WHERE generated_at < ?", (cutoff,)).rowcount
             deliveries = conn.execute("DELETE FROM deliveries WHERE at < ?", (cutoff,)).rowcount
-        if events or reports or deliveries:
-            log.info("store.pruned", events=events, reports=reports, deliveries=deliveries, older_than=cutoff)
-        return {"events": events, "reports": reports, "deliveries": deliveries}
+            usage = conn.execute("DELETE FROM usage_counts WHERE day < ?", (older_than.date().isoformat(),)).rowcount
+        if events or reports or deliveries or usage:
+            log.info(
+                "store.pruned", events=events, reports=reports, deliveries=deliveries, usage=usage, older_than=cutoff
+            )
+        return {"events": events, "reports": reports, "deliveries": deliveries, "usage": usage}
 
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION", "SqliteStore", "migrate"]

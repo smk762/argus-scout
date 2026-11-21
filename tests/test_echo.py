@@ -157,7 +157,10 @@ async def test_wav_output_and_s16_input():
 
 async def test_a_cold_model_gets_the_load_timeout():
     """Resident contract: 503 while loading, or model_state unloaded, means the model loads first."""
-    for echo in (Echo(health=503, health_body={"status": "loading"}), Echo(health_body={**WARM, "model_state": "unloaded"})):
+    for echo in (
+        Echo(health=503, health_body={"status": "loading"}),
+        Echo(health_body={**WARM, "model_state": "unloaded"}),
+    ):
         await synth(echo).synthesise("hi", message())
         assert echo.calls[0]["timeout"] == ECHO.health_timeout
         assert echo.calls[1]["timeout"] == ECHO.load_timeout
@@ -283,7 +286,13 @@ def test_build_dispatcher_picks_echo_when_configured():
 def test_echo_config_and_the_echo_url_break():
     config = parse_config({"services": {"echo": {"url": "http://echo:8000", "speaker": "0", "format": "wav"}}})
     echo = config.services.echo
-    assert (echo.url, echo.speaker, echo.format, echo.language, echo.timeout) == ("http://echo:8000", "0", "wav", "en", 60.0)
+    assert (echo.url, echo.speaker, echo.format, echo.language, echo.timeout) == (
+        "http://echo:8000",
+        "0",
+        "wav",
+        "en",
+        60.0,
+    )
     with pytest.raises(ConfigError, match=r"echo_url was replaced by echo: \{url: \.\.\.\}"):
         parse_config({"services": {"echo_url": "http://echo:8000"}})
     with pytest.raises(ConfigError, match="set speaker as its own key"):
