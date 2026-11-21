@@ -20,11 +20,17 @@ from collections.abc import Callable, Mapping
 from contextvars import ContextVar, Token
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+if TYPE_CHECKING:
+    from argus_scout.config import ScoutConfig
+
 log = structlog.get_logger()
+
+USAGE_STATE_FILE = "usage.json"
+"""Daily usage counts, kept beside the store so a crash loop can't reset the caps."""
 
 # True while handling an HTTP request. Scheduler jobs run outside any request.
 _manual_origin: ContextVar[bool] = ContextVar("scout_budget_manual_origin", default=False)
@@ -175,6 +181,18 @@ class DailyBudget:
                 for kind in kinds
             },
         }
+
+
+def budget_from_config(config: ScoutConfig, *, persist: bool = True) -> DailyBudget:
+    """The budget ``budget:`` in scout.yaml describes, its counts kept in :data:`USAGE_STATE_FILE` beside the store.
+
+    ``persist=False`` reads today's counts but never writes them (a dry run)."""
+    db = str(config.store.path)
+    state = None if db == ":memory:" else Path(db).parent / USAGE_STATE_FILE
+    budget = DailyBudget(config.budget.limits, state_path=state, block_manual=config.budget.block_manual)
+    if not persist:
+        budget.state_path = None
+    return budget
 
 
 class ManualOriginMiddleware:

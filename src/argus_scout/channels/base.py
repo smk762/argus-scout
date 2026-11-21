@@ -24,6 +24,7 @@ a monitored host, and outbound HTTP goes only to the channel's configured URL th
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -41,6 +42,24 @@ REPORT_SOURCE = "scout"
 
 EVENT_KIND = "event"
 """The ``kind`` of a delivery built from an inbox item (reports carry their own kind: morning, status ...)."""
+
+
+_FENCE = re.compile(r"```.*?```", re.S)
+_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_LINE_MARK = re.compile(r"^\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)", re.M)
+_EMPHASIS = re.compile(r"(\*\*|__|\*|_|~~|`)(?=\S)(.+?)(?<=\S)\1")
+
+
+def plain_speech(text: str) -> str:
+    """``text`` with markdown stripped, for speech: code blocks dropped, links reduced to their text, headings,
+    quotes, list markers and emphasis removed, whitespace collapsed. Deliberately simple."""
+    text = _FENCE.sub(" ", text)
+    text = _LINK.sub(r"\1", text)
+    text = _LINE_MARK.sub("", text)
+    for _ in range(2):  # nested emphasis
+        text = _EMPHASIS.sub(r"\2", text)
+    text = text.replace("`", "")
+    return " ".join(text.split())
 
 
 class ChannelError(Exception):
@@ -72,10 +91,11 @@ class Delivery:
     @classmethod
     def from_report(cls, report: Report) -> Delivery:
         """A delivery for a stored report. ``meta`` may carry ``severity``, ``title`` and ``speakable``
-        (text to say instead of the report text, or ``false`` for a report that is never spoken)."""
+        (text to say instead of the report text, or ``false`` for a report that is never spoken). Otherwise the
+        spoken form is the report text with its markdown stripped (:func:`plain_speech`)."""
         meta = dict(report.meta or {})
         spoken = meta.get("speakable", True)
-        speakable = spoken if isinstance(spoken, str) else (report.text if spoken is not False else "")
+        speakable = spoken if isinstance(spoken, str) else (plain_speech(report.text) if spoken is not False else "")
         return cls(
             type="report",
             kind=report.kind,
@@ -200,4 +220,5 @@ __all__ = [
     "SpeechAudio",
     "Synthesiser",
     "VoiceChannel",
+    "plain_speech",
 ]

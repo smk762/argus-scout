@@ -36,9 +36,9 @@ from argus_scout.channels import registry as registry_module
 from argus_scout.channels.text import TextChannel, append, target_path
 from argus_scout.channels.webhook import PAYLOAD_SCHEMA, WebhookChannel, build_payload, post, sign
 from argus_scout.cli import app
-from argus_scout.config import ConfigError, TextChannel as TextChannelConfig
+from argus_scout.config import ConfigError, parse_config
+from argus_scout.config import TextChannel as TextChannelConfig
 from argus_scout.config import WebhookChannel as WebhookChannelConfig
-from argus_scout.config import parse_config
 from argus_scout.events import StatusEvent
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.server.app import build_runtime
@@ -124,7 +124,13 @@ def bound(channel, name, **kw) -> BoundChannel:
 
 def test_delivery_from_report_and_event():
     d = Delivery.from_report(report(7, severity="notice", speakable="Short version."))
-    assert (d.type, d.kind, d.key, d.severity, d.speakable) == ("report", "morning", "report:7", Severity.NOTICE, "Short version.")
+    assert (d.type, d.kind, d.key, d.severity, d.speakable) == (
+        "report",
+        "morning",
+        "report:7",
+        Severity.NOTICE,
+        "Short version.",
+    )
     assert Delivery.from_report(report(speakable=False)).speakable == ""
     assert Delivery.from_report(report()).speakable == "All quiet."
 
@@ -222,7 +228,9 @@ async def test_a_failing_speaker_or_synthesiser_fails_voice_only():
 
 async def test_no_synthesiser_holds_voice_back_and_text_still_goes():
     text, speaker = Recorder(), Speaker()
-    dispatcher = Dispatcher([bound(text, "log"), bound(speaker, "kitchen")], synthesiser=NullSynthesiser(), gates=OpenGates())
+    dispatcher = Dispatcher(
+        [bound(text, "log"), bound(speaker, "kitchen")], synthesiser=NullSynthesiser(), gates=OpenGates()
+    )
     result = await dispatcher.deliver(Delivery.from_report(report()))
     assert result.sent == ["log"]
     assert result.get("kitchen").status == "suppressed" and result.get("kitchen").detail == "no speech synthesiser"
@@ -390,8 +398,15 @@ def test_text_channel_rotates(tmp_path):
 # --- webhook channel -----------------------------------------------------------------------------------------
 
 HOOK = WebhookChannelConfig.model_validate(
-    {"kind": "webhook", "name": "chat", "url": "http://hooks.lan:8080/scout", "token_env": "HOOK_TOKEN",
-     "secret_env": "HOOK_SECRET", "retries": 2, "backoff": 0.5}
+    {
+        "kind": "webhook",
+        "name": "chat",
+        "url": "http://hooks.lan:8080/scout",
+        "token_env": "HOOK_TOKEN",
+        "secret_env": "HOOK_SECRET",
+        "retries": 2,
+        "backoff": 0.5,
+    }
 )
 ENV = {"HOOK_TOKEN": "tok", "HOOK_SECRET": "shh"}
 
@@ -427,7 +442,12 @@ async def test_webhook_payload_and_signature():
     assert payload == build_payload(message, channel="chat", sent_at=T0)
     assert payload["schema"] == PAYLOAD_SCHEMA and payload["schema_version"] == 1
     assert payload["type"] == "event" and payload["severity"] == "warning"
-    assert payload["event"] == {"source": "nas", "event_id": "disk", "requires_ack": False, "link": "https://ui.example/x"}
+    assert payload["event"] == {
+        "source": "nas",
+        "event_id": "disk",
+        "requires_ack": False,
+        "link": "https://ui.example/x",
+    }
     timestamp = request.headers["x-scout-timestamp"]
     assert timestamp == str(int(T0.timestamp()))
     expected = "sha256=" + hmac.new(b"shh", timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
@@ -604,7 +624,11 @@ def test_channel_config():
     with pytest.raises(ConfigError, match="not an http"):
         parse_config({"channels": [{"kind": "webhook", "name": "w", "url": "ftp://x"}]})
     config = parse_config(
-        {"channels": [{"kind": "webhook", "name": "w", "url": "https://h.example", "token_env": "A", "secret_env": "B"}]}
+        {
+            "channels": [
+                {"kind": "webhook", "name": "w", "url": "https://h.example", "token_env": "A", "secret_env": "B"}
+            ]
+        }
     )
     assert config.secret_env_names() == ["SCOUT_API_TOKEN", "A", "B"]
     assert parse_config({"channels": None}).channels == []
@@ -667,3 +691,32 @@ def test_starter_config_delivers_text_out_of_the_box(tmp_path):
     channels = build_channels(config)
     assert [(c.name, c.kind) for c in channels.channels] == [("log", "text")] and channels.errors == {}
     assert Path(channels.get("log").config.dir) == tmp_path
+
+
+async def test_a_briefing_job_writes_its_report_to_the_text_channel_once(tmp_path):
+    config = parse_config(
+        {
+            "channels": [{"kind": "text", "name": "log"}],
+            "schedule": {"briefings": [{"kind": "morning", "at": "07:30"}]},
+        },
+        tmp_path,
+    )
+    store = SqliteStore(":memory:")
+    runtime = build_runtime(config, store=store, clock=lambda: T0)
+    assert await runtime.scheduler.run_now("briefing:morning")
+    [stored] = store.list_reports(kind="morning")
+    log = (tmp_path / "scout-reports.log").read_text()
+    assert log.count(f"report:{stored.id}") == 1
+    assert stored.text.strip().splitlines()[0] in log
+    # Delivering it again (a retry, the CLI, a restart) doesn't write it twice.
+    assert (await runtime.deliver(stored)).get("log").status == "duplicate"
+    assert (tmp_path / "scout-reports.log").read_text() == log
+    assert store.delivered_channels(f"report:{stored.id}") == {"log"}
+
+
+def test_plain_speech():
+    from argus_scout.channels.base import plain_speech
+
+    md = "# Morning\n\n- **Disk** is _90%_ full, see [ui](http://x)\n```\ncode\n```\n1. Two `cmd`"
+    assert plain_speech(md) == "Morning Disk is 90% full, see ui Two cmd"
+    assert Delivery.from_report(report(text="**Hi** there")).speakable == "Hi there"

@@ -16,6 +16,9 @@ files:
   # approvals: approvals.yaml   # standing approvals (approve only, never deploy)
   # tariff: tariff.yaml         # time-of-use energy tariff
   # signals: signals.yaml       # PromQL rules that raise recommendations
+  # persona: persona.yaml       # how the narrative sounds (a bad file falls back to the neutral default)
+  # memory: memory/             # operator notes (*.md) folded into briefings; scout writes only
+  #                             # scout-recent-rejections.md there
 
 # Where scout keeps events, recommendations, approvals and reports.
 store:
@@ -83,7 +86,7 @@ schedule:
   analysis_interval: 900          # seconds between analysis cycles
   status_interval: 300            # seconds between status cycles
   timezone: UTC                   # IANA name, e.g. Europe/London
-  briefings:
+  briefings:                      # kind: morning, evening or status
     - kind: morning
       at: "07:30"
     - kind: evening
@@ -92,12 +95,24 @@ schedule:
 # Services scout talks to. All optional: leave one out and what depends on it is off.
 services:
   # prometheus_url: http://prometheus:9090   # read-only PromQL; scout never scrapes hosts
+  # The model briefings are written with. Leave it out and reports come from a plain template.
+  # If the model is down or over its daily cap, that report falls back to the template too.
   # llm:
-  #   backend: ollama
-  #   base_url: http://ollama:11434
+  #   backend: ollama                        # ollama (/api/chat) or openai (any OpenAI-compatible API)
+  #   base_url: http://ollama:11434          # for openai, include the prefix: http://llm:8000/v1
   #   model: <MODEL>
   #   api_key_env: SCOUT_LLM_API_KEY         # hosted backends only
+  #   timeout: 120                           # seconds per call
+  #   max_tokens: 400                        # most tokens one report may generate
+  #   context_tokens: 3072                   # the model's context window; prompts are cut to fit
   # echo_url: http://<TTS_HOST>:8034
+
+# Daily usage caps: a ceiling in case a loop misbehaves. 0 or a missing kind is unlimited.
+# Counts reset at local midnight and are kept in usage.json beside the store.
+budget:
+  limits:
+    llm_calls: 48                 # model calls for reports (briefings and status updates)
+  block_manual: false             # true: refuse over-cap work started by a person too
 
 server:
   host: 127.0.0.1                 # reads have no auth unless read_auth: keep scout on loopback

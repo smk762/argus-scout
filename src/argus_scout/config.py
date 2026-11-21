@@ -129,6 +129,11 @@ class FilesConfig(_Section):
     approvals: ConfigPath | None = None
     tariff: ConfigPath | None = None
     signals: ConfigPath | None = None
+    persona: ConfigPath | None = None
+    """The narrator's persona (YAML). Unset, or a bad file: the neutral built-in persona."""
+    memory: ConfigPath | None = None
+    """A directory of operator-written markdown notes folded into briefings. Scout reads them and writes only
+    its own recent-rejections file there (see :mod:`argus_scout.memory`)."""
 
 
 class StoreConfig(_Section):
@@ -303,7 +308,7 @@ ChannelConfig = Annotated[
 class Briefing(_Section):
     """A scheduled report, e.g. ``{kind: morning, at: "07:30"}`` in the schedule's timezone."""
 
-    kind: Name
+    kind: Literal["morning", "evening", "status"]
     at: str
 
     @field_validator("at")
@@ -340,11 +345,23 @@ class ScheduleConfig(_Section):
 
 
 class LLMConfig(_Section):
-    backend: Name
-    """Backend name as argus-cortex knows it (e.g. ``ollama``, ``openai``)."""
-    base_url: HttpUrl | None = None
+    """The model the narrative is written with. See :mod:`argus_scout.llm`.
+
+    ``ollama`` talks to Ollama's ``/api/chat``. ``openai`` talks to any OpenAI-compatible
+    ``/chat/completions`` (a local server, or a hosted provider with ``api_key_env``); its ``base_url``
+    includes the API prefix, e.g. ``http://llm:8000/v1``.
+    """
+
+    backend: Literal["ollama", "openai"]
+    base_url: HttpUrl
     model: Name
     api_key_env: EnvName | None = None
+    timeout: float = Field(default=120.0, gt=0, description="Seconds before one model call gives up.")
+    max_tokens: int = Field(default=400, gt=0, description="Most tokens one report may generate.")
+    context_tokens: int = Field(
+        default=3072, ge=1024, description="The model's context window; prompts are cut to fit it with the output."
+    )
+    temperature: float | None = Field(default=None, ge=0, le=2)
 
 
 class ServicesConfig(_Section):
@@ -353,6 +370,15 @@ class ServicesConfig(_Section):
     prometheus_url: HttpUrl | None = None
     llm: LLMConfig | None = None
     echo_url: HttpUrl | None = None
+
+
+class BudgetConfig(_Section):
+    """Daily usage caps (see :mod:`argus_scout.budget`). ``limits`` maps a kind to calls per day; a missing kind
+    or ``0`` is unlimited. The narrative charges each model call to ``llm_calls``."""
+
+    limits: dict[Name, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    block_manual: bool = False
+    """Refuse over-cap work started by a person too (HTTP requests, the CLI), not only scheduled work."""
 
 
 class ServerConfig(_Section):
@@ -381,6 +407,7 @@ class ScoutConfig(_Section):
     channels: list[ChannelConfig] = Field(default_factory=list)
     schedule: ScheduleConfig = ScheduleConfig()
     services: ServicesConfig = ServicesConfig()
+    budget: BudgetConfig = BudgetConfig()
     server: ServerConfig = ServerConfig()
 
     _base_dir: Path | None = PrivateAttr(default=None)

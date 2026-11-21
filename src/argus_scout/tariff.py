@@ -210,7 +210,10 @@ def period_cost(units: float, period: TariffPeriod) -> float:
 
 
 def tiered_cost(units: float, tiers: tuple[TariffTier, ...]) -> float:
-    """Cost of ``units`` over block-rate ``tiers``, in minor currency units."""
+    """Cost of ``units`` over block-rate ``tiers``, in minor currency units.
+
+    Without an open-ended last tier, units above the last cap are charged at the last tier's rate.
+    """
     cost, floor = 0.0, 0.0
     for tier in tiers:
         cap = units if tier.up_to_units is None else min(units, tier.up_to_units)
@@ -219,4 +222,7 @@ def tiered_cost(units: float, tiers: tuple[TariffTier, ...]) -> float:
             floor = cap
         if tier.up_to_units is None or units <= tier.up_to_units:
             break
+    else:
+        if tiers and units > floor:
+            cost += (units - floor) * tiers[-1].rate
     return cost

@@ -21,7 +21,7 @@ from argus_scout.channels.base import (
     Synthesiser,
     VoiceChannel,
 )
-from argus_scout.channels.dispatcher import DispatchReport, Dispatcher, Gates, HeartbeatGates, OpenGates
+from argus_scout.channels.dispatcher import Dispatcher, DispatchReport, Gates, HeartbeatGates, OpenGates
 from argus_scout.channels.registry import (
     ENTRY_POINT_GROUP,
     BoundChannel,

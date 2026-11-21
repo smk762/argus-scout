@@ -239,7 +239,9 @@ class Dispatcher:
             self.synthesiser.synthesise(message.speakable, message), timeout=self.synthesis_timeout
         )
 
-    async def _speak(self, voice: list[BoundChannel], message: Delivery, report: DispatchReport) -> list[DeliveryResult]:
+    async def _speak(
+        self, voice: list[BoundChannel], message: Delivery, report: DispatchReport
+    ) -> list[DeliveryResult]:
         def held(why: str) -> list[DeliveryResult]:
             for bound in voice:
                 self.stats[(bound.name, "suppressed")] += 1
@@ -272,7 +274,9 @@ class Dispatcher:
             self.budget.try_consume("speak")
         return results
 
-    async def deliver(self, message: Delivery, *, force: bool = False, only: Iterable[str] | None = None) -> DispatchReport:
+    async def deliver(
+        self, message: Delivery, *, force: bool = False, only: Iterable[str] | None = None
+    ) -> DispatchReport:
         """Send ``message`` to every channel that should get it (only those named in ``only``, if given)."""
         report = DispatchReport(key=message.key)
         wanted = set(only) if only is not None else None
