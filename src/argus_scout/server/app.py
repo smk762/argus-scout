@@ -73,7 +73,13 @@ def build_runtime(
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
     register_jobs(
-        scheduler, config, store, policy_file, inbox=inbox, sources=sources, prometheus=prometheus,
+        scheduler,
+        config,
+        store,
+        policy_file,
+        inbox=inbox,
+        sources=sources,
+        prometheus=prometheus,
         tariff=tariff,
         budget=budget,
     )

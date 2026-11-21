@@ -12,9 +12,9 @@ import typer
 
 import argus_scout
 from argus_scout.approvals import StandingApprovals, load_rules
+from argus_scout.budget import budget_from_config
 from argus_scout.config import CONFIG_FILE, ENV_FILE, ConfigError, ScoutConfig, load_config, resolve_secret
 from argus_scout.engine import RecommendationEngine
-from argus_scout.budget import budget_from_config
 from argus_scout.heartbeat import PolicyFile, report_gate
 from argus_scout.inbox import Inbox, InvalidEvent
 from argus_scout.memory import Memory

@@ -75,9 +75,7 @@ def test_ollama_request_and_response_shape():
 
 def test_openai_compatible_request_response_and_bearer_key(monkeypatch):
     monkeypatch.setenv("SCOUT_TEST_LLM_KEY", "sk-test")
-    config = LLMConfig(
-        backend="openai", base_url="https://llm.invalid/v1", model="m", api_key_env="SCOUT_TEST_LLM_KEY"
-    )
+    config = LLMConfig(backend="openai", base_url="https://llm.invalid/v1", model="m", api_key_env="SCOUT_TEST_LLM_KEY")
     seen: list[httpx.Request] = []
     backend = build_backend(config)
     assert isinstance(backend, OpenAICompatBackend)
