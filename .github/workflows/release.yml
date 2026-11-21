@@ -153,7 +153,12 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true
+          # Loaded locally, not pushed: the version check below gates the push.
+          load: true
+          # The version the image reports, from the tag rather than from git
+          # inside the build: v0.1.0 shipped reporting 0.1.1.dev0+g<sha>.d<date>.
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # A dispatch rebuilds an unchanged context, so a cached install layer
@@ -161,3 +166,21 @@ jobs:
           no-cache: ${{ github.event_name == 'repository_dispatch' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: The image reports the tag's version
+        # Compared as PEP 440 versions: a v0.3.0-rc1 tag reports 0.3.0rc1.
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/argus-scout:${{ steps.meta.outputs.version }}
+          WANT: ${{ steps.meta.outputs.version }}
+        run: |
+          got=$(docker run --rm "$IMAGE" argus-scout version)
+          echo "image reports ${got:-nothing}, tag is $WANT"
+          docker run --rm -e GOT="$got" -e WANT="$WANT" "$IMAGE" python -c \
+            "import os; from pip._vendor.packaging.version import Version as V; exit(V(os.environ['GOT']) != V(os.environ['WANT']))" \
+            || { echo "::error::The image reports $got, not $WANT"; exit 1; }
+      - name: Push the checked image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker push "$tag"
+          done

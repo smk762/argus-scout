@@ -122,6 +122,7 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A `README.md` or `_*` file in the memory directory reaching a prompt | `tests/test_memory.py` (`test_readme_and_underscore_files_are_not_notes`) |
 | An unwritable memory directory logging once per report | `tests/test_memory.py` (`test_an_unwritable_directory_is_one_warning_then_left_alone`) |
 | A read token accepted in a query string | `tests/test_api_guards.py` (`test_read_auth_takes_no_token_in_the_query_string`) |
+| An image reporting a different version than its tag | Release `publish-image` job: builds with `VERSION` from the tag, runs `argus-scout version` and pushes only on a match; `tests/test_image_version.py` (build arg wired end to end, `.dockerignore` drops no tracked file) |
 | A deployment's hostnames, IPs or persona in this repo | CI `docs` job (private IPs/paths/emails in published docs); examples use placeholders |
 | `docs/config.md` drifting from the config schema | `tests/test_configdoc.py` (`test_config_reference_matches_the_schema`); regenerate with `make docs` |
 | A published doc the handbook's import would refuse or mis-render (opsec hit, no `#` title, raw HTML, a broken relative link or anchor) | `tests/test_docs_publishable.py` |
