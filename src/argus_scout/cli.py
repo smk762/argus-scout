@@ -14,8 +14,12 @@ import argus_scout
 from argus_scout.approvals import StandingApprovals, load_rules
 from argus_scout.config import CONFIG_FILE, ENV_FILE, ConfigError, ScoutConfig, load_config, resolve_secret
 from argus_scout.engine import RecommendationEngine
-from argus_scout.heartbeat import PolicyFile
+from argus_scout.budget import budget_from_config
+from argus_scout.heartbeat import PolicyFile, report_gate
 from argus_scout.inbox import Inbox, InvalidEvent
+from argus_scout.memory import Memory
+from argus_scout.narrative import REPORT_KINDS, build_narrator
+from argus_scout.persona import load_persona
 from argus_scout.prometheus import PrometheusClient
 from argus_scout.signals import SignalState, evaluate, format_duration, load_signal_rules
 from argus_scout.sources import build_sources
@@ -99,6 +103,17 @@ def check_signals(path: Path = ExistingFile) -> None:
         raise typer.Exit(1)
 
 
+@check_app.command("persona")
+def check_persona(path: Path = ExistingFile) -> None:
+    """Check a persona file. Scout falls back to the neutral default persona when one is invalid."""
+    try:
+        persona = load_persona(path)
+    except Exception as exc:  # noqa: BLE001 — report any load error as a failed check
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"ok: persona {persona.name}")
+
+
 @check_app.command("config")
 def check_config(path: Path = ExistingFile) -> None:
     """Check scout.yaml and every policy file it names. Secrets are reported as set or unset, never shown."""
@@ -113,6 +128,7 @@ def check_config(path: Path = ExistingFile) -> None:
         "approvals": check_approvals,
         "tariff": check_tariff,
         "signals": check_signals,
+        "persona": check_persona,
     }
     for kind, check in checks.items():
         named = getattr(config.files, kind)
@@ -128,6 +144,13 @@ def check_config(path: Path = ExistingFile) -> None:
             check(named)
         except typer.Exit as exc:
             failed = failed or bool(exc.exit_code)
+    memory = config.files.memory
+    if memory is None:
+        typer.echo("memory: not configured, no notes")
+    elif memory.is_dir():
+        typer.echo(f"memory: {len(Memory(memory).notes())} notes in {memory}")
+    else:
+        typer.echo(f"memory: {memory} does not exist yet; scout creates it for its rejections summary")
     for name, reason in build_sources(config).errors.items():
         typer.echo(f"source {name}: error: {reason}", err=True)
         failed = True
@@ -288,6 +311,49 @@ def analyze(
         typer.echo("dry run: nothing was written")
     if report.unknown or ruleset.errors:
         raise typer.Exit(1)
+
+
+@app.command()
+def brief(
+    config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
+    kind: str = typer.Option("morning", "--kind", "-k", help=f"Report kind: {', '.join(REPORT_KINDS)}."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Store nothing: no report, no usage count, no memory file. The model is still asked."
+    ),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Skip the model and write the report from the template."),
+) -> None:
+    """Write one report now and print it (the server writes the scheduled ones).
+
+    The model's daily cap applies; over it, or with the model unreachable, the report comes from the template.
+    A status report covers the open items the heartbeat policy's report rules allow (rest and quiet hours
+    aside). The report only describes and recommends: nothing here acts.
+    """
+    if kind not in REPORT_KINDS:
+        typer.echo(f"error: unknown kind {kind!r} (known: {', '.join(REPORT_KINDS)})", err=True)
+        raise typer.Exit(1)
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    store = SqliteStore.copy_of(config.store.path) if dry_run else SqliteStore(config.store.path)
+    narrator = build_narrator(config, store, budget_from_config(config, persist=not dry_run))
+    try:
+        groups = None
+        if kind == "status":
+            policy = PolicyFile(config.files.heartbeat).get()
+            groups = [g for g in Inbox(store).open_grouped() if report_gate(g.latest, policy)[0]]
+        report = asyncio.run(narrator.report(kind, groups=groups, use_llm=not no_llm, dry_run=dry_run, trigger="cli"))
+    finally:
+        if narrator.generator is not None:
+            narrator.generator.close()
+        store.close()
+    meta = report.meta
+    source = f"model {meta.get('model')}" if meta["path"] == "llm" else f"template ({meta['fallback_reason']})"
+    if meta.get("persona_error"):
+        typer.echo(f"persona: using the default ({meta['persona_error']})", err=True)
+    typer.echo(report.text)
+    typer.echo(f"-- {kind} report from {source}" + ("; dry run, nothing stored" if dry_run else f", id {report.id}"))
 
 
 @app.command()

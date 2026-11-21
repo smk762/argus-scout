@@ -59,7 +59,11 @@ Deliver = Callable[[Report], Awaitable[None]]
 
 async def deliver(report: Report) -> None:
     """Hand a stored report to the delivery channels. A no-op until channels land (phase 5): reports are
-    stored and logged, and read from the store."""
+    stored and logged, and read from the store. ``BriefingJob`` and ``StatusCycle`` take a ``deliver``
+    callable, so the channels dispatcher is injected there without touching the jobs."""
+
+
+_NO_DELIVERY = deliver
 
 
 @dataclass
@@ -93,7 +97,7 @@ class StatusCycle:
         tz: ZoneInfo | None = None,
         clock: Clock = utc_now,
         narrator: Narrator | None = None,
-        deliver: Deliver = deliver,
+        deliver: Deliver | None = None,
     ) -> None:
         self.store = store
         self.policy_file = policy_file
@@ -101,7 +105,7 @@ class StatusCycle:
         self.tz = tz or ZoneInfo("UTC")
         self.clock = clock
         self.narrator = narrator
-        self.deliver = deliver
+        self.deliver: Deliver = deliver or _NO_DELIVERY
         self.last: StatusResult | None = None
 
     def load_policy(self) -> HeartbeatPolicy:
@@ -213,13 +217,13 @@ class BriefingJob:
         store: Store,
         *,
         narrator: Narrator | None = None,
-        deliver: Deliver = deliver,
+        deliver: Deliver | None = None,
         clock: Clock = utc_now,
     ) -> None:
         self.kind = kind
         self.store = store
         self.narrator = narrator
-        self.deliver = deliver
+        self.deliver: Deliver = deliver or _NO_DELIVERY
         self.clock = clock
         self.runs: list[datetime] = []
         self.last: Report | None = None
@@ -273,6 +277,7 @@ def register_jobs(
     prometheus: PrometheusClient | None = None,
     budget: DailyBudget | None = None,
     narrator: Narrator | None = None,
+    deliver: Deliver | None = None,
 ) -> None:
     """Register the status cycle, the analysis cycle, one job per briefing and one per polling source.
 
@@ -280,14 +285,17 @@ def register_jobs(
     scheduled more than once) and ``poll:<source>``. The name keys the persisted bookkeeping, so keep it
     stable. A source whose config doesn't bind gets no job (``build_sources`` logs why); the rest still do.
     ``prometheus`` overrides the client built from ``services.prometheus_url`` (a seam for tests), and
-    ``narrator`` the one built from the config (its model calls are charged to ``budget``).
+    ``narrator`` the one built from the config (its model calls are charged to ``budget``). ``deliver`` is
+    handed every stored report (default: :func:`deliver`, a no-op until channels land).
     """
     schedule = config.schedule
     clock = scheduler.clock
     inbox = inbox or Inbox(store, clock=clock)
     sources = sources if sources is not None else build_sources(config)
     narrator = narrator or build_narrator(config, store, budget, clock=clock)
-    status = StatusCycle(store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock, narrator=narrator)
+    status = StatusCycle(
+        store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock, narrator=narrator, deliver=deliver
+    )
     scheduler.add("status", status, Every(schedule.status_interval))
     if prometheus is None and config.services.prometheus_url:
         prometheus = PrometheusClient(config.services.prometheus_url)
@@ -302,7 +310,7 @@ def register_jobs(
     kinds = Counter(b.kind for b in schedule.briefings)
     for briefing in schedule.briefings:
         name = f"briefing:{briefing.kind}" + (f"@{briefing.at}" if kinds[briefing.kind] > 1 else "")
-        job = BriefingJob(briefing.kind, store, narrator=narrator, clock=clock)
+        job = BriefingJob(briefing.kind, store, narrator=narrator, deliver=deliver, clock=clock)
         scheduler.add(name, job, DailyAt(briefing.at_time, schedule.tz))
     for source in sources.polling:
         poll = PollJob(source, inbox)
