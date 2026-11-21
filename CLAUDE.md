@@ -51,10 +51,11 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `severity.py` — `Severity` (info < notice < warning < critical), `coerce_severity`, `rank`.
 - `events.py` — `StatusEvent`, the envelope every source sends; `fingerprint` (content identity) and `group_duplicates`.
 - `heartbeat.py` — `HeartbeatPolicy` (defaults + YAML overrides, `origin` per key), `PolicyFile` (mtime reload), the `broadcast_gate` / `report_gate` / `voice_gate` chain and `explain()`, `reannounce_due`.
-- `recommendations.py` — `Recommendation`, `Status`, `TRANSITIONS`; `approve()` / `reject()` keep the audit trail.
-- `approvals.py` — `StandingApprovals` (file rules + runtime rules), `guardrail_block`, `briefing_lines`.
+- `recommendations.py` — `Recommendation` (`to_dict` / `from_dict`), `Status`, `TRANSITIONS`; `approve()` / `reject()` keep the audit trail.
+- `approvals.py` — `StandingApprovals` (file rules + runtime rules, optionally persisted via a `RuntimeRuleStore`), `guardrail_block`, `briefing_lines`.
 - `budget.py` — `DailyBudget` (per-kind daily caps, optional persisted state, `on_change` hook for gauges), `ManualOriginMiddleware`.
 - `tariff.py` — `Tariff` / `Plan` / `TariffPeriod` / `TariffTier`; `current_period`, `next_period_change`, `coverage_gaps`, `tiered_cost`. Rates are in the currency's minor unit.
+- `store/` — persistence (stdlib `sqlite3`, no ORM). `base.py`: the `Store` Protocol plus `InboxEntry`, `Transition`, `Report`. `sqlite.py`: `SqliteStore(path)` (`":memory:"` for tests) — status events keyed by `(source, event_id)` with first/last seen, ack, fingerprint index and announce state; recommendations with a `recommendation_transitions` audit table; runtime standing-approval rules (`StandingApprovals(store=...)` loads and writes through; file rules never stored); reports; `prune()`. Migrations are ordered scripts in `MIGRATIONS`, tracked by `PRAGMA user_version` and applied on open: append, never edit a shipped one. One connection behind an `RLock` (shared by the app and scheduler threads), WAL, foreign keys on. Datetimes are UTC ISO text with fixed microseconds, so they compare as strings.
 - `server/app.py` — FastAPI app (`[server]` extra); `/health` only until auth lands. Every state-changing route goes behind argus-cortex's `auth.bearer` + `WriteGuard`.
 - `examples/` — commented config for each file scout reads; tests load them, so they must stay valid.
 

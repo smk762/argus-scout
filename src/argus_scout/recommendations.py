@@ -16,6 +16,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
+from argus_scout.events import parse_dt
 from argus_scout.severity import Severity
 
 
@@ -95,6 +96,29 @@ class Recommendation:
             return False
         self.rejection_reason = reason
         return True
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> Recommendation:
+        """The inverse of :meth:`to_dict`; naive datetimes are read as UTC."""
+        approval_source = raw.get("approval_source")
+        return cls(
+            id=str(raw["id"]),
+            title=str(raw.get("title") or ""),
+            action=str(raw.get("action") or ""),
+            rationale=str(raw.get("rationale") or ""),
+            confidence=Confidence(raw.get("confidence") or Confidence.MEDIUM),
+            impact=str(raw.get("impact") or ""),
+            status=Status(raw.get("status") or Status.DRAFT),
+            analyzer=str(raw.get("analyzer") or ""),
+            evidence=[str(e) for e in raw.get("evidence") or []],
+            severity=Severity(raw.get("severity") or Severity.INFO),
+            created_at=parse_dt(raw.get("created_at")) or _now(),
+            updated_at=parse_dt(raw.get("updated_at")) or _now(),
+            rejection_reason=str(raw.get("rejection_reason") or ""),
+            approval_source=approval_source if approval_source in ("manual", "standing") else None,
+            approved_by_rule=raw.get("approved_by_rule") or None,
+            approved_at=parse_dt(raw.get("approved_at")),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
