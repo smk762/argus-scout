@@ -21,7 +21,11 @@ periods:
     end: "10:00"
     rate: 22.0
 
-# Plans to compare the active one against.
+# Plans to compare the active one against. A `kind: tariff_plan` signal rule
+# prices your real usage under each of them (see examples/signals.yaml). A
+# plan with tiers is priced on the rule window's total usage; otherwise each
+# hour is priced at its period's rate. A plan whose periods leave gaps is left
+# out of the comparison.
 comparison_plans:
   flat_rate:
     daily_charge: 100.0

@@ -21,10 +21,11 @@ from argus_scout.memory import Memory
 from argus_scout.narrative import REPORT_KINDS, build_narrator
 from argus_scout.persona import load_persona
 from argus_scout.prometheus import PrometheusClient
-from argus_scout.signals import SignalState, evaluate, format_duration, load_signal_rules
+from argus_scout.signals import Evaluation, SignalState, evaluate, load_signal_rules
 from argus_scout.sources import build_sources
 from argus_scout.store import SqliteStore
-from argus_scout.tariff import coverage_gaps, current_period, load_tariff, next_period_change
+from argus_scout.tariff import TariffFile, coverage_gaps, current_period, load_tariff, next_period_change
+from argus_scout.tariff_rules import evaluate_tariff
 
 app = typer.Typer(
     help="Homelab intelligence: reads your telemetry and reports back. It never acts.", no_args_is_help=True
@@ -88,7 +89,8 @@ def check_approvals(path: Path = ExistingFile) -> None:
 
 @check_app.command("signals")
 def check_signals(path: Path = ExistingFile) -> None:
-    """Check a signal rules file: every rule must parse, and its templates use only allowed placeholders."""
+    """Check a signal rules file: every rule (threshold, tariff_shift, tariff_plan) must parse, and its templates
+    use only allowed placeholders."""
     ruleset = load_signal_rules(path)
     if ruleset.file_error:
         typer.echo(f"error: {ruleset.file_error}", err=True)
@@ -96,7 +98,7 @@ def check_signals(path: Path = ExistingFile) -> None:
     for error in ruleset.errors:
         typer.echo(f"error: {error}", err=True)
     for rule in ruleset.rules:
-        typer.echo(f"  {rule.name}: {rule.op} {rule.threshold:g} for {format_duration(rule.for_)} -> {rule.severity}")
+        typer.echo(f"  {rule.name}: {rule.summary}")
     count = len(ruleset.rules)
     typer.echo(f"ok: {count} rules" if not ruleset.errors else f"{count} rules loaded, {len(ruleset.errors)} problems")
     if ruleset.errors:
@@ -299,7 +301,16 @@ def analyze(
         approvals = StandingApprovals(config.files.approvals, store=store)
         engine = RecommendationEngine(store, approvals)
         client = PrometheusClient(config.services.prometheus_url)
-        hits = asyncio.run(evaluate(ruleset.rules, client, engine.clock(), state=SignalState(store)))
+        state, now, tariff = SignalState(store), engine.clock(), TariffFile(config.files.tariff)
+
+        async def run() -> Evaluation:
+            hits = await evaluate(ruleset.rules, client, now, state=state)
+            tariff_hits = await evaluate_tariff(
+                ruleset.rules, client, tariff.get(), now, tz=config.schedule.tz, state=state, tariff_error=tariff.error
+            )
+            return hits.merge(tariff_hits)
+
+        hits = asyncio.run(run())
         report = engine.run_cycle(hits)
     finally:
         store.close()
