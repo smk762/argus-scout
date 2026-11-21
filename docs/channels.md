@@ -15,7 +15,7 @@ channels:
     url: https://<HOOK_HOST>/scout
     token_env: SCOUT_CHAT_TOKEN
     secret_env: SCOUT_CHAT_SECRET
-    kinds: [morning, evening]
+    min_severity: warning          # only reports about something at warning or worse
 ```
 
 Check the file with `argus-scout check config scout.yaml`. Re-send the newest report with
@@ -35,8 +35,11 @@ Check the file with `argus-scout check config scout.yaml`. Re-send the newest re
 **What gets sent in this version.** Scout delivers reports: the scheduled briefings and the status updates the
 status cycle writes when open items are worth reporting. Inbox items reach channels inside those status updates;
 the `event` message type exists in the interface and the webhook payload, but nothing sends single items yet.
-Reports carry no severity of their own, so every one is delivered as `info`: a `min_severity` above `info` keeps
-all of them off that channel. Use `kinds` to choose what a channel gets.
+A report is delivered at the severity of the worst item in it: for a status update, its items; for a briefing,
+its open items and the recommendations awaiting a decision or approved. A briefing with nothing open is `info`.
+So `min_severity: warning` gets status updates and briefings that mention something at warning or worse, and
+`kinds` chooses which kinds of report a channel gets at all. The report's `title` names it (a status update's
+names its worst item), and it counts as `quiet_exempt` when any item in it is.
 
 ## How a message goes out
 
@@ -49,8 +52,11 @@ all of them off that channel. Use `kinds` to choose what a channel gets.
   channel again later.
 - **Voice follows the heartbeat policy.** Voice channels are a separate plugin kind. Scout synthesises speech
   once per message and gives the same audio to every voice channel. During rest hours nothing is spoken. During
-  quiet hours only critical and `quiet_exempt` messages are spoken. A report is kept off the speakers when
-  `sources.scout.channel` in the heartbeat file is `text`. Text channels are never held back by these rules.
+  quiet hours only critical and `quiet_exempt` messages are spoken (a report counts as critical or exempt
+  when an item in it is). A report is kept off the speakers when `sources.scout.channel` in the heartbeat file is
+  `text`. A status update speaks only its items the heartbeat voice rules allow (source routed to `voice`,
+  `speakable`, at or above `voice.min_severity`, and with `voice.on_change_only` only those that are news),
+  and is not spoken at all when none is. Text channels are never held back by these rules.
 
 ## Speech: argus-echo
 

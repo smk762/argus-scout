@@ -122,7 +122,8 @@ $ argus-scout brief [OPTIONS]
 Send a stored report to the configured channels.
 
 Idempotent: a channel that already has the report is skipped (shown as duplicate) unless --force. Voice
-channels follow the heartbeat policy (quiet hours, rest hours) the same as the server does.
+channels follow the heartbeat policy (quiet hours, rest hours) and the daily speech caps the same as the
+server does.
 
 **Usage**:
 

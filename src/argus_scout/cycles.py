@@ -6,10 +6,12 @@ These are the seams later phases fill in. The structure is already the real one:
   every run, so a policy edit applies on the next tick and **a bad edit degrades to defaults while the
   cycle keeps running**. It reads open events from :meth:`Inbox.open_grouped <argus_scout.inbox.Inbox.open_grouped>`,
   skips rest hours, and decides each group through :func:`~argus_scout.heartbeat.explain`. When groups pass
-  :func:`~argus_scout.heartbeat.report_gate` (capped at ``report.max_items``, most severe first) and they
-  differ from the last status report's, or the most severe one's ``reannounce_after`` has passed, it has
-  the :class:`~argus_scout.narrative.Narrator` write a ``status`` report, stores it and hands it to
-  :func:`deliver`.
+  :func:`~argus_scout.heartbeat.report_gate` (capped at ``report.max_items``, most severe first) and at
+  least one of them is news (:meth:`StatusCycle.is_news`: not yet announced in its current form, or its
+  ``reannounce`` interval has passed), it has the :class:`~argus_scout.narrative.Narrator` write a
+  ``status`` report, marks the groups announced, and hands the report to :func:`deliver`. The report's
+  spoken form (``meta.speakable``) is built from the groups the voice policy allows, and is ``False`` when
+  none is, so a text-only or unspeakable item is never spoken inside a status report.
 - :class:`PollJob` polls one polling source and ingests what it returns through
   :meth:`Inbox.ingest <argus_scout.inbox.Inbox.ingest>`. Each source is its own job, so one failing source
   never affects another. With the source's ``resolve_missing`` on, a successful, complete poll also resolves
@@ -46,9 +48,9 @@ from argus_scout.channels.redeliver import JOB_NAME as REDELIVER_JOB
 from argus_scout.channels.redeliver import RedeliveryJob
 from argus_scout.config import ScoutConfig
 from argus_scout.engine import CycleReport, RecommendationEngine
-from argus_scout.heartbeat import Decision, HeartbeatPolicy, PolicyFile, explain
+from argus_scout.heartbeat import Decision, HeartbeatPolicy, PolicyFile, explain, reannounce_due
 from argus_scout.inbox import EventGroup, Inbox, InvalidEvent
-from argus_scout.narrative import Narrator, build_narrator
+from argus_scout.narrative import TITLES, Narrator, build_narrator
 from argus_scout.prometheus import PrometheusClient
 from argus_scout.scheduler import Clock, DailyAt, Every, Scheduler, utc_now
 from argus_scout.severity import rank
@@ -149,24 +151,52 @@ class StatusCycle:
         groups.sort(key=lambda g: (-rank(g.latest.severity), -g.latest.generated_at.timestamp()))
         return groups[: policy.report_max_items] if policy.report_max_items > 0 else groups
 
-    def report_due(self, groups: list[EventGroup], policy: HeartbeatPolicy, now: datetime) -> bool:
-        """Whether these groups are news: none reported yet, different from the last status report's, or the
-        most severe one's ``reannounce_after`` interval has passed since it."""
-        if not groups:
-            return False
-        last = self.store.latest_report("status")
-        if last is None or sorted(g.fingerprint for g in groups) != last.meta.get("fingerprints"):
+    def is_news(self, group: EventGroup, policy: HeartbeatPolicy, now: datetime) -> bool:
+        """Whether ``group`` is worth a status report on its own account.
+
+        It is news when none of its events has been announced in its current form. The inbox clears an
+        event's announce state whenever it becomes news again: first seen, a changed fingerprint (an
+        escalation, or any change of severity or summary) or a condition that cleared and came back
+        (:attr:`~argus_scout.inbox.Outcome.RECURRED`). A fresh event id repeating an announced group's
+        fingerprint is not news. An announced group is news again once its severity's ``reannounce``
+        interval has passed since it was last announced (:func:`~argus_scout.heartbeat.reannounce_due`)."""
+        if not any(e.last_broadcast_at for e in group.events):
             return True
-        worst = max(groups, key=lambda g: rank(g.latest.severity)).latest.severity.value
-        interval = policy.reannounce_after.get(worst)
-        return bool(interval) and (now - last.generated_at).total_seconds() >= interval
+        return reannounce_due(group.events, policy, now)
+
+    def report_due(self, groups: list[EventGroup], policy: HeartbeatPolicy, now: datetime) -> bool:
+        """Whether a status report of these groups is due: at least one of them is news (:meth:`is_news`). Groups
+        already announced ride along as context, so an item clearing (A, B down to A) is not itself news."""
+        return any(self.is_news(g, policy, now) for g in groups)
+
+    def speech(
+        self, groups: list[EventGroup], decisions: dict[str, Decision], policy: HeartbeatPolicy, now: datetime
+    ) -> str | bool:
+        """What the report says aloud: the summaries of the groups the voice policy allows
+        (:func:`~argus_scout.heartbeat.voice_gate` via ``Decision.voice``: the source's routing, ``speakable``,
+        ``voice.min_severity``), or ``False`` when there are none, so the report goes to text channels only.
+        With ``voice.on_change_only`` (the default) a group already announced is left out unless it is news
+        again (:meth:`is_news`): repeats stay text-only."""
+        spoken = [
+            g.latest.summary.strip().rstrip(".")
+            for g in groups
+            if decisions[g.fingerprint].voice and (not policy.voice_on_change_only or self.is_news(g, policy, now))
+        ]
+        if not spoken:
+            return False
+        return " ".join([f"{TITLES['status']}.", *(f"{s}." for s in spoken)])
 
     async def _report(self, result: StatusResult, policy: HeartbeatPolicy, now: datetime) -> Report | None:
         assert self.narrator is not None
         groups = self.reportable_groups(result, policy)
         if not self.report_due(groups, policy, now):
             return None
-        report = await self.narrator.report("status", groups=groups)
+        decisions = {g.fingerprint: d for g, d in zip(result.groups, result.decisions, strict=True)}
+        speakable = self.speech(groups, decisions, policy, now)
+        report = await self.narrator.report("status", groups=groups, meta={"speakable": speakable})
+        for group in groups:
+            for event in group.events:
+                self.store.mark_announced(event.source, event.event_id, at=now)
         await self.deliver(report)
         return report
 

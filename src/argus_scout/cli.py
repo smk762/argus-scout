@@ -384,7 +384,8 @@ def deliver(
     """Send a stored report to the configured channels.
 
     Idempotent: a channel that already has the report is skipped (shown as duplicate) unless --force. Voice
-    channels follow the heartbeat policy (quiet hours, rest hours) the same as the server does.
+    channels follow the heartbeat policy (quiet hours, rest hours) and the daily speech caps the same as the
+    server does.
     """
     if not latest:
         typer.echo("error: say which report: --latest", err=True)
@@ -396,7 +397,7 @@ def deliver(
         raise typer.Exit(1) from exc
     store = SqliteStore(config.store.path)
     try:
-        channels, dispatcher = build_dispatcher(config, store=store)
+        channels, dispatcher = build_dispatcher(config, store=store, budget=budget_from_config(config, counter=store))
         for name, reason in channels.errors.items():
             typer.echo(f"channel {name}: error: {reason}", err=True)
         unknown = [name for name in channel or [] if channels.get(name) is None]

@@ -29,6 +29,7 @@ from collections.abc import MutableMapping
 from datetime import time
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -96,7 +97,14 @@ def _check_env_name(value: str) -> str:
 
 
 def _check_url(value: str) -> str:
-    if not value.startswith(("http://", "https://")) or len(value) <= len("https://"):
+    """An http(s) URL with a host and, if given, a valid port. Checked here so a typo (``http://echo:80x``,
+    ``http://prom:99999``) fails ``check config`` instead of the server's startup."""
+    try:
+        parts = urlsplit(value)
+        host, _port = parts.hostname, parts.port  # .port raises ValueError for a non-numeric or out-of-range port
+    except ValueError as exc:
+        raise ValueError(f"{value!r} is not a valid http(s) URL: {exc}") from None
+    if parts.scheme not in ("http", "https") or not host:
         raise ValueError(f"{value!r} is not an http(s) URL")
     return value.rstrip("/")
 
@@ -296,8 +304,8 @@ class ChannelSettings(_Section):
     enabled: bool = True
     """``false`` keeps the entry but sends nothing."""
     min_severity: Literal["info", "notice", "warning", "critical"] = "info"
-    """Deliver only messages at or above this severity. Reports are delivered as ``info`` in this version, so
-    anything above ``info`` keeps every report off this channel."""
+    """Deliver only messages at or above this severity. A report's severity is that of the worst item in it (a
+    briefing also counts its open recommendations); a report with nothing open is ``info``."""
     kinds: Annotated[list[str], NullAsEmptyList] = Field(default_factory=list)
     """Deliver only these kinds (report kinds such as ``morning``, or ``event`` for an inbox item). Empty: all."""
     timeout: float = Field(default=30.0, gt=0, le=600, description="Seconds one delivery may take, retries included.")
@@ -591,7 +599,8 @@ class BudgetConfig(_Section):
 
     limits: Annotated[dict[Name, Annotated[int, Field(ge=0)]], NullAsEmptyDict] = Field(default_factory=dict)
     """Kind -> calls per day. Scout charges ``llm_calls`` (each report's model call), ``tts`` (each speech
-    synthesis) and ``speak`` (each spoken message). Counts live in the store and reset at local midnight."""
+    synthesis) and ``speak`` (each spoken message). Counts live in the store and reset at midnight in
+    ``schedule.timezone``."""
     block_manual: bool = False
     """Refuse over-cap work done while serving an HTTP request too. Off: such work goes through and is logged.
     Scheduled jobs and the CLI are always held to the caps."""

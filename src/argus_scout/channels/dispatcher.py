@@ -7,7 +7,9 @@
    sent on: the store's ``deliveries`` table holds one successful row per (message, channel), so re-delivery
    is idempotent, across restarts too (``force=True`` sends again anyway).
 2. **Sends text** to every non-voice channel at once, each under its own ``timeout``.
-3. **Speaks**, if any voice channel is left: the heartbeat gates decide whether this message may be spoken
+3. **Speaks**, if any voice channel is left and the message has something to say (a report whose
+   ``meta.speakable`` is ``False`` has nothing: no synthesis, voice channels suppressed, text unaffected): the
+   heartbeat gates decide whether this message may be spoken
    now (quiet hours, rest hours, the voice policy; see :class:`HeartbeatGates`). If so, the speech is
    synthesised **once** through the :class:`~argus_scout.channels.base.Synthesiser` and the same audio goes
    to every voice channel. A gate that says no holds voice back and leaves text alone.
@@ -66,7 +68,11 @@ class HeartbeatGates:
     - **An inbox item**: :func:`~argus_scout.heartbeat.voice_gate` (its source's routing, ``speakable``,
       ``voice.min_severity``).
     - **A report**: it is scheduled, not an interruption, so ``voice.min_severity`` doesn't apply; the policy's
-      routing for source ``scout`` does (``sources.scout.channel: text`` keeps reports off the speakers).
+      routing for source ``scout`` does (``sources.scout.channel: text`` keeps reports off the speakers). The
+      per-item voice policy is applied when the report is written: a status report's ``meta.speakable`` holds
+      only the items :func:`~argus_scout.heartbeat.voice_gate` allows, or ``False`` (never spoken). Its
+      ``meta.severity`` and ``meta.quiet_exempt`` come from its worst and its quiet-exempt items, so quiet hours
+      let it through exactly when they let its items through.
 
     The policy file is re-read through :class:`~argus_scout.heartbeat.PolicyFile`, so an edit applies on the next
     delivery and a bad edit means the defaults.
@@ -257,6 +263,9 @@ class Dispatcher:
             log.info("dispatch.voice_suppressed", key=message.key, rule=why)
             return [DeliveryResult(ok=True, channel=b.name, status="suppressed", detail=why) for b in voice]
 
+        if not message.speakable:  # meta.speakable=False (or nothing to say): no synthesis, text goes out alone
+            report.voice_rule = "delivery.speakable=empty"
+            return held(report.voice_rule)
         allowed, rule = self.gates.voice(message, self.clock())
         report.voice_rule = rule
         if not allowed:
