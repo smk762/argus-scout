@@ -150,9 +150,9 @@ def _check_bound(name: str, plugin: Source, cfg: Any) -> None:
     if getattr(cfg, "name", None) != name:
         raise TypeError(f"the plugin's config model must keep name {name!r} (got {getattr(cfg, 'name', None)!r})")
     interval = getattr(cfg, "interval", None)
-    if isinstance(plugin, PollingSource) and interval is not None:
-        if isinstance(interval, bool) or not isinstance(interval, int | float) or not interval > 0:
-            raise TypeError(f"interval must be a positive number of seconds, got {interval!r}")
+    usable = not isinstance(interval, bool) and isinstance(interval, int | float) and interval > 0
+    if isinstance(plugin, PollingSource) and interval is not None and not usable:
+        raise TypeError(f"interval must be a positive number of seconds, got {interval!r}")
 
 
 def build_sources(config: ScoutConfig, registry: Registry | None = None) -> Sources:

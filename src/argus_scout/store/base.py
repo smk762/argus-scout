@@ -81,6 +81,20 @@ class Report:
 
 
 @dataclass
+class DeliveryRecord:
+    """One attempt at delivering a message (a report or an inbox event) on one channel."""
+
+    delivery_key: str
+    channel: str
+    at: datetime
+    ok: bool
+    error: str | None = None
+    report_id: int | None = None
+    event_source: str | None = None
+    event_id: str | None = None
+
+
+@dataclass
 class JobRun:
     """The scheduler's bookkeeping for one job, so its schedule and counters survive a restart."""
 
@@ -178,6 +192,29 @@ class Store(Protocol):
 
     def list_reports(self, limit: int = 50, *, kind: str | None = None) -> list[Report]: ...
 
+    # -- delivery records ------------------------------------------------------------
+    def record_delivery(
+        self,
+        delivery_key: str,
+        channel: str,
+        *,
+        ok: bool,
+        error: str | None = None,
+        at: datetime | None = None,
+        report_id: int | None = None,
+        event_source: str | None = None,
+        event_id: str | None = None,
+    ) -> bool:
+        """Record an attempt. A second successful record for the same ``(delivery_key, channel)`` is
+        ignored and returns False."""
+        ...
+
+    def delivered_channels(self, delivery_key: str) -> set[str]: ...
+
+    def delivery_counts(self) -> dict[tuple[str, bool], int]: ...
+
+    def list_deliveries(self, delivery_key: str | None = None, *, limit: int = 100) -> list[DeliveryRecord]: ...
+
     # -- scheduler bookkeeping ------------------------------------------------------
     def get_job_run(self, name: str) -> JobRun | None: ...
 
@@ -200,6 +237,7 @@ class Store(Protocol):
 
 __all__ = [
     "UNCHECKED",
+    "DeliveryRecord",
     "IllegalTransition",
     "InboxEntry",
     "JobRun",

@@ -44,12 +44,45 @@ sources:
   #     event_id: id
   #     summary: message
   #     severity: level
+  #   # id: [labels.alertname, labels.instance]  # what identifies an item when it has no event_id
+  #   # resolve_missing: true     # close events a successful poll no longer lists (the default)
   #   auth_header: Authorization
   #   auth_env: SCOUT_BACKUPS_AUTH  # value sent in auth_header, e.g. "Bearer ..."
   #
   # Any other kind comes from an installed plugin (entry-point group argus_scout.sources),
   # which validates its own keys. Try a poll without writing anything:
   #   argus-scout poll --config scout.yaml [--source backups]
+
+# Where reports and status items go. Each channel needs a unique name. Every channel
+# takes: enabled (default true), min_severity (info|notice|warning|critical; default
+# info), kinds (report kinds such as morning, or "event" for an inbox item; default
+# all) and timeout (seconds per delivery, retries included; default 30).
+# A message is sent to a channel at most once, even across restarts.
+channels:
+  # Append to a plain-text file beside this config (tail -f it). The file stays under
+  # dir: no "..", no absolute path, no symlink out. {kind} and {date} are filled in.
+  - kind: text
+    name: log
+    dir: .
+    file: scout-reports.log
+    # rotate_bytes: 1048576     # rotate before the file grows past this; leave out to never rotate
+    # keep: 3                   # rotated files to keep
+  #
+  # POST JSON (schema argus-scout.delivery, see docs/channels.md) to one URL; only
+  # that host is allowed. Retries a connection error, 429 or 5xx with backoff.
+  # - kind: webhook
+  #   name: chat
+  #   url: https://<HOOK_HOST>/scout
+  #   token_env: SCOUT_CHAT_TOKEN     # optional: sent as a bearer token
+  #   secret_env: SCOUT_CHAT_SECRET   # optional: HMAC-SHA256 key for X-Scout-Signature
+  #   retries: 2
+  #   backoff: 1.0
+  #   min_severity: notice
+  #   kinds: [morning, evening, event]
+  #
+  # Any other kind comes from an installed plugin (entry-point group argus_scout.channels),
+  # which validates its own keys. Re-send the newest report:
+  #   argus-scout deliver --config scout.yaml --latest [--kind morning] [--channel log]
 
 schedule:
   analysis_interval: 900          # seconds between analysis cycles
