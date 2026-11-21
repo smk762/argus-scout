@@ -56,7 +56,8 @@ services:
     base_url: http://ollama:11434
     model: qwen3:8b
     context_tokens: 8192             # the model's window (default 3072)
-    max_tokens: 400                  # the longest report (default 400)
+    # max_tokens: 400                # one output allowance for every kind (default: per kind, below)
+    think: false                     # ollama: no <think> block first (the default)
     timeout: 120
 ```
 
@@ -67,6 +68,39 @@ services:
 
 Both go through argus-cortex's remote backends. A request that never reached the server is retried; a slow model
 is never asked twice. Every key: [config reference](config.md#servicesllm).
+
+### Output allowance
+
+`max_tokens` is how many tokens the model may write for one report. Left unset, it depends on the kind: 800 for
+`morning` and `evening`, 400 for `status`, each capped at half of `context_tokens`. A 150-word briefing is about
+200 tokens, so the rest is headroom for a model that writes long or thinks anyway. Set it and it applies to every
+kind; it may be at most half of `context_tokens`, because the prompt gets the rest (`context_tokens - max_tokens`,
+above). Each report's `meta.max_tokens` records the allowance it ran with.
+
+### Reasoning models
+
+Reasoning models (qwen3, deepseek-r1 and the like) write a `<think>` block before the answer, and it counts
+against `max_tokens`. Scout strips the block, so a model that spends its budget thinking leaves almost nothing.
+
+- **Ollama.** Scout sends `think: false` (`services.llm.think`, the default), which Ollama 0.9 and later honour
+  for thinking models: the answer comes back without a `<think>` block. Older Ollamas ignore the field. Set
+  `think: null` to send nothing and leave the model's default, or `true` to let it think (and raise `max_tokens`
+  to match). If a server answers 400 naming `think`, scout logs `llm.think_unsupported`, asks once more without
+  the field and stops sending it until it restarts.
+- **OpenAI-compatible.** Servers disagree on the switch, so scout sends none. Pass the one your server takes with
+  `extra_body`, which is merged into the request as it is (it can't replace `model`, `messages`, `max_tokens`,
+  `stream` or `temperature`):
+
+```yaml
+services:
+  llm:
+    backend: openai
+    base_url: http://llm:8000/v1
+    model: <MODEL>
+    extra_body:
+      chat_template_kwargs: {enable_thinking: false}   # vLLM / SGLang with a qwen3 template
+      # reasoning_effort: low                          # servers and providers that take this instead
+```
 
 ## Caps and fallback
 
@@ -84,9 +118,32 @@ the bottom. `meta.fallback_reason` is one of:
 | `budget` | today's `llm_calls` cap is spent (the model wasn't called) |
 | `gpu_unavailable` | no GPU lease was granted in time (the model wasn't called or charged) |
 | `error` | the model was unreachable, failed, timed out or returned nothing |
+| `truncated` | the model hit its token limit (Ollama `done_reason`, OpenAI `finish_reason`: `length`), so its answer was cut off |
+| `hollow` | the answer was too short for its kind, or left out an item that needs attention (below) |
 
 The model's output is cleaned before it's stored: control characters and `<think>` blocks are stripped and its
 length capped.
+
+### A model answer is checked before it's used
+
+An answer that came back is still not delivered unless it is whole. Scout falls back to the template when:
+
+- **it was cut off** (`truncated`): the server said it stopped at the token limit. Whatever came after the cut,
+  an item that needs acknowledgement included, is missing.
+- **it is too short** (`hollow`): under 160 characters for a `morning` or `evening` report, or 40 for `status`
+  (about a sentence; a 150-word briefing is about 900 characters). When there's nothing to report, one short
+  sentence (20 characters) is enough. An answer that was all `<think>` block is empty after cleaning, so it lands
+  here.
+- **it leaves out an item that needs attention** (`hollow`): every open item that is a warning or critical, or
+  needs an acknowledgement, must be named. An item counts as named when a word of the answer starts with its
+  source or a distinctive word of its summary (four letters or more, or containing a digit, not a generic word
+  like "warning"): "disks" names "Disk /srv at 91%", "backups" doesn't name source `ups`. This is a floor, not a judgement of quality: a model that paraphrases every word away gets the
+  template, which is the safe side.
+
+The template lists the items from the same facts (ten a section, but every warning, critical and item awaiting
+acknowledgement however many there are), so a model that fails never costs the report one of those. The stored `meta` still records what the model did:
+`completion_tokens` (the raw count, thinking included), `finish_reason`, `llm_chars` (what was left after
+cleaning), and `error` naming the check that failed. Scout logs `narrative.rejected_completion` with the same.
 
 ## GPU leases
 

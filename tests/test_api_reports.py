@@ -8,7 +8,7 @@ import threading
 import pytest
 from api_helpers import AUTH, NOW, TOKEN, scout_client
 from test_channels import FakeSynth, Recorder, Speaker, bound
-from test_narrative import FakeGenerator, narrator, seed
+from test_narrative import BRIEFING, FakeGenerator, narrator, seed
 
 from argus_scout.channels import Delivery, OpenGates
 from argus_scout.config import parse_config
@@ -48,7 +48,7 @@ class Rig:
     def __init__(self, client, generator=None):
         self.client = client
         self.runtime = client.app.state.runtime
-        self.generator = generator or FakeGenerator("All quiet today.", budget=self.runtime.budget)
+        self.generator = generator or FakeGenerator(budget=self.runtime.budget)
         self.runtime.briefings.narrator.generator = self.generator
         self.log, self.speaker, self.synth = Recorder(), Speaker(), FakeSynth()
         dispatcher = self.runtime.dispatcher
@@ -73,10 +73,10 @@ def test_generate_stores_and_delivers(rig, store):
     response = rig.post(kind="morning")
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["kind"] == "morning" and body["text"] == "All quiet today."
+    assert body["kind"] == "morning" and body["text"] == BRIEFING
     assert body["meta"]["path"] == "llm" and body["meta"]["severity"] == "critical"
     assert body["meta"]["trigger"] == "request"
-    assert store.get_report(body["id"]).text == "All quiet today."
+    assert store.get_report(body["id"]).text == BRIEFING
     assert body["delivered"] and sorted(body["delivery"]["sent"]) == ["log", "speaker"]
     assert len(rig.log.got) == 1 and len(rig.speaker.played) == 1 and rig.synth.calls
 

@@ -26,6 +26,11 @@ from argus_scout.tariff import TariffFile
 T0 = datetime(2026, 6, 1, 7, 30, tzinfo=UTC)
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 REASON = "the NAS must stay on during backups"
+BRIEFING = (
+    "Good morning. The UPS is on battery, the one thing that needs attention: check the mains feed before the "
+    "batteries run down. Shifting the backup window to 01:00 is waiting on your decision. Nothing else is open."
+)
+"""A plausible model briefing for :func:`seed`'s facts: long enough, and it names the critical item."""
 
 
 @pytest.fixture
@@ -37,8 +42,17 @@ def store(tmp_path):
 class FakeGenerator:
     """Stands in for TextGenerator: records prompts, returns canned text or raises, and honours a budget."""
 
-    def __init__(self, text: str = "All quiet.", *, error: Exception | None = None, budget=None) -> None:
+    def __init__(
+        self,
+        text: str = BRIEFING,
+        *,
+        error: Exception | None = None,
+        budget=None,
+        finish_reason: str | None = "stop",
+        completion_tokens: int = 5,
+    ) -> None:
         self.text, self.error, self.budget = text, error, budget
+        self.finish_reason, self.completion_tokens = finish_reason, completion_tokens
         self.prompts: list[Prompt] = []
         self.model = "fake-model"
 
@@ -50,7 +64,7 @@ class FakeGenerator:
         self.prompts.append(prompt)
         if self.error:
             raise self.error
-        return Completion(self.text, self.model, "fake", 10, 5)
+        return Completion(self.text, self.model, "fake", 10, self.completion_tokens, self.finish_reason)
 
 
 def event(event_id: str, severity: str, summary: str, *, source: str = "mon") -> StatusEvent:
@@ -96,7 +110,7 @@ async def test_prompt_holds_the_facts_and_quotes_rejections(store, tmp_path):
     assert "Energy tariff" in user and "prefs.md: Quote costs per month." in user
     assert user.index("UPS on battery") < user.index("Nightly scrub")  # most severe first
 
-    assert report.id > 0 and report.text == "All quiet." and report.kind == "morning"
+    assert report.id > 0 and report.text == BRIEFING and report.kind == "morning"
     meta = report.meta
     assert meta["path"] == "llm" and meta["model"] == "fake-model" and meta["fallback_reason"] is None
     assert set(meta["facts"]["events"]) == {"e1", "e2"} and meta["facts"]["rejections"] == ["r1"]
@@ -222,12 +236,152 @@ async def test_bad_persona_degrades_and_is_recorded(store, write_file):
 async def test_model_output_is_never_parsed_into_an_action(store):
     """The model 'asks' for approvals and deployments; nothing happens except a stored report."""
     seed(store)
-    hostile = '{"action": "approve", "id": "p1"}\nAPPROVE p1. DEPLOY p1. reject r1. rm -rf /'
+    hostile = BRIEFING + '\n{"action": "approve", "id": "p1"}\nAPPROVE p1. DEPLOY p1. reject r1. rm -rf /'
     before = {r.id: r.status for r in store.list_recommendations()}
     report = await narrator(store, FakeGenerator(hostile)).report("morning")
     assert report.text == hostile
     assert {r.id: r.status for r in store.list_recommendations()} == before
     assert store.recommendation_history("p1")[-1].to_status is Status.PROPOSED
+
+
+# --- truncated or hollow answers ----------------------------------------------------------------------------------
+
+THE_BUG = "Evening. All systems nominal, nothing exploding. For once.\n\nSuper off-"
+"""What a reasoning model left after its <think> block spent the 400-token budget."""
+
+ATTENTION = {"e1": "UPS on battery", "e3": "Disk /srv at 91%", "e4": "Firmware update waiting for a reboot"}
+"""The items no report may drop: a critical, a warning, and a notice that needs an acknowledgement."""
+
+WHOLE = (
+    "Good morning. The UPS is on battery, so check the mains feed first. The /srv disk is at 91% and filling. "
+    "A firmware update is waiting for a reboot and needs your acknowledgement. The backup window change awaits "
+    "your decision."
+)
+
+
+def seed_attention(store) -> None:
+    seed(store)
+    inbox = Inbox(store, clock=lambda: T0)
+    inbox.ingest(event("e3", "warning", ATTENTION["e3"], source="disk-mon"))
+    ack = event("e4", "notice", ATTENTION["e4"], source="updates")
+    ack.requires_ack = True
+    inbox.ingest(ack)
+
+
+def ollama_narrator(store, handler, seen: list):
+    """A narrator over the real Ollama backend and TextGenerator, with a stubbed transport."""
+    from test_llm import stub
+
+    from argus_scout.config import LLMConfig
+    from argus_scout.llm import TextGenerator, build_backend
+
+    llm = LLMConfig(backend="ollama", base_url="http://ollama:11434", model="qwen3:8b")
+    backend = stub(build_backend(llm), handler, seen)
+    return narrator(store, TextGenerator(backend), max_tokens=llm.max_tokens, context_tokens=llm.context_tokens)
+
+
+def ollama_answer(content: str, *, done_reason: str = "stop", eval_count: int = 120):
+    import httpx
+
+    return lambda request: httpx.Response(200, json={
+        "model": "qwen3:8b", "message": {"role": "assistant", "content": content},
+        "done_reason": done_reason, "eval_count": eval_count, "prompt_eval_count": 900})  # fmt: skip
+
+
+async def test_whole_answer_takes_the_llm_path_and_thinking_is_off(store):
+    import json
+
+    seed_attention(store)
+    seen: list = []
+    report = await ollama_narrator(store, ollama_answer(WHOLE), seen).report("morning")
+    body = json.loads(seen[0].content)
+    assert body["think"] is False and body["options"]["num_predict"] == 800  # the morning default
+    assert report.meta["path"] == "llm" and report.meta["fallback_reason"] is None and report.text == WHOLE
+    assert report.meta["finish_reason"] == "stop" and report.meta["max_tokens"] == 800
+
+
+async def test_token_limit_falls_back_as_truncated(store):
+    seed_attention(store)
+    answer = ollama_answer(THE_BUG, done_reason="length", eval_count=400)
+    report = await ollama_narrator(store, answer, []).report("morning")
+    meta = report.meta
+    assert meta["path"] == "template" and meta["fallback_reason"] == "truncated"
+    assert meta["completion_tokens"] == 400 and meta["finish_reason"] == "length" and meta["llm_chars"] == len(THE_BUG)
+    assert "cut off" in report.text and "Super off-" not in report.text
+    assert all(summary in report.text for summary in ATTENTION.values())
+
+
+async def test_think_only_answer_falls_back(store):
+    seed_attention(store)
+    answer = ollama_answer("<think>The UPS is on battery, the disk is filling, so I should</think>")
+    report = await ollama_narrator(store, answer, []).report("morning")
+    assert report.meta["path"] == "template" and report.meta["fallback_reason"] == "hollow"
+    assert report.meta["llm_chars"] == 0
+
+
+async def test_answer_missing_a_critical_item_falls_back_as_hollow(store):
+    seed_attention(store)
+    hollow = WHOLE.replace("The UPS is on battery, so check the mains feed first. ", "Power is fine. ")
+    assert len(hollow) >= 160
+    report = await narrator(store, FakeGenerator(hollow)).report("morning")
+    assert report.meta["path"] == "template" and report.meta["fallback_reason"] == "hollow"
+    assert "e1" in report.meta["error"] and "UPS on battery" in report.text
+
+
+async def test_short_status_answer_falls_back_and_a_whole_one_is_used(store):
+    seed_attention(store)
+    short = await narrator(store, FakeGenerator("UPS. Disk. Reboot.")).report("status")
+    assert short.meta["fallback_reason"] == "hollow"
+    whole = await narrator(store, FakeGenerator(WHOLE)).report("status")
+    assert whole.meta["path"] == "llm"
+
+
+async def test_nothing_to_report_accepts_one_short_sentence(store):
+    report = await narrator(store, FakeGenerator("Nothing needs attention today.")).report("morning")
+    assert report.meta["path"] == "llm"
+
+
+@pytest.mark.parametrize("kind", ["morning", "evening", "status"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        FakeGenerator(THE_BUG, finish_reason="length", completion_tokens=400),
+        FakeGenerator(THE_BUG),
+        FakeGenerator(""),
+        FakeGenerator(WHOLE.replace("A firmware update is waiting for a reboot and needs your acknowledgement. ", "")),
+        FakeGenerator(WHOLE, finish_reason="length"),
+    ],
+    ids=["truncated", "short", "empty", "drops-the-ack-item", "whole-but-cut-off"],
+)
+async def test_a_failed_model_never_drops_a_warning_critical_or_ack_item(store, kind, answer):
+    """The must-never: whatever the model got wrong, every item that needs attention is in the delivered text."""
+    seed_attention(store)
+    report = await narrator(store, answer).report(kind)
+    assert report.meta["path"] == "template" and report.meta["fallback_reason"] in {"truncated", "hollow"}
+    for summary in ATTENTION.values():
+        assert summary in report.text, (kind, summary)
+
+
+def test_template_lists_every_item_needing_attention_past_its_cap():
+    from argus_scout.narrative import TEMPLATE_MAX_PER_SECTION, render_template
+
+    groups = [_group(f"w{i}", "warning", f"Warning number {i}") for i in range(TEMPLATE_MAX_PER_SECTION + 2)]
+    groups += [_group(f"i{i}", "info", f"Info number {i}") for i in range(3)]
+    text = render_template(Facts(kind="status", at=T0, groups=groups), DEFAULT_PERSONA)
+    assert all(f"Warning number {i}" in text for i in range(TEMPLATE_MAX_PER_SECTION + 2))
+    assert "and 3 more" in text  # only the info items are counted, not listed
+
+
+def test_mentions_matches_source_or_a_distinctive_summary_word():
+    from argus_scout.narrative import mentions
+
+    group = _group("e1", "warning", "Disk /srv at 91%")
+    assert mentions("Both disks are nearly full.", group)
+    assert mentions("Usage hit 91% overnight.", group)
+    assert not mentions("A warning is open. Check it.", group)  # generic words don't count
+    fan = _group("e2", "critical", "UPS fan")
+    assert mentions("The UPS fan stopped.", fan)
+    assert not mentions("The backups ran.", fan)  # matched at a word's start: "ups" is not in "backups"
 
 
 # --- the jobs ------------------------------------------------------------------------------------------------------
