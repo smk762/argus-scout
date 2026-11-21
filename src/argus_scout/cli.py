@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from importlib.resources import files as package_files
@@ -13,6 +14,9 @@ import argus_scout
 from argus_scout.approvals import load_rules
 from argus_scout.config import CONFIG_FILE, ENV_FILE, ConfigError, ScoutConfig, load_config, resolve_secret
 from argus_scout.heartbeat import PolicyFile
+from argus_scout.inbox import Inbox, InvalidEvent
+from argus_scout.sources import build_sources
+from argus_scout.store import SqliteStore
 from argus_scout.tariff import coverage_gaps, current_period, load_tariff, next_period_change
 
 app = typer.Typer(
@@ -103,6 +107,9 @@ def check_config(path: Path = ExistingFile) -> None:
             check(named)
         except typer.Exit as exc:
             failed = failed or bool(exc.exit_code)
+    for name, reason in build_sources(config).errors.items():
+        typer.echo(f"source {name}: error: {reason}", err=True)
+        failed = True
     for name in config.secret_env_names():
         typer.echo(f"secret {name}: {'set' if resolve_secret(name) else 'unset'}")
     summary = _config_summary(config)
@@ -152,6 +159,66 @@ def tariff_now(path: Path = ExistingFile) -> None:
     hours, minutes = divmod(seconds // 60, 60)
     typer.echo(f"{period.name}: {period.rate:g} per {tariff.unit} ({tariff.currency} minor units)")
     typer.echo(f"next: {name} in {hours}h{minutes:02d}m")
+
+
+@app.command()
+def poll(
+    config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
+    source: str | None = typer.Option(
+        None, "--source", "-s", help="Poll only this source [default: every polling source]."
+    ),
+    ingest: bool = typer.Option(False, "--ingest", help="Write the events to the store instead of only printing them."),
+) -> None:
+    """Poll sources once and print the events they return. A dry run unless --ingest is given."""
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    built = build_sources(config)
+    if source is not None:
+        bound = built.get(source)
+        if bound is None:
+            reason = built.errors.get(source, "no source by that name")
+            typer.echo(f"error: source {source}: {reason}", err=True)
+            raise typer.Exit(1)
+        if not bound.polls:
+            typer.echo(f"error: source {source} is a {bound.kind} source; it is pushed to, not polled", err=True)
+            raise typer.Exit(1)
+        targets = [bound]
+    else:
+        targets = built.polling
+        for name, reason in built.errors.items():
+            typer.echo(f"source {name}: error: {reason}", err=True)
+    if not targets:
+        typer.echo("no polling sources configured")
+        raise typer.Exit(1 if built.errors else 0)
+    inbox = Inbox(SqliteStore(config.store.path)) if ingest else None
+    failed = bool(built.errors) and source is None
+    try:
+        for bound in targets:
+            try:
+                events = asyncio.run(bound.plugin.poll(bound.config))  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 — one failing source doesn't stop the others
+                typer.echo(f"source {bound.name}: error: {exc}", err=True)
+                failed = True
+                continue
+            typer.echo(f"source {bound.name}: {len(events)} events")
+            for event in events:
+                line = f"  [{event.severity.value}] {event.source}/{event.event_id}: {event.summary}"
+                if inbox is not None:
+                    try:
+                        line = f"{line} ({inbox.ingest(event).outcome.value})"
+                    except InvalidEvent as exc:
+                        line, failed = f"{line} (refused: {exc})", True
+                typer.echo(line)
+    finally:
+        if inbox is not None:
+            inbox.store.close()
+    if not ingest:
+        typer.echo("dry run: nothing was written (pass --ingest to store these)")
+    if failed:
+        raise typer.Exit(1)
 
 
 @app.command()

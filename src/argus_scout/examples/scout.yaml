@@ -42,6 +42,10 @@ sources:
   #     severity: level
   #   auth_header: Authorization
   #   auth_env: SCOUT_BACKUPS_AUTH  # value sent in auth_header, e.g. "Bearer ..."
+  #
+  # Any other kind comes from an installed plugin (entry-point group argus_scout.sources),
+  # which validates its own keys. Try a poll without writing anything:
+  #   argus-scout poll --config scout.yaml [--source backups]
 
 schedule:
   analysis_interval: 900          # seconds between analysis cycles
