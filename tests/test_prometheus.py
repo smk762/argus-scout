@@ -227,8 +227,9 @@ async def test_only_the_configured_prometheus_is_contacted():
 NETWORK_MODULES = {"httpx", "requests", "aiohttp", "urllib3", "socket", "http.client", "urllib.request", "ssl"}
 FETCH_NAMES = {"afetch", "fetch"}
 # The only modules allowed to fetch at all: the Prometheus client, and the JSON status poller
-# (which GETs status endpoints the config names; it is a source of status events, not a scraper).
-FETCHERS = {"prometheus.py", "sources/json_poll.py"}
+# (which GETs status endpoints the config names; it is a source of status events, not a scraper), and the
+# webhook channel (which POSTs messages to the one URL its config names; delivery, never a monitored host).
+FETCHERS = {"prometheus.py", "sources/json_poll.py", "channels/webhook.py"}
 
 
 def test_no_module_contacts_hosts_directly():

@@ -13,6 +13,7 @@ import typer
 import argus_scout
 from argus_scout.approvals import StandingApprovals, load_rules
 from argus_scout.budget import budget_from_config
+from argus_scout.channels import Delivery, build_channels, build_dispatcher
 from argus_scout.config import CONFIG_FILE, ENV_FILE, ConfigError, ScoutConfig, load_config, resolve_secret
 from argus_scout.engine import RecommendationEngine
 from argus_scout.heartbeat import PolicyFile, report_gate
@@ -156,6 +157,9 @@ def check_config(path: Path = ExistingFile) -> None:
     for name, reason in build_sources(config).errors.items():
         typer.echo(f"source {name}: error: {reason}", err=True)
         failed = True
+    for name, reason in build_channels(config).errors.items():
+        typer.echo(f"channel {name}: error: {reason}", err=True)
+        failed = True
     for name in config.secret_env_names():
         typer.echo(f"secret {name}: {'set' if resolve_secret(name) else 'unset'}")
     summary = _config_summary(config)
@@ -166,7 +170,7 @@ def check_config(path: Path = ExistingFile) -> None:
 
 def _config_summary(config: ScoutConfig) -> str:
     return (
-        f"{len(config.sources)} sources, {len(config.schedule.briefings)} briefings, "
+        f"{len(config.sources)} sources, {len(config.channels)} channels, {len(config.schedule.briefings)} briefings, "
         f"store {config.store.path}, server {config.server.host}:{config.server.port}"
     )
 
@@ -365,6 +369,56 @@ def brief(
         typer.echo(f"persona: using the default ({meta['persona_error']})", err=True)
     typer.echo(report.text)
     typer.echo(f"-- {kind} report from {source}" + ("; dry run, nothing stored" if dry_run else f", id {report.id}"))
+
+
+@app.command()
+def deliver(
+    config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
+    latest: bool = typer.Option(False, "--latest", help="Send the newest stored report (the only mode for now)."),
+    kind: str | None = typer.Option(None, "--kind", "-k", help="The newest report of this kind [default: any]."),
+    channel: list[str] | None = typer.Option(
+        None, "--channel", help="Send only to this channel (repeatable) [default: every channel]."
+    ),
+    force: bool = typer.Option(False, "--force", help="Send again to channels that already have it."),
+) -> None:
+    """Send a stored report to the configured channels.
+
+    Idempotent: a channel that already has the report is skipped (shown as duplicate) unless --force. Voice
+    channels follow the heartbeat policy (quiet hours, rest hours) the same as the server does.
+    """
+    if not latest:
+        typer.echo("error: say which report: --latest", err=True)
+        raise typer.Exit(2)
+    try:
+        config = load_config(config_path)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    store = SqliteStore(config.store.path)
+    try:
+        channels, dispatcher = build_dispatcher(config, store=store)
+        for name, reason in channels.errors.items():
+            typer.echo(f"channel {name}: error: {reason}", err=True)
+        unknown = [name for name in channel or [] if channels.get(name) is None]
+        if unknown:
+            typer.echo(f"error: no channel named {', '.join(unknown)}", err=True)
+            raise typer.Exit(1)
+        if not channels.channels:
+            typer.echo("error: no channels configured", err=True)
+            raise typer.Exit(1)
+        report = store.latest_report(kind)
+        if report is None:
+            typer.echo(f"error: no {kind + ' ' if kind else ''}report stored yet", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"report {report.id} ({report.kind}, {report.generated_at:%Y-%m-%d %H:%M} UTC)")
+        result = asyncio.run(dispatcher.deliver(Delivery.from_report(report), force=force, only=channel or None))
+    finally:
+        store.close()
+    for row in result.results:
+        why = row.error if row.status == "failed" else row.detail
+        typer.echo(f"  {row.channel}: {row.status}" + (f" ({why})" if why else ""))
+    if result.failed:
+        raise typer.Exit(1)
 
 
 @app.command()

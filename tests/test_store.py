@@ -318,7 +318,7 @@ def test_prune(store):
     rec = proposal()
     store.save_recommendation(rec)
 
-    assert store.prune(T0 + timedelta(days=5)) == {"events": 2, "reports": 1}
+    assert store.prune(T0 + timedelta(days=5)) == {"events": 2, "reports": 1, "deliveries": 0}
     assert store.get_event("nas", "old-acked") is None
     assert store.get_event("nas", "expired") is None
     assert store.get_event("nas", "new-acked") is not None
