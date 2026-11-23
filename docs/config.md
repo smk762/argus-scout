@@ -27,7 +27,7 @@ test fails if it drifts, so edit the model's descriptions, not this file. For a 
 | `files` | [files](#files) | section defaults |  | The policy files scout reads (reloaded while it runs). |
 | `store` | [store](#store) | section defaults |  | Where scout keeps its state. |
 | `memory` | [memory](#memory) | section defaults |  | What scout writes in the memory directory. |
-| `sources` | list of [sources: webhook](#sources-webhook) or [sources: json_poll](#sources-json_poll) or [plugin kind](#plugin-kinds) | `[]` |  | Where status events come from. |
+| `sources` | list of [sources: webhook](#sources-webhook) or [sources: json_poll](#sources-json_poll) or [sources: suite_status](#sources-suite_status) or [plugin kind](#plugin-kinds) | `[]` |  | Where status events come from. |
 | `channels` | list of [channels: text](#channels-text) or [channels: webhook](#channels-webhook) or [plugin kind](#plugin-kinds) | `[]` |  | Where reports go. |
 | `schedule` | [schedule](#schedule) | section defaults |  | Cycle intervals, the timezone and the briefings. |
 | `services` | [services](#services) | section defaults |  | Prometheus, the model and argus-echo. |
@@ -96,7 +96,7 @@ A list. Every entry has these keys; each kind adds its own below. A bad entry fa
 
 | Key | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `kind` | text | required |  | `webhook`, `json_poll`, or a kind an installed plugin provides. |
+| `kind` | text | required |  | `webhook`, `json_poll`, `suite_status`, or a kind an installed plugin provides. |
 | `name` | text | required |  | Unique among sources. It is the `source` of every event this source produces, and the `{source}` in `POST /api/events/{source}`. |
 
 ### sources: webhook
@@ -142,6 +142,46 @@ sources:
       severity: labels.severity
     id: [labels.alertname, labels.instance]
 ```
+
+### sources: suite_status
+
+The Argus suite's own health and versions, read from Prometheus. See `argus_scout.suite`. Scout asks Prometheus about every series with an `argus_peer` label: `up`, a blackbox `/health` probe (`probe_success`, `probe_http_status_code`) and `argus_build_info`. It never probes a service itself. It raises a status event when a service is down, stays degraded, changes version, or runs different versions on two hosts, and resolves the event when the condition clears. `POST /api/reports` with `kind: suite` lists every service from the same reading.
+
+Guide: [suite.md](suite.md).
+
+| Key | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `kind` | `suite_status` | required |  | Selects this kind. |
+| `prometheus_url` | URL or null | `null` |  | The Prometheus to ask. Unset: `services.prometheus_url`; with neither, the source is refused. |
+| `interval` | number | `60.0` | > 0 | Seconds between readings. |
+| `health_job` | text | `argus-health` | matches `^[A-Za-z_][A-Za-z0-9_.:-]{0,99}$` | The scrape job of the blackbox `/health` probe. Its own `up` says whether the blackbox exporter answered, not the service, so `up` is read from every other job. |
+| `down_for` | number | `120.0` | >= 60, <= 86400 | Seconds a service must have gone unanswered before it is reported down. Keep it at least twice the scrape interval. |
+| `degraded_for` | number | `600.0` | >= 60, <= 86400 | Seconds a service's `/health` must have gone without an `ok` before it is reported degraded. |
+| `deploy_window` | number | `3600.0` | >= 60, <= 604800 | Seconds a version change stays an open status event (and in the suite report) after it happened. |
+| `forget_after` | number | `86400.0` | >= 300, <= 2592000 | Seconds a service that is no longer a scrape target is still reported down. After that it is forgotten: scout takes it as removed on purpose. |
+| `severity` | [sources: suite_status: severity](#sources-suite_status-severity) | section defaults |  | The severity of each condition's event. |
+| `resolve_missing` | boolean | `true` |  | Close (`resolved`) this source's open events once a reading no longer finds the condition. |
+
+```yaml
+sources:
+  - kind: suite_status
+    name: suite
+    down_for: 120
+    degraded_for: 600
+    severity:
+      down: critical
+```
+
+#### sources: suite_status: severity
+
+The severity of each suite condition's status event. The heartbeat policy decides what a severity does.
+
+| Key | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `down` | `info` \| `notice` \| `warning` \| `critical` | `warning` |  | A service that stopped answering, or is no longer a scrape target. |
+| `degraded` | `info` \| `notice` \| `warning` \| `critical` | `warning` |  | A service whose `/health` has answered `degraded` or `starting` (or an error) for `degraded_for`. |
+| `version_change` | `info` \| `notice` \| `warning` \| `critical` | `info` |  | A service now runs another version than it did (a deploy happened). |
+| `version_skew` | `info` \| `notice` \| `warning` \| `critical` | `notice` |  | Two hosts run different versions of the same peer. |
 
 ## channels
 

@@ -101,7 +101,8 @@ Write one report now and print it (the server writes the scheduled ones).
 
 The model&#x27;s daily cap applies; over it, or with the model unreachable, the report comes from the template.
 A status report covers the open items the heartbeat policy&#x27;s report rules allow (rest and quiet hours
-aside). The report only describes and recommends: nothing here acts.
+aside). A suite report lists every Argus service with its health and version, as Prometheus has them now; it
+is always a plain listing, never model-written. The report only describes and recommends: nothing here acts.
 
 **Usage**:
 
@@ -112,7 +113,7 @@ $ argus-scout brief [OPTIONS]
 **Options**:
 
 * `-c, --config <file>`: scout.yaml  [required]
-* `-k, --kind <str>`: Report kind: morning, evening, status.  [default: morning]
+* `-k, --kind <str>`: Report kind: morning, evening, status, suite.  [default: morning]
 * `--dry-run`: Store nothing: no report, no usage count, no memory file. The model is still asked.
 * `--no-llm`: Skip the model and write the report from the template.
 * `--help`: Show this message and exit.

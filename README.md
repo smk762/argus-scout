@@ -64,6 +64,9 @@ plugins                     quiet and rest hours                              â”
 - **Standing approvals** for recurring low-risk advice, which can never approve a high-impact or critical one.
 - **Status events from anywhere**: producers push JSON to a webhook, or scout polls any JSON endpoint and maps its
   fields, with per-source tokens. Other kinds are plugins. [Sources](docs/sources.md)
+- **Suite status**: the health and version of every Argus service, read from what Prometheus already scrapes and
+  probes (argus-iris's directory as service discovery). A status event when a service goes down, stays degraded
+  or changes version, and a suite report on request. Scout probes nothing itself. [Suite status](docs/suite.md)
 - **A heartbeat policy** that decides what is worth interrupting for, and explains every decision.
 - **Briefings and status updates** written by a local or hosted model from scout's facts only, with prompts sized
   for small models, under a GPU lease when the GPU is shared, and from a plain template whenever the model can't:
@@ -113,6 +116,7 @@ Each policy file has a commented example in [`examples/`](examples/): `heartbeat
 |---|---|
 | [Config reference](docs/config.md) | every `scout.yaml` key: type, default, constraints, example (generated from the schema) |
 | [Sources](docs/sources.md) | the status event envelope, webhook pushes, JSON polling, writing a source plugin |
+| [Suite status](docs/suite.md) | the Argus services' health, versions and deploys from Prometheus: the scrape config for argus-iris's directory, the events, the on-request report |
 | [Signals](docs/signals.md) | threshold and tariff rules, templates, how the engine decides, standing approvals |
 | [Narrative](docs/narrative.md) | report kinds, model backends, caps and fallback, GPU leases, persona, memory |
 | [Channels](docs/channels.md) | text, webhook, argus-echo speech, Snapcast, argus-mask, redelivery, writing a channel plugin |

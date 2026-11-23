@@ -10,11 +10,17 @@ scrape_configs:
     static_configs:
       - targets: ["node-exporter:9100"]
 
-  # Scout's own state: open items, recommendations, usage caps, deliveries.
+  # Scout's own state: open items, recommendations, usage caps, deliveries, and argus_build_info.
+  # The argus_peer label makes it a suite service, so the suite_status source (config/scout.yaml) lists scout
+  # itself with its version. To watch the whole suite through argus-iris, see prometheus.iris.yml.
   - job_name: scout
     metrics_path: /metrics
     static_configs:
       - targets: ["scout:8400"]
+        labels:
+          argus_peer: scout
+          argus_service: argus-scout
+          node: quickstart
 
   - job_name: prometheus
     static_configs:

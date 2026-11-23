@@ -9,7 +9,7 @@ package adds a kind with::
 
 and a ``sources:`` entry of ``kind: mqtt`` is then validated by that plugin's ``config_model``.
 
-The built-in ``webhook`` and ``json_poll`` are registered the same way, and are also known without
+The built-in ``webhook``, ``json_poll`` and ``suite_status`` are registered the same way, and are also known without
 entry points (a source checkout that was never installed still works). A plugin can't take over a
 built-in kind.
 
@@ -30,15 +30,20 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, ValidationError
 
-from argus_scout.config import PluginSource, ScoutConfig
+from argus_scout.config import PluginSource, ScoutConfig, SuiteStatusSource
 from argus_scout.sources.base import PollingSource, PushSource, Source
 from argus_scout.sources.json_poll import plugin as json_poll_plugin
+from argus_scout.sources.suite_status import plugin as suite_status_plugin
 from argus_scout.sources.webhook import plugin as webhook_plugin
 
 log = structlog.get_logger(__name__)
 
 ENTRY_POINT_GROUP = "argus_scout.sources"
-BUILTINS: dict[str, Source] = {"webhook": webhook_plugin, "json_poll": json_poll_plugin}
+BUILTINS: dict[str, Source] = {
+    "webhook": webhook_plugin,
+    "json_poll": json_poll_plugin,
+    "suite_status": suite_status_plugin,
+}
 
 
 @dataclass
@@ -180,6 +185,12 @@ def build_sources(config: ScoutConfig, registry: Registry | None = None) -> Sour
             except Exception as exc:  # noqa: BLE001 — a plugin's own validator may raise anything; it fails only itself
                 built.errors[entry.name] = f"{entry.kind}: {type(exc).__name__}: {exc}"
                 continue
+        elif isinstance(entry, SuiteStatusSource) and entry.prometheus_url is None:
+            # It asks the one Prometheus scout reads, unless the entry names its own.
+            if config.services.prometheus_url is None:
+                built.errors[entry.name] = f"{entry.kind}: no Prometheus to ask (set services.prometheus_url)"
+                continue
+            cfg = entry.model_copy(update={"prometheus_url": config.services.prometheus_url})
         else:
             cfg = entry
         built.sources.append(BoundSource(plugin, cfg))

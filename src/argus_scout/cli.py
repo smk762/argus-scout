@@ -19,7 +19,7 @@ from argus_scout.engine import RecommendationEngine
 from argus_scout.heartbeat import PolicyFile, report_gate
 from argus_scout.inbox import Inbox, InvalidEvent
 from argus_scout.memory import Memory
-from argus_scout.narrative import REPORT_KINDS, build_narrator
+from argus_scout.narrative import ON_REQUEST_KINDS, SuiteNotConfigured, SuiteUnavailable, build_narrator
 from argus_scout.persona import load_persona
 from argus_scout.prometheus import PrometheusClient
 from argus_scout.signals import Evaluation, SignalState, evaluate, load_signal_rules
@@ -336,7 +336,7 @@ def analyze(
 @app.command()
 def brief(
     config_path: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False, help="scout.yaml"),
-    kind: str = typer.Option("morning", "--kind", "-k", help=f"Report kind: {', '.join(REPORT_KINDS)}."),
+    kind: str = typer.Option("morning", "--kind", "-k", help=f"Report kind: {', '.join(ON_REQUEST_KINDS)}."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Store nothing: no report, no usage count, no memory file. The model is still asked."
     ),
@@ -346,10 +346,11 @@ def brief(
 
     The model's daily cap applies; over it, or with the model unreachable, the report comes from the template.
     A status report covers the open items the heartbeat policy's report rules allow (rest and quiet hours
-    aside). The report only describes and recommends: nothing here acts.
+    aside). A suite report lists every Argus service with its health and version, as Prometheus has them now; it
+    is always a plain listing, never model-written. The report only describes and recommends: nothing here acts.
     """
-    if kind not in REPORT_KINDS:
-        typer.echo(f"error: unknown kind {kind!r} (known: {', '.join(REPORT_KINDS)})", err=True)
+    if kind not in ON_REQUEST_KINDS:
+        typer.echo(f"error: unknown kind {kind!r} (known: {', '.join(ON_REQUEST_KINDS)})", err=True)
         raise typer.Exit(1)
     try:
         config = load_config(config_path)
@@ -364,6 +365,9 @@ def brief(
             policy = PolicyFile(config.files.heartbeat).get()
             groups = [g for g in Inbox(store).open_grouped() if report_gate(g.latest, policy)[0]]
         report = asyncio.run(narrator.report(kind, groups=groups, use_llm=not no_llm, dry_run=dry_run, trigger="cli"))
+    except (SuiteNotConfigured, SuiteUnavailable) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
     finally:
         if narrator.generator is not None:
             narrator.generator.close()

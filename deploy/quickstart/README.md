@@ -21,6 +21,7 @@ image is most of it, the model 1.3 GB), and network access to pull them the firs
 | `scout` | built from this checkout | The server and scheduler. Port 8400 on loopback. Mounts `./config` at `/config`. |
 | `first-brief` | the scout image | One-shot: writes a morning briefing once scout is healthy and delivers it, then exits. |
 | `prometheus` | `prom/prometheus` | Scrapes node exporter (`job="node"`) and scout's own `/metrics`. Port 9090 on loopback. |
+| `blackbox` | `prom/blackbox-exporter` | Only with `compose.iris.yaml`: probes each suite service's `/health` for Prometheus. |
 | `node-exporter` | `prom/node-exporter` | Real data for the example signal rules. |
 | `ollama` | `ollama/ollama` | The model server. Models live in the `ollama-models` volume. |
 | `ollama-pull` | `ollama/ollama` | One-shot: pulls the model scout.yaml names, then exits. |
@@ -116,6 +117,30 @@ were none.
 
 The `scout` container carries the labels argus-iris's agents build the suite's service directory from:
 `argus.peer: scout`, `argus.service: argus-scout`, `argus.health: /health` and `argus.port: "8400"`.
+
+## The whole suite, through argus-iris
+
+`config/scout.yaml` has a `suite_status` source: scout asks Prometheus about every target with an `argus_peer`
+label and reports each service's health and version. Out of the box that is one service, scout itself, which
+`prometheus.yml` labels:
+
+```bash
+docker compose exec scout argus-scout brief --config /config/scout.yaml --kind suite
+```
+
+To watch every Argus service on your hosts, let Prometheus find them through
+[argus-iris](https://github.com/smk762/argus-iris), whose `/directory/sd` lists each running container labelled
+`argus.peer`. Put your broker's address in `prometheus.iris.yml` (replace `iris:8120`, twice), then add the
+override file:
+
+```bash
+docker compose -f compose.yaml -f compose.iris.yaml up -d
+```
+
+It swaps in `prometheus.iris.yml` (one job scraping each service's `/metrics`, one probing each `/health`) and
+adds a blackbox exporter with the `argus_health` module from `blackbox.yml`. Prometheus does the probing; scout
+only reads the result. When a service goes down, stays degraded or changes version, scout raises a status event,
+and the suite report lists them all. The details are in [docs/suite.md](../../docs/suite.md).
 
 ## Turning on writes
 

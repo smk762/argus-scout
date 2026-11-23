@@ -23,3 +23,4 @@ jobs:
           docker compose version
           docker compose -f compose.yaml config -q
           docker compose -f compose.yaml -f compose.gpu.yaml config -q
+          docker compose -f compose.yaml -f compose.iris.yaml config -q
