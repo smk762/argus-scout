@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from argus_cortex.fs import PathRefused, safe_join
+from argus_cortex.peers import peer_env, peer_url
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -108,6 +109,26 @@ def _check_url(value: str) -> str:
     if parts.scheme not in ("http", "https") or not host:
         raise ValueError(f"{value!r} is not an http(s) URL")
     return value.rstrip("/")
+
+
+def fill_peer_url(data: Any, peer: str | None, *, key: str = "url") -> Any:
+    """``data`` with ``key`` filled from the suite-wide peer variable when the config leaves it out.
+
+    The YAML key wins, as it always did. Left out (or blank), the URL comes from ``ARGUS_<PEER>_URL`` through
+    :func:`argus_cortex.peers.peer_url`: the process environment (the ``.env`` beside the config included), then the
+    suite settings file. A malformed value there raises ``PeerRefused`` (a ``ValueError`` naming the variable, never
+    the value), and nothing set anywhere is an error too: a config that validates always has a URL."""
+    if not isinstance(data, dict):
+        return data
+    value = data.get(key)
+    if value is not None and not (isinstance(value, str) and not value.strip()):
+        return data
+    if peer is None:
+        raise ValueError(f"{key} is not set (give it, or name the engine with peer: to read its suite-wide URL)")
+    url = peer_url(peer)
+    if url is None:
+        raise ValueError(f"{key} is not set, and neither is {peer_env(peer)} (the suite-wide name for this service)")
+    return {**data, key: url}
 
 
 def _check_name(value: str) -> str:
@@ -576,6 +597,10 @@ ECHO_REQUEST_FIELDS = frozenset(
 """argus-echo's shared ``SynthesiseRequest`` fields (``argus_echo.contract``)."""
 
 
+ECHO_PEERS = ("xtts", "tts")
+"""argus-echo's engines that have a suite-wide name (``ARGUS_XTTS_URL``, ``ARGUS_TTS_URL``)."""
+
+
 class EchoConfig(_Section):
     """argus-echo, the speech server voice channels play from. See :mod:`argus_scout.channels.echo`.
 
@@ -588,7 +613,12 @@ class EchoConfig(_Section):
     """
 
     url: HttpUrl
-    """The engine's root, e.g. ``http://echo:8000``: scout calls ``/health`` and ``/synthesise/stream`` under it."""
+    """The engine's root, e.g. ``http://echo:8000``: scout calls ``/health`` and ``/synthesise/stream`` under it.
+    Leave it out and set ``peer`` to read the suite-wide URL instead."""
+    peer: Literal["xtts", "tts"] | None = None
+    """The engine's suite-wide name, used only when ``url`` is left out: ``xtts`` (XTTS-v2) reads ``ARGUS_XTTS_URL``
+    and ``tts`` (Qwen3-TTS) reads ``ARGUS_TTS_URL``, from the environment or the suite settings file
+    (``argus_cortex.peers``). Clones and speakers are per engine, so scout never guesses which one."""
     voice_clone_id: str | None = None
     """A clone stored on that engine (clones are per engine). Wins over ``speaker``. Speech in a clone is marked
     as cloned: the ``mask`` channel discloses it over ``transport: websocket`` when ``cloned_voice_consented`` attests consent, and over http refuses it unless its
@@ -616,6 +646,14 @@ class EchoConfig(_Section):
     )
     health_timeout: float = Field(default=5.0, gt=0, le=60, description="Seconds the readiness check may take.")
     max_seconds: float = Field(default=300.0, gt=0, le=3600, description="The longest speech accepted, in seconds.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _suite_url(cls, data: Any) -> Any:
+        peer = data.get("peer") if isinstance(data, dict) else None
+        if peer is not None and peer not in ECHO_PEERS:
+            return data  # the peer field's own validation names the mistake
+        return fill_peer_url(data, peer)
 
     @field_validator("extra")
     @classmethod
@@ -864,7 +902,6 @@ def load_config(path: str | Path, *, load_env: bool = True) -> ScoutConfig:
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
     base_dir = path.resolve().parent
-    config = parse_config(data, base_dir, source=str(path))
-    if load_env:
+    if load_env:  # before validation: a service URL left out of the YAML may be named in this file
         load_env_file(base_dir / ENV_FILE)
-    return config
+    return parse_config(data, base_dir, source=str(path))

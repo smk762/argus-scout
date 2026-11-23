@@ -242,7 +242,7 @@ Needs the `mask` extra: `pip install "argus-scout[mask]"`.
 |---|---|---|---|---|
 | `kind` | `mask` | required |  | Selects this kind. |
 | `timeout` | number | `120.0` | > 0, <= 600 | Seconds the whole delivery may take: mask answers a push when the speech ends. |
-| `url` | URL | required |  | The argus-mask server. Only that host and port are contacted, with no redirects. |
+| `url` | URL | required |  | The argus-mask server. Only that host and port are contacted, with no redirects. Left out, it is the suite-wide `ARGUS_MASK_URL` (the environment, then the suite settings file; `argus_cortex.peers`). |
 | `face` | text | required | matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` | A face id or alias the server serves. |
 | `wait_ready` | number | `0.0` | >= 0, <= 300 | Seconds to wait for a ready screen before skipping. 0: skip at once. |
 | `poll_interval` | number | `1.0` | > 0, <= 30 | Seconds between readiness checks while waiting. |
@@ -370,7 +370,8 @@ argus-echo, the speech server voice channels play from. See `argus_scout.channel
 
 | Key | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `url` | URL | required |  | The engine's root, e.g. `http://echo:8000`: scout calls `/health` and `/synthesise/stream` under it. |
+| `url` | URL | required |  | The engine's root, e.g. `http://echo:8000`: scout calls `/health` and `/synthesise/stream` under it. Leave it out and set `peer` to read the suite-wide URL instead. |
+| `peer` | `xtts` \| `tts` or null | `null` |  | The engine's suite-wide name, used only when `url` is left out: `xtts` (XTTS-v2) reads `ARGUS_XTTS_URL` and `tts` (Qwen3-TTS) reads `ARGUS_TTS_URL`, from the environment or the suite settings file (`argus_cortex.peers`). Clones and speakers are per engine, so scout never guesses which one. |
 | `voice_clone_id` | text or null | `null` |  | A clone stored on that engine (clones are per engine). Wins over `speaker`. Speech in a clone is marked as cloned: the `mask` channel discloses it over `transport: websocket` when `cloned_voice_consented` attests consent, and over http refuses it unless its `allow_cloned_voice` is set. |
 | `speaker` | text or null | `null` |  | A built-in speaker (`GET /speakers` on the engine). Neither this nor a clone: the engine's default voice. |
 | `language` | text | `en` |  | ISO language code. Miso speaks English only. |
@@ -459,4 +460,7 @@ Not in `scout.yaml`, on purpose:
 |---|---|---|
 | `SCOUT_CONFIG` | `argus-scout serve` | The config file when `--config` isn't given. The container image sets `/config/scout.yaml`. |
 | the variables `*_env` keys name | scout | Secrets: tokens, API keys, HMAC keys. |
-| `ARGUS_GPU_COORDINATOR`, `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_GPU_TENANT_MANIFEST`, `ARGUS_GPU_LEASE_TIMEOUT_S`, ... | argus-cortex | The host-wide GPU coordinator every argus service on the host shares, used when `services.llm.gpu` is set. See [narrative.md](narrative.md#gpu-leases). |
+| `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_GPU_COORDINATOR`, `ARGUS_GPU_LEASE_TIMEOUT_S`, ... | argus-cortex | The host-wide GPU coordinator every argus service on the host shares, used when `services.llm.gpu` is set. See [narrative.md](narrative.md#gpu-leases). |
+| `ARGUS_XTTS_URL`, `ARGUS_TTS_URL`, `ARGUS_MASK_URL` | scout, through `argus_cortex.peers` | The suite-wide URL of an argus-echo engine or of argus-mask, read only when `services.echo` (with `peer`) or a `mask` channel leaves its `url` out. A value that isn't an absolute http(s) URL fails `check config`, naming the variable. |
+| `ARGUS_ENV_FILE` | argus-cortex | The suite settings file: `~/.config/argus/suite.env` (mode 600), or `/etc/argus/suite.env` in a container. The `ARGUS_*` variables above may live there instead of in each service's `.env`; the environment and the `.env` beside `scout.yaml` win. `off` disables it. |
+| `ARGUS_PEER`, `ARGUS_BUILD` | argus-cortex | What `/health` reports as `peer` (the container's `argus.peer` label, `scout`) and `build` (an image build id). Optional. |

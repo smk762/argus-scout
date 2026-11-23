@@ -6,6 +6,7 @@
 #   docker compose logs -f first-brief                # the first briefing, a minute or so after startup
 #   tail -f config/scout-reports.log                  # or: curl -s localhost:8400/wall
 #   docker compose -f compose.yaml -f compose.gpu.yaml up -d   # Ollama on an NVIDIA GPU
+#   COMPOSE_FILE=compose.yaml:compose.suite.yaml docker compose up -d   # with the suite settings file mounted
 #   docker compose down -v                            # stop and delete the volumes (models, metrics)
 #
 # Ports are published on loopback only. Override with SCOUT_PUBLISH / PROMETHEUS_PUBLISH, e.g.
@@ -27,6 +28,14 @@ services:
     # Root by default, which suits rootless podman (root in the container is you). With rootful Docker the files
     # scout writes in config/ are then root's: set SCOUT_USER=$(id -u):$(id -g) before the first `up` to own them.
     user: ${SCOUT_USER:-0:0}
+    # How the suite finds this service: argus-iris's agents read the labels and build its directory from them.
+    labels:
+      argus.peer: scout
+      argus.service: argus-scout
+      argus.health: /health
+      argus.port: "8400"
+    environment:
+      ARGUS_PEER: scout   # the argus.peer label again: a process cannot read its own labels, and /health reports it
     ports:
       - "${SCOUT_PUBLISH:-127.0.0.1:8400}:8400"
     volumes:

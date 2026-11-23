@@ -75,7 +75,8 @@ services:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `url` | required | The engine's root URL. Only that host and port are contacted. |
+| `url` | required, unless `peer` is set | The engine's root URL. Only that host and port are contacted. |
+| `peer` | unset | Used only when `url` is left out: `xtts` (XTTS-v2) reads the suite-wide `ARGUS_XTTS_URL`, `tts` (Qwen3-TTS) reads `ARGUS_TTS_URL`. See below. |
 | `voice_clone_id` | unset | A clone stored on that engine (clones are engine-specific). Wins over `speaker`. |
 | `speaker` | unset | A built-in speaker (`GET /speakers` on the engine). Neither: the engine's default voice. |
 | `language` | `en` | ISO code. Miso speaks English only. |
@@ -87,6 +88,21 @@ services:
 | `load_timeout` | `180` | Seconds one synthesis may take when echo has to load the model first |
 | `health_timeout` | `5` | Seconds the readiness check may take |
 | `max_seconds` | `300` | The longest speech accepted; the response is capped to match |
+
+**The suite-wide URL.** Every argus service on a host can share one name per service: `ARGUS_XTTS_URL` for the
+XTTS-v2 engine and `ARGUS_TTS_URL` for Qwen3-TTS, set in the environment, the `.env` beside `scout.yaml` or the
+suite settings file (`~/.config/argus/suite.env`). Scout reads one only when `url` is left out and `peer` says which
+engine you mean, because clones and speakers are per engine:
+
+```yaml
+services:
+  echo:
+    peer: xtts                     # no url: read ARGUS_XTTS_URL
+    voice_clone_id: <CLONE_ID>
+```
+
+A `url` in `scout.yaml` always wins. With neither a `url` nor the variable, or with a value that isn't an absolute
+http(s) URL, `check config` fails and names the variable. Miso has no suite-wide name: give its `url`.
 
 **Breaking change:** `services.echo_url` was replaced by `services.echo.url`. A config that still has
 `echo_url` is refused with a message saying so.
@@ -330,7 +346,7 @@ watching it. It uses mask's published agent contracts: HTTP `POST /push` by defa
 
 | Key | Default | Meaning |
 |---|---|---|
-| `url` | required | The argus-mask server. Only that host and port are contacted, with no redirects. |
+| `url` | `ARGUS_MASK_URL` | The argus-mask server. Only that host and port are contacted, with no redirects. Left out, it is the suite-wide `ARGUS_MASK_URL` (the environment, the `.env` beside `scout.yaml`, or the suite settings file); with neither, or a value that isn't an absolute http(s) URL, the channel is refused and `check config` names the variable. |
 | `face` | required | A face id or alias the server serves |
 | `wait_ready` | `0` | Seconds to wait for a ready screen. `0` skips at once. |
 | `poll_interval` | `1` | Seconds between readiness checks while waiting |

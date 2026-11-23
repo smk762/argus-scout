@@ -1,0 +1,28 @@
+# Optional: mount the suite settings file (argus_cortex.settings) into the scout containers, read-only.
+#
+#   python -m argus_cortex.settings --init                # creates ~/.config/argus/suite.env, mode 600
+#   COMPOSE_FILE=compose.yaml:compose.suite.yaml          # in the shell or a .env beside this file, or pass both with -f
+#
+# A separate file because compose cannot make a bind mount optional: with it in compose.yaml, a host without a
+# suite file would not start. What scout reads from it: the GPU broker's ARGUS_GPU_BROKER_URL and
+# ARGUS_GPU_BROKER_TOKEN, and the suite-wide service URLs (ARGUS_XTTS_URL, ARGUS_TTS_URL, ARGUS_MASK_URL) for a
+# services.echo or mask channel that leaves its url out. Anything set in config/.env or the environment still wins.
+#
+# Known limit (smk762/argus-cortex#218): argus-cortex reads the file only when it is owned by root or by the user
+# the process runs as, and a mode-600 file can be opened only by its owner. A container running as root refuses a
+# file owned by another user, and one running as another user cannot open it, so today the mounted file must be
+# owned by root. Otherwise it is ignored with a warning and scout runs as if there were none.
+x-suite-env: &suite-env
+  type: bind
+  source: "${ARGUS_SUITE_ENV:-${HOME}/.config/argus/suite.env}"
+  target: /etc/argus/suite.env
+  read_only: true
+  bind: {create_host_path: false}
+
+services:
+  scout:
+    volumes:
+      - *suite-env
+  first-brief:
+    volumes:
+      - *suite-env

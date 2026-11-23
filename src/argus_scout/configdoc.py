@@ -473,7 +473,10 @@ Not in `scout.yaml`, on purpose:
 |---|---|---|
 | `SCOUT_CONFIG` | `argus-scout serve` | The config file when `--config` isn't given. The container image sets `/config/scout.yaml`. |
 | the variables `*_env` keys name | scout | Secrets: tokens, API keys, HMAC keys. |
-| `ARGUS_GPU_COORDINATOR`, `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_GPU_TENANT_MANIFEST`, `ARGUS_GPU_LEASE_TIMEOUT_S`, ... | argus-cortex | The host-wide GPU coordinator every argus service on the host shares, used when `services.llm.gpu` is set. See [narrative.md](narrative.md#gpu-leases). |
+| `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_GPU_COORDINATOR`, `ARGUS_GPU_LEASE_TIMEOUT_S`, ... | argus-cortex | The host-wide GPU coordinator every argus service on the host shares, used when `services.llm.gpu` is set. See [narrative.md](narrative.md#gpu-leases). |
+| `ARGUS_XTTS_URL`, `ARGUS_TTS_URL`, `ARGUS_MASK_URL` | scout, through `argus_cortex.peers` | The suite-wide URL of an argus-echo engine or of argus-mask, read only when `services.echo` (with `peer`) or a `mask` channel leaves its `url` out. A value that isn't an absolute http(s) URL fails `check config`, naming the variable. |
+| `ARGUS_ENV_FILE` | argus-cortex | The suite settings file: `~/.config/argus/suite.env` (mode 600), or `/etc/argus/suite.env` in a container. The `ARGUS_*` variables above may live there instead of in each service's `.env`; the environment and the `.env` beside `scout.yaml` win. `off` disables it. |
+| `ARGUS_PEER`, `ARGUS_BUILD` | argus-cortex | What `/health` reports as `peer` (the container's `argus.peer` label, `scout`) and `build` (an image build id). Optional. |
 """
 
 

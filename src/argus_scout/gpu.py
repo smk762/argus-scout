@@ -7,11 +7,12 @@ or a report is stored. That lets the broker queue the call behind more urgent wo
 evict an idle model first, instead of scout loading a model onto a card someone else is using.
 
 * **The coordinator** is :func:`argus_cortex.gpu.coordinator_from_env`: the host-wide ``ARGUS_GPU_*`` names every argus
-  process on the host shares (``ARGUS_GPU_COORDINATOR``, ``ARGUS_GPU_BROKER_URL``, ``ARGUS_GPU_TENANT_MANIFEST``,
-  ``ARGUS_GPU_LEASE_TIMEOUT_S``...). Unset is ``none``: no gating, every lease granted at once. There is deliberately
-  no scout.yaml knob for it: a lock path or broker URL that differs from its siblings' would let scout skip the
-  queue they all wait in. ``broker`` falls back to ``ARGUS_GPU_BROKER_FALLBACK`` (``lease`` by default) when iris
-  cannot be reached.
+  process on the host shares, from the environment or the suite settings file (``ARGUS_GPU_BROKER_URL`` and
+  ``ARGUS_GPU_BROKER_TOKEN`` for argus-iris, which is used whenever the URL is set; ``ARGUS_GPU_COORDINATOR=lease``
+  for a host lock without one; ``ARGUS_GPU_LEASE_TIMEOUT_S``...). Nothing set is ``none``: no gating, every lease
+  granted at once. There is deliberately no scout.yaml knob for it: a lock path or broker URL that differs from its
+  siblings' would let scout skip the queue they all wait in. The broker falls back to ``ARGUS_GPU_BROKER_FALLBACK``
+  (``lease`` by default) when iris cannot be reached.
 * **The lease** asks for ``min_vram_mb`` (``model_mb`` of it weights the server keeps loaded) on the target
   ``ollama:<model>`` for the ollama backend, or ``services.llm.gpu.target`` for an OpenAI-compatible server. It is
   **preemptible** at priority ``background`` by default: a briefing can wait, and a yield request needs no action

@@ -93,6 +93,30 @@ docker compose -f compose.yaml -f compose.gpu.yaml up -d
 Any model call over `services.llm.timeout` (180 s here) or the daily cap (`budget.limits.llm_calls`) falls back
 to the template, so a slow model never costs you a briefing.
 
+## Shared settings: the suite file
+
+If other Argus services run on this host, the values they share (the GPU broker's `ARGUS_GPU_BROKER_URL` and
+`ARGUS_GPU_BROKER_TOKEN`, the suite-wide service URLs such as `ARGUS_XTTS_URL` and `ARGUS_MASK_URL`) can live once in
+the suite settings file, `~/.config/argus/suite.env` (mode 600; `python -m argus_cortex.settings --init` creates
+it), instead of in `config/.env`. The override file `compose.suite.yaml` mounts it read-only at
+`/etc/argus/suite.env`:
+
+```bash
+COMPOSE_FILE=compose.yaml:compose.suite.yaml docker compose up -d
+```
+
+It is a separate file because compose cannot make a bind mount optional: a host without a suite file could not
+start with the mount in `compose.yaml`. `ARGUS_SUITE_ENV` names another path. Anything set in `config/.env` or the
+container's environment still wins.
+
+Known limit ([argus-cortex#218](https://github.com/smk762/argus-cortex/issues/218)): argus-cortex reads the file
+only when root or the user the process runs as owns it, and a mode-600 file can be opened only by its owner. So
+today the mounted file must be owned by root. Otherwise it is ignored with a warning, and scout runs as if there
+were none.
+
+The `scout` container carries the labels argus-iris's agents build the suite's service directory from:
+`argus.peer: scout`, `argus.service: argus-scout`, `argus.health: /health` and `argus.port: "8400"`.
+
 ## Turning on writes
 
 The HTTP API refuses every write by default (`server.read_only: true`, and no token). To accept status events,
