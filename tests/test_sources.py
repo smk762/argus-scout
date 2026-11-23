@@ -423,7 +423,9 @@ def test_bad_source_entries_do_not_stop_the_others(plugin_module):
     assert built.errors["typo"] == "pigeon: bird: unknown key"
     assert built.errors["missing"] == "pigeon: loft: Field required"
     assert "did not load" in built.errors["b"]
-    assert built.errors["c"].startswith("unknown source kind 'carrier_pigeon' (installed: json_poll, pigeon, webhook")
+    assert built.errors["c"].startswith(
+        "unknown source kind 'carrier_pigeon' (installed: json_poll, pigeon, suite_status, webhook"
+    )
 
 
 def test_a_plugin_model_raising_anything_fails_only_its_entry(plugin_module):

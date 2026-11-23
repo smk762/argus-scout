@@ -40,7 +40,7 @@ def test_policy_files_match_examples(name):
 def test_check_config_passes():
     result = CliRunner().invoke(app, ["check", "config", str(CONFIG)])
     assert result.exit_code == 0, result.output
-    assert "ok: 0 sources, 1 channels, 2 briefings" in result.output
+    assert "ok: 1 sources, 1 channels, 2 briefings" in result.output
 
 
 def test_config_is_safe_and_delivers_text(config):
@@ -87,3 +87,50 @@ def test_prometheus_scrapes_what_the_rules_expect(config):
     assert 'job="node"' in config.files.signals.read_text()
     assert jobs["node"]["static_configs"][0]["targets"] == ["node-exporter:9100"]
     assert jobs["scout"]["static_configs"][0]["targets"] == ["scout:8400"]
+
+
+def test_quickstart_prometheus_labels_scout_as_a_suite_service(config):
+    # The suite_status source reads series with an argus_peer label: out of the box that is scout itself.
+    (suite,) = [s for s in config.sources if s.kind == "suite_status"]
+    scrape = yaml.safe_load((QUICKSTART / "prometheus.yml").read_text())
+    jobs = {job["job_name"]: job for job in scrape["scrape_configs"]}
+    assert jobs["scout"]["static_configs"][0]["labels"]["argus_peer"] == "scout"
+    assert suite.health_job not in jobs, "no probe job here: its own `up` would otherwise be read as a service"
+
+
+def test_iris_override_scrapes_and_probes_the_directory(config, compose):
+    """compose.iris.yaml: both suite jobs discover targets from argus-iris's /directory/sd, the probe job is the
+    one the suite_status source leaves out of `up`, and the probe module tells ok from degraded."""
+    (suite,) = [s for s in config.sources if s.kind == "suite_status"]
+    scrape = yaml.safe_load((QUICKSTART / "prometheus.iris.yml").read_text())
+    jobs = {job["job_name"]: job for job in scrape["scrape_configs"]}
+    for name in ("argus", suite.health_job):
+        (sd,) = jobs[name]["http_sd_configs"]
+        assert sd["url"].endswith("/directory/sd")
+    probe = jobs[suite.health_job]
+    assert probe["metrics_path"] == "/probe"
+    relabel = probe["relabel_configs"]
+    assert relabel[0]["source_labels"] == ["__scheme__", "__address__", "argus_health_path"]
+    assert relabel[0]["target_label"] == "__param_target"
+    assert {r["target_label"]: r.get("replacement") for r in relabel[2:]} == {
+        "__address__": "blackbox:9115",
+        "__scheme__": "http",
+    }
+    assert "labels" not in jobs["scout"]["static_configs"][0], "iris lists scout: don't list it twice"
+    assert jobs["node"] and jobs["prometheus"], "the base jobs stay: the example signal rules need them"
+
+    blackbox = yaml.safe_load((QUICKSTART / "blackbox.yml").read_text())
+    (module,) = probe["params"]["module"]
+    http = blackbox["modules"][module]["http"]
+    assert http["valid_status_codes"] == [200] and http["follow_redirects"] is False
+    (pattern,) = http["fail_if_body_not_matches_regexp"]
+    assert re.search(pattern, '{"service":"argus-lens","status":"ok","checks":{}}')
+    assert re.search(pattern, '{"status": "ok"}')
+    assert not re.search(pattern, '{"status":"degraded","checks":{"store":{"ok":false}}}')
+
+    override = yaml.safe_load((QUICKSTART / "compose.iris.yaml").read_text())
+    base_mount = next(v for v in compose["services"]["prometheus"]["volumes"] if "prometheus.yml" in v)
+    (mount,) = override["services"]["prometheus"]["volumes"]
+    assert mount.split(":")[1] == base_mount.split(":")[1] == "/etc/prometheus/prometheus.yml"
+    image = override["services"]["blackbox"]["image"]
+    assert re.fullmatch(r"v?\d+\.\d+\.\d+", image.rpartition(":")[2]), "pin an exact version"

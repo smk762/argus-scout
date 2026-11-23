@@ -1,0 +1,23 @@
+# Watch the whole Argus suite: Prometheus finds every service through argus-iris's directory, scrapes its
+# /metrics and probes its /health with a blackbox exporter.
+#
+#   docker compose -f compose.yaml -f compose.iris.yaml up -d
+#
+# First replace `iris:8120` in prometheus.iris.yml with your argus-iris broker's address. Scout's part is the
+# suite_status source in config/scout.yaml, which is already on: it reads Prometheus and nothing else.
+
+services:
+  prometheus:
+    volumes:
+      # The same mount target as compose.yaml's prometheus.yml, so this file replaces it.
+      - ./prometheus.iris.yml:/etc/prometheus/prometheus.yml:ro,z
+    depends_on:
+      - blackbox
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./blackbox.yml:/etc/blackbox/blackbox.yml:ro,z

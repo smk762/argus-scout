@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -58,7 +58,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from argus_scout.budget import DailyBudget
-from argus_scout.config import ScoutConfig, resolve_max_tokens
+from argus_scout.config import ScoutConfig, SuiteStatusSource, resolve_max_tokens
 from argus_scout.engine import RecommendationEngine, Rejection
 from argus_scout.events import StatusEvent
 from argus_scout.gpu import narrative_guard
@@ -78,16 +78,41 @@ from argus_scout.persona import DEFAULT_PERSONA, Persona, PersonaFile
 from argus_scout.recommendations import Recommendation, Status
 from argus_scout.scheduler import Clock, utc_now
 from argus_scout.severity import Severity, rank
+from argus_scout.sources.base import SourceError
 from argus_scout.store.base import Report, Store
+from argus_scout.suite import SuiteStatus, render_report, spoken_summary, worst_severity
 from argus_scout.tariff import TariffFile, current_period, format_rate, next_period_change
 
 if TYPE_CHECKING:
     from argus_cortex.gpu import GpuCoordinator
 
+    from argus_scout.prometheus import PrometheusClient
+
 log = structlog.get_logger()
 
 ReportKind = Literal["morning", "evening", "status"]
 REPORT_KINDS: tuple[str, ...] = ("morning", "evening", "status")
+
+SUITE_KIND = "suite"
+"""The suite status summary: every Argus service with its health and version, read from Prometheus when it is
+asked for. Written on request only (``POST /api/reports``, ``argus-scout brief --kind suite``), always as a plain
+listing: no model writes it, so no version or state in it is ever a model's guess."""
+ON_REQUEST_KINDS: tuple[str, ...] = (*REPORT_KINDS, SUITE_KIND)
+"""The kinds a person may ask for. :data:`REPORT_KINDS` are the ones the model may write and the schedule runs."""
+SUITE_TITLE = "Suite status"
+
+SuiteReader = Callable[[], Awaitable[tuple[SuiteStatus, SuiteStatusSource]]]
+"""Reads the suite from Prometheus now: the reading and the ``suite_status`` source settings it was read with."""
+
+
+class SuiteNotConfigured(ValueError):
+    """A suite report was asked for, but no ``suite_status`` source (with a Prometheus to ask) is configured."""
+
+
+class SuiteUnavailable(Exception):
+    """Prometheus could not answer, so the suite's state is unknown. No report is written: an "unknown" report
+    stored or spoken beside real ones would be one more thing to misread as "nothing wrong"."""
+
 
 MAX_LINE_CHARS = 300
 """One fact line is clipped here, so a single long summary can't crowd out the rest."""
@@ -788,6 +813,7 @@ class Narrator:
         context_tokens: int = 3072,
         rejection_limit: int = 10,
         budget_kind: str = LLM_CALLS,
+        suite: SuiteReader | None = None,
     ) -> None:
         self.store = store
         self.generator = generator
@@ -801,6 +827,8 @@ class Narrator:
         self.context_tokens = context_tokens
         self.rejection_limit = rejection_limit
         self.budget_kind = budget_kind
+        self.suite = suite
+        """Reads the suite for a ``suite`` report; ``None`` when no ``suite_status`` source is configured."""
 
     def max_tokens_for(self, kind: str) -> int:
         return resolve_max_tokens(kind, self.max_tokens, self.context_tokens)
@@ -843,6 +871,8 @@ class Narrator:
         write_memory: bool = True,
     ) -> Draft:
         """Write a report without storing it. Never raises for a model problem: it falls back to the template."""
+        if kind == SUITE_KIND:
+            return await self.compose_suite()
         if kind not in REPORT_KINDS:
             raise ValueError(f"unknown report kind {kind!r} (known: {', '.join(REPORT_KINDS)})")
         facts = self.gather(kind, groups=groups)
@@ -918,6 +948,41 @@ class Narrator:
         }
         log.info("narrative.template", kind=kind, reason=reason, error=error)
         return Draft(kind, facts.at, text, meta)
+
+    async def compose_suite(self) -> Draft:
+        """The suite status summary, from one reading of Prometheus. No model, no persona, no memory: a listing of
+        what Prometheus says. Raises :class:`SuiteNotConfigured` or :class:`SuiteUnavailable` instead of writing
+        a report about nothing."""
+        if self.suite is None:
+            raise SuiteNotConfigured(
+                "no suite_status source is configured (add one under sources:, and set services.prometheus_url)"
+            )
+        try:
+            status, cfg = await self.suite()
+        except SourceError as exc:
+            raise SuiteUnavailable(str(exc)) from exc
+        at = self.clock().astimezone(self.tz)
+        counts = {state: len(status.in_state(state)) for state in ("ok", "up", "degraded", "starting", "down")}
+        meta: dict[str, Any] = {
+            "path": "template",
+            "fallback_reason": "listing",
+            "error": None,
+            "model": None,
+            "severity": worst_severity(status, cfg).value,
+            "quiet_exempt": False,
+            "title": SUITE_TITLE,
+            "speakable": spoken_summary(status),
+            "suite": {
+                "source": cfg.name,
+                "services": len(status.services),
+                "states": counts,
+                "out_of_date": len(status.behind),
+                "version_skew": [skew.peer for skew in status.skews],
+                "changed_version": len(status.changed),
+            },
+        }
+        log.info("narrative.suite", services=len(status.services), **counts)
+        return Draft(SUITE_KIND, at, render_report(status, cfg, local=at), meta)
 
     async def report(
         self,
@@ -999,6 +1064,7 @@ def build_narrator(
     clock: Clock = utc_now,
     generator: TextGenerator | None = None,
     coordinator: GpuCoordinator | None = None,
+    prometheus: PrometheusClient | None = None,
 ) -> Narrator:
     """The narrator ``config`` describes. With no ``services.llm`` every report uses the template.
 
@@ -1019,7 +1085,28 @@ def build_narrator(
         clock=clock,
         max_tokens=llm.max_tokens if llm else None,
         context_tokens=llm.context_tokens if llm else 3072,
+        suite=suite_reader(config, clock=clock, prometheus=prometheus),
     )
+
+
+def suite_reader(
+    config: ScoutConfig, *, clock: Clock = utc_now, prometheus: PrometheusClient | None = None
+) -> SuiteReader | None:
+    """How a ``suite`` report reads the suite: the first ``suite_status`` source's settings, against its own
+    ``prometheus_url`` or ``services.prometheus_url``. ``None`` with no such source or no Prometheus to ask.
+    ``prometheus`` replaces the client (tests)."""
+    from argus_scout.sources.suite_status import read_once
+
+    entry = next((s for s in config.sources if isinstance(s, SuiteStatusSource)), None)
+    url = entry and (entry.prometheus_url or config.services.prometheus_url)
+    if entry is None or not (url or prometheus):
+        return None
+    cfg = entry.model_copy(update={"prometheus_url": url})
+
+    async def read() -> tuple[SuiteStatus, SuiteStatusSource]:
+        return await read_once(cfg, client=prometheus, now=clock()), cfg
+
+    return read
 
 
 __all__ = [
@@ -1028,7 +1115,11 @@ __all__ = [
     "INSTRUCTIONS",
     "MIN_EMPTY_NARRATIVE_CHARS",
     "MIN_NARRATIVE_CHARS",
+    "ON_REQUEST_KINDS",
     "REPORT_KINDS",
+    "SUITE_KIND",
+    "SuiteNotConfigured",
+    "SuiteUnavailable",
     "SECTIONS",
     "Draft",
     "Facts",

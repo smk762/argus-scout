@@ -51,6 +51,8 @@ from pydantic import (
     model_validator,
 )
 
+from argus_scout.severity import Severity
+
 ENV_FILE = ".env"
 CONFIG_FILE = "scout.yaml"
 
@@ -210,7 +212,7 @@ class SourceSettings(_Section):
     :mod:`argus_scout.sources`), narrowing ``kind`` to its own name and adding its own keys."""
 
     kind: Name
-    """``webhook``, ``json_poll``, or a kind an installed plugin provides."""
+    """``webhook``, ``json_poll``, ``suite_status``, or a kind an installed plugin provides."""
     name: Name
     """Unique among sources. It is the ``source`` of every event this source produces, and the
     ``{source}`` in ``POST /api/events/{source}``."""
@@ -275,8 +277,53 @@ class JsonPollSource(SourceSettings):
         return self
 
 
+class SuiteSeverities(_Section):
+    """The severity of each suite condition's status event. The heartbeat policy decides what a severity does."""
+
+    down: Severity = Severity.WARNING
+    """A service that stopped answering, or is no longer a scrape target."""
+    degraded: Severity = Severity.WARNING
+    """A service whose ``/health`` has answered ``degraded`` or ``starting`` (or an error) for ``degraded_for``."""
+    version_change: Severity = Severity.INFO
+    """A service now runs another version than it did (a deploy happened)."""
+    version_skew: Severity = Severity.NOTICE
+    """Two hosts run different versions of the same peer."""
+
+
+class SuiteStatusSource(SourceSettings):
+    """The Argus suite's own health and versions, read from Prometheus. See :mod:`argus_scout.suite`.
+
+    Scout asks Prometheus about every series with an ``argus_peer`` label: ``up``, a blackbox ``/health`` probe
+    (``probe_success``, ``probe_http_status_code``) and ``argus_build_info``. It never probes a service itself.
+    It raises a status event when a service is down, stays degraded, changes version, or runs different versions
+    on two hosts, and resolves the event when the condition clears. ``POST /api/reports`` with ``kind: suite``
+    lists every service from the same reading."""
+
+    kind: Literal["suite_status"]
+    prometheus_url: HttpUrl | None = None
+    """The Prometheus to ask. Unset: ``services.prometheus_url``; with neither, the source is refused."""
+    interval: float = Field(default=60.0, gt=0, description="Seconds between readings.")
+    health_job: str = Field(default="argus-health", pattern=r"^[A-Za-z_][A-Za-z0-9_.:-]{0,99}$")
+    """The scrape job of the blackbox ``/health`` probe. Its own ``up`` says whether the blackbox exporter
+    answered, not the service, so ``up`` is read from every other job."""
+    down_for: float = Field(default=120.0, ge=60, le=86400)
+    """Seconds a service must have gone unanswered before it is reported down. Keep it at least twice the scrape
+    interval."""
+    degraded_for: float = Field(default=600.0, ge=60, le=86400)
+    """Seconds a service's ``/health`` must have gone without an ``ok`` before it is reported degraded."""
+    deploy_window: float = Field(default=3600.0, ge=60, le=7 * 86400)
+    """Seconds a version change stays an open status event (and in the suite report) after it happened."""
+    forget_after: float = Field(default=86400.0, ge=300, le=30 * 86400)
+    """Seconds a service that is no longer a scrape target is still reported down. After that it is forgotten:
+    scout takes it as removed on purpose."""
+    severity: Annotated[SuiteSeverities, NullAsEmptyDict] = Field(default_factory=SuiteSeverities)
+    """The severity of each condition's event."""
+    resolve_missing: bool = True
+    """Close (``resolved``) this source's open events once a reading no longer finds the condition."""
+
+
 class PluginSource(BaseModel):
-    """A source of a kind that a plugin provides (anything but ``webhook`` and ``json_poll``).
+    """A source of a kind that a plugin provides (anything but the built-in kinds).
 
     The config schema can't know a third-party kind's keys, so here only ``kind`` and ``name`` are
     checked and every other key is kept. :func:`argus_scout.sources.build_sources` then validates
@@ -290,7 +337,7 @@ class PluginSource(BaseModel):
     name: Name
 
 
-BUILTIN_SOURCE_KINDS = frozenset({"webhook", "json_poll"})
+BUILTIN_SOURCE_KINDS = frozenset({"webhook", "json_poll", "suite_status"})
 
 
 def _source_tag(value: Any) -> str:
@@ -302,6 +349,7 @@ def _source_tag(value: Any) -> str:
 SourceConfig = Annotated[
     Annotated[WebhookSource, Tag("webhook")]
     | Annotated[JsonPollSource, Tag("json_poll")]
+    | Annotated[SuiteStatusSource, Tag("suite_status")]
     | Annotated[PluginSource, Tag("plugin")],
     Discriminator(_source_tag),
 ]

@@ -5,12 +5,13 @@ A source is where status events come from: a CI job, a backup script, Alertmanag
 worth a status update. Sources only produce events. Nothing a source sends can make scout act, and a poller only
 fetches the one status endpoint its config names: it never connects to the hosts it reports on.
 
-Two kinds are built in, and others come from plugins:
+Three kinds are built in, and others come from plugins:
 
 | Kind | Who moves the data | Use it when |
 |---|---|---|
 | `webhook` | the producer POSTs to scout | you control the producer (a script, a CI step, a cron job) |
 | `json_poll` | scout GETs a JSON endpoint | the producer already serves its status over HTTP |
+| `suite_status` | scout asks Prometheus | you want the Argus suite's own health, versions and deploys ([suite.md](suite.md)) |
 
 Every source needs a unique `name`, which becomes the `source` of every event it produces. The full list of keys is
 in the [config reference](config.md#sources). After editing, run `argus-scout check config scout.yaml`.

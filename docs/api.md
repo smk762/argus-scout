@@ -67,6 +67,10 @@ curl -s -X POST localhost:8400/api/reports/<REPORT_ID>/deliver \
   over `tts` or `speak` voice is held back and text still goes.
 - **Waits for the model.** The request returns when the report is stored and delivered, so allow for the model's
   `timeout`. The model call runs off the event loop; the rest of the API keeps answering meanwhile.
+- **`"kind": "suite"`** is the suite status summary: every Argus service with its health and version, read from
+  Prometheus when asked ([suite.md](suite.md#the-report)). It is always a plain listing: no model call, no
+  `llm_calls` charge, and `no_llm` changes nothing. `409` when no `suite_status` source is configured; `503` when
+  Prometheus can't answer, with nothing stored or sent.
 - A `status` report written here covers every open item, as a status report at a briefing slot does, not only the
   items the status cycle would announce.
 

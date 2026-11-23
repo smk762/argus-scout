@@ -437,6 +437,8 @@ def register_jobs(
     tariff = tariff if tariff is not None else TariffFile(config.files.tariff)
     if briefings is not None:
         narrator, deliver = briefings.narrator, briefings.deliver
+    if prometheus is None and config.services.prometheus_url:
+        prometheus = PrometheusClient(config.services.prometheus_url)
     narrator = narrator or build_narrator(config, store, budget, tariff=tariff, clock=clock)
     if briefings is None:
         briefings = Briefings(narrator, deliver=deliver)
@@ -444,8 +446,6 @@ def register_jobs(
         store, policy_file, inbox=inbox, tz=schedule.tz, clock=clock, narrator=narrator, deliver=deliver
     )
     scheduler.add("status", status, Every(schedule.status_interval))
-    if prometheus is None and config.services.prometheus_url:
-        prometheus = PrometheusClient(config.services.prometheus_url)
     analysis = AnalysisCycle(
         store,
         rules=SignalRulesFile(config.files.signals),

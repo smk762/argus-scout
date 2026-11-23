@@ -18,6 +18,7 @@ import sys
 import textwrap
 import types
 from dataclasses import dataclass
+from enum import Enum
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
@@ -130,6 +131,8 @@ def type_name(tp: Any, links: dict[type, tuple[str, str]], metadata: list[Any] |
         return f"map of {type_name(args[0], links)} to {type_name(args[1], links)}"
     if tp in links:
         return f"[{links[tp][0]}](#{links[tp][1]})"
+    if isinstance(tp, type) and issubclass(tp, Enum):
+        return " \\| ".join(f"`{member.value}`" for member in tp)
     return _PLAIN.get(tp, getattr(tp, "__name__", str(tp)))
 
 
@@ -182,6 +185,8 @@ def default(field: FieldInfo) -> str:
         return "section defaults"
     if isinstance(value, Path):
         value = str(value)
+    if isinstance(value, Enum):
+        value = value.value
     if value is None:
         return "`null`"
     rendered = yaml.safe_dump(value, default_flow_style=True, width=1000).strip().removesuffix("...").strip()
@@ -288,6 +293,24 @@ sources:
 """,
         entry_model=cfg.JsonPollSource,
     ),
+    Section(
+        "sources: suite_status",
+        cfg.SuiteStatusSource,
+        level=3,
+        common=cfg.SourceSettings,
+        intro="Guide: [suite.md](suite.md).",
+        example="""\
+sources:
+  - kind: suite_status
+    name: suite
+    down_for: 120
+    degraded_for: 600
+    severity:
+      down: critical
+""",
+        entry_model=cfg.SuiteStatusSource,
+    ),
+    Section("sources: suite_status: severity", cfg.SuiteSeverities, level=4),
     Section(
         "channels",
         cfg.ChannelSettings,

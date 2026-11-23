@@ -1,0 +1,63 @@
+# Prometheus for the argus-scout quickstart, watching the whole Argus suite through argus-iris.
+# Used by compose.iris.yaml in place of prometheus.yml:
+#
+#   docker compose -f compose.yaml -f compose.iris.yaml up -d
+#
+# argus-iris lists every running container labelled `argus.peer` at GET /directory/sd, in Prometheus's
+# http_sd format: one target per service, labelled argus_peer, argus_service, node, container and
+# argus_health_path. Prometheus scrapes and probes them; scout only asks Prometheus (the suite_status
+# source in config/scout.yaml) and never connects to a service itself.
+#
+# Replace `iris:8120` below (twice) with your argus-iris broker's host and port. The route needs no token.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Each service's /metrics: `up`, and the argus_build_info gauge with its version. A service that serves no
+  # /metrics has up == 0 here; the health probe below is what says whether it answers.
+  - job_name: argus
+    metrics_path: /metrics
+    http_sd_configs:
+      - url: http://iris:8120/directory/sd
+        refresh_interval: 60s
+
+  # Each service's /health, probed by the blackbox exporter (blackbox.yml: the argus_health module succeeds
+  # only on 200 with "status": "ok"). probe_success and probe_http_status_code together give ok, degraded
+  # (200 without ok), starting (503) and no answer (0). The job name is the suite_status source's health_job.
+  - job_name: argus-health
+    metrics_path: /probe
+    params:
+      module: [argus_health]
+    http_sd_configs:
+      - url: http://iris:8120/directory/sd
+        refresh_interval: 60s
+    relabel_configs:
+      # What to probe: <scheme>://<host:port><argus_health_path>. iris sets __scheme__ for an https service.
+      - source_labels: [__scheme__, __address__, argus_health_path]
+        regex: (.+);(.+);(.*)
+        target_label: __param_target
+        replacement: $1://$2$3
+      # Keep the service's own address as `instance`, then send the scrape to the blackbox exporter over http.
+      - source_labels: [__address__]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+      - target_label: __scheme__
+        replacement: http
+
+  # The example signal rules expect node exporter under job="node" (node-exporter-down, high-load, ...).
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Scout's own state. No argus_peer label here: iris lists scout through its `argus.peer: scout` label, and a
+  # second label would list it twice.
+  - job_name: scout
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["scout:8400"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

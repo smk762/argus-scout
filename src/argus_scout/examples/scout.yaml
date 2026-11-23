@@ -54,6 +54,15 @@ sources:
   #   auth_header: Authorization
   #   auth_env: SCOUT_BACKUPS_AUTH  # value sent in auth_header, e.g. "Bearer ..."
   #
+  # The Argus suite's health and versions, read from Prometheus (services.prometheus_url):
+  # up, a blackbox /health probe and argus_build_info for every series with an argus_peer
+  # label. Raises an event when a service is down, stays degraded, changes version or runs
+  # different versions on two hosts. Scout never probes a service itself. See docs/suite.md.
+  # - kind: suite_status
+  #   name: suite
+  #   down_for: 120               # seconds unanswered before "down"
+  #   degraded_for: 600           # seconds without an ok /health before "degraded"
+  #
   # Any other kind comes from an installed plugin (entry-point group argus_scout.sources),
   # which validates its own keys. Try a poll without writing anything:
   #   argus-scout poll --config scout.yaml [--source backups]

@@ -10,6 +10,9 @@ and shown, never parsed: a report that says "approve X" approves nothing.
 | `evening` | the same | what's still open, what was approved, what to watch overnight. Under 150 words. |
 | `status` | by the status cycle, when open items pass the heartbeat policy's report rules and at least one is news: not yet announced in its current form (new, escalated or changed, or cleared and back), or its re-announce interval passed; or at a briefing slot | only the reportable items, most severe first, and rejections. Under 80 words. |
 
+A fourth kind, `suite`, is not narrative at all: it lists the Argus services with their health and versions,
+straight from Prometheus, on request only and never through the model. See [suite.md](suite.md#the-report).
+
 Rest hours (heartbeat policy) skip the status cycle entirely; briefings still run. Write one now, from the CLI or
 over HTTP (`POST /api/reports`, which also delivers it unless told not to; see
 [api.md](api.md#on-request-reports)):

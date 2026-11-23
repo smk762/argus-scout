@@ -1,11 +1,14 @@
 """Reports over HTTP: write one on request, list and read them, and send a stored one to the channels.
 
-- ``POST /api/reports``: ``{"kind": "morning"|"evening"|"status", "deliver": true, "no_llm": false}``. Written
+- ``POST /api/reports``: ``{"kind": "morning"|"evening"|"status"|"suite", "deliver": true, "no_llm": false}``. Written
   through the runtime's :class:`~argus_scout.cycles.Briefings`, the same path the scheduled briefing jobs take: the
   same narrator, the ``llm_calls`` daily cap (over it, the template), the GPU lease and the template fallback. Stored,
   then delivered through the dispatcher unless ``deliver`` is false (then nothing is sent or spoken). **One report of
   a kind at a time**: while one is being written, scheduled or on request, this is a ``409`` at once rather than a
   request held open for the length of a model call; retry when it's done.
+  ``kind: suite`` is the suite status summary (:mod:`argus_scout.suite`): read from Prometheus when asked, always
+  a plain listing (no model call, so ``no_llm`` changes nothing and no cap is charged). ``409`` when no
+  ``suite_status`` source is configured; ``503`` when Prometheus can't answer, with nothing stored or sent.
 - ``POST /api/reports/{id}/deliver``: ``{"force": false, "channels": null}``, as ``argus-scout deliver``.
   Idempotent: a channel that already has the report reports ``duplicate`` unless ``force``. ``channels`` names a
   subset (an unknown name is a ``422``). Voice follows the heartbeat gates and the speech caps, as for any delivery.
@@ -29,6 +32,7 @@ from argus_scout.budget import reset_manual, set_manual
 from argus_scout.channels import Delivery, DispatchReport
 from argus_scout.config import ServerConfig
 from argus_scout.cycles import ReportBusy
+from argus_scout.narrative import SuiteNotConfigured, SuiteUnavailable
 from argus_scout.server.deps import get_runtime
 from argus_scout.server.guards import read_json, write_auth
 from argus_scout.server.routes.reads import report_dict
@@ -36,7 +40,7 @@ from argus_scout.server.routes.reads import report_dict
 LIST_LIMIT = 200
 MAX_CHANNELS = 50
 
-Kind = Literal["morning", "evening", "status"]
+Kind = Literal["morning", "evening", "status", "suite"]
 ChannelName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
 
@@ -81,8 +85,13 @@ def write_router(server: ServerConfig) -> APIRouter:
             written = await runtime.briefings.write(
                 body.kind, use_llm=not body.no_llm, trigger="request", deliver=body.deliver, wait=False
             )
-        except ReportBusy as exc:
+        except (ReportBusy, SuiteNotConfigured) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        except SuiteUnavailable:
+            # No detail from the error: it can name the Prometheus URL, and this answer goes to any token holder.
+            raise HTTPException(
+                status_code=503, detail="suite status is unknown: Prometheus did not answer; nothing was written"
+            ) from None
         delivery = written.delivery if isinstance(written.delivery, DispatchReport) else None
         return {
             **report_dict(written.report),

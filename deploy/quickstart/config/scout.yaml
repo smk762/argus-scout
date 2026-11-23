@@ -17,6 +17,13 @@ store:
   path: scout.db
 
 sources:
+  # The Argus suite's own health and versions, read from Prometheus (docs/suite.md). Here Prometheus labels
+  # one suite service, scout itself; with compose.iris.yaml it finds every service through argus-iris.
+  # Ask for the summary with: curl -X POST localhost:8400/api/reports -d '{"kind": "suite"}' (needs writes on),
+  # or: docker compose exec scout argus-scout brief --config /config/scout.yaml --kind suite
+  - kind: suite_status
+    name: suite
+
   # Producers POST status events to scout. Writes are off (server.read_only) until you set a token;
   # README.md here shows how to turn them on and push an event.
   # - kind: webhook

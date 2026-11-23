@@ -1,0 +1,22 @@
+# Blackbox exporter modules for the argus-scout quickstart (compose.iris.yaml).
+#
+# argus_health probes an Argus service's GET /health (argus-cortex's ServiceHealth). It succeeds only when the
+# service answers 200 and its body says "status": "ok". With probe_http_status_code that tells the states apart:
+#
+#   probe_success 1                                   ok
+#   probe_success 0, probe_http_status_code 200       degraded (a required dependency check failed)
+#   probe_success 0, probe_http_status_code 503       starting
+#   probe_success 0, probe_http_status_code 0         no answer
+#
+# The probe is Prometheus's, never scout's: scout reads these series with PromQL.
+modules:
+  argus_health:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      follow_redirects: false
+      preferred_ip_protocol: ip4
+      fail_if_body_not_matches_regexp:
+        - '"status"\s*:\s*"ok"'
