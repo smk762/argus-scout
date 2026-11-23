@@ -71,12 +71,12 @@ from urllib.parse import quote, urlsplit
 
 import structlog
 from argus_cortex.net import CheckedUrl, Reply, UrlRefused, afetch, check_url
-from pydantic import Field
+from pydantic import Field, model_validator
 
 import argus_scout
 from argus_scout.channels.audio import MissingExtra, Pcm, decode, require_numpy, to_s16le
 from argus_scout.channels.base import ChannelError, Delivery, DeliveryResult, SpeechAudio
-from argus_scout.config import ChannelSettings, EnvName, HttpUrl, resolve_secret
+from argus_scout.config import ChannelSettings, EnvName, HttpUrl, fill_peer_url, resolve_secret
 from argus_scout.sources.json_poll import allow_host
 
 log = structlog.get_logger(__name__)
@@ -111,7 +111,8 @@ class MaskConfig(ChannelSettings):
 
     kind: Literal["mask"]
     url: HttpUrl
-    """The argus-mask server. Only that host and port are contacted, with no redirects."""
+    """The argus-mask server. Only that host and port are contacted, with no redirects. Left out, it is the
+    suite-wide ``ARGUS_MASK_URL`` (the environment, then the suite settings file; ``argus_cortex.peers``)."""
     face: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     """A face id or alias the server serves."""
     wait_ready: float = Field(default=0.0, ge=0, le=300)
@@ -136,6 +137,11 @@ class MaskConfig(ChannelSettings):
     consented to its use. Cloned speech is then pushed with mask's disclosure label, which every viewer sees as
     "An AI voice of a real person, used with their consent": mask displays your claim. Scout can't verify it.
     Unset, cloned speech is skipped over websocket. Synthetic voices are unaffected."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _suite_url(cls, data: Any) -> Any:
+        return fill_peer_url(data, "mask")
 
 
 CLONED_REFUSAL = (

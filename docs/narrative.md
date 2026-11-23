@@ -252,13 +252,17 @@ services:
   (6000) of which `model_mb` (5200) stays loaded in the model server. The target is `ollama:<model>` for Ollama;
   an OpenAI-compatible server needs `gpu.target` (`vllm:<model>`). Leave `gpu` unset for a hosted backend.
 - **The coordinator** is not in `scout.yaml`. It's the host-wide environment every argus service on the host
-  shares, read by argus-cortex: `ARGUS_GPU_COORDINATOR` (`none` by default: every lease granted at once; `lease`
-  for a host lock; `broker` for argus-iris), `ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN`,
-  `ARGUS_GPU_TENANT_MANIFEST` and `ARGUS_GPU_LEASE_TIMEOUT_S`. A per-service setting would let scout skip the queue
-  its siblings wait in.
-- **The manifest.** With the broker, scout registers [`gpu-tenant.yaml`](../gpu-tenant.yaml) on its first lease. The
-  container image ships it at `/app/gpu-tenant.yaml`; point `ARGUS_GPU_TENANT_MANIFEST` there. Its figures match the
-  defaults above, and a test fails if they drift.
+  shares, read by argus-cortex. `ARGUS_GPU_BROKER_URL` and `ARGUS_GPU_BROKER_TOKEN` are all argus-iris needs: with
+  the URL set, leases come from the broker. With no broker, `ARGUS_GPU_COORDINATOR=lease` shares the GPU through a
+  host lock, and unset means every lease is granted at once. `ARGUS_GPU_LEASE_TIMEOUT_S` bounds the wait. A
+  per-service setting would let scout skip the queue its siblings wait in.
+- **Where they live.** They are the same for every argus service on the host, so they can be written once in the
+  suite settings file, `~/.config/argus/suite.env` (mode 600; `python -m argus_cortex.settings --init` creates it),
+  instead of each service's `.env`. The environment, and the `.env` beside `scout.yaml`, still win. In the
+  quickstart, [`compose.suite.yaml`](../deploy/quickstart/compose.suite.yaml) mounts it.
+- **The manifest.** With the broker, scout registers [`gpu-tenant.yaml`](../gpu-tenant.yaml) on its first lease.
+  argus-cortex finds it in the working directory or at `/app/gpu-tenant.yaml`, where the container image ships it.
+  Its figures match the defaults above, and a test fails if they drift.
 - **Placement.** If the broker grants the lease on another node, scout calls the model server there.
 - **No lease in time** means the template, with `fallback_reason: gpu_unavailable`, and no charge to the cap.
 

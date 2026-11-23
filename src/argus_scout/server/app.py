@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from argus_cortex.service import build_info_collector, install_health
 from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
@@ -39,6 +40,9 @@ from argus_scout.sources import Sources, build_sources
 from argus_scout.store.base import Report, Store
 from argus_scout.store.sqlite import SqliteStore
 from argus_scout.tariff import TariffFile
+
+SERVICE = "argus-scout"
+"""The package name, as ``/health`` and the ``argus_build_info`` gauge give it."""
 
 
 @dataclass
@@ -131,6 +135,8 @@ def build_runtime(
         store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
     )
     registry = build_registry(collector)
+    # argus_build_info{service,version,...}: what the suite's status rules read to tell which version runs where.
+    registry.register(build_info_collector(SERVICE, version=argus_scout.__version__))
     return Runtime(
         config,
         store,
@@ -185,11 +191,10 @@ def create_app(
     app = FastAPI(title="argus-scout", version=argus_scout.__version__, lifespan=lifespan, **docs)
     app.add_middleware(ManualOriginMiddleware)
     install_guards(app, config.server)  # after other middleware: the guards run first
+    # The suite's one /health body (argus-cortex's ServiceHealth). It keeps `status` and `version`, holds nothing
+    # from the store or the config beyond `read_only`, and runs no checks: scout probes nothing to answer it.
+    install_health(app, service=SERVICE, version=argus_scout.__version__, read_only=config.server.read_only)
     include_routes(app, config.server)
-
-    @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "version": argus_scout.__version__}
 
     @app.get("/metrics")
     def metrics(request: Request) -> Response:

@@ -25,11 +25,11 @@ Nothing on the API moves a recommendation past `approved`: there is no deploy ro
 | GET | `/api/reports/latest` | read auth | The newest report; `?kind=morning` for the newest of one kind. 404 when there is none. |
 | GET | `/api/policy/explain` | read auth | The effective heartbeat policy and what decides each open item now |
 | GET | `/wall` | read auth | The latest report, open items and pending decisions as plain text |
-| GET | `/health` | none | `{"status": "ok", "version": "..."}` |
+| GET | `/health` | none | The suite's `ServiceHealth` (argus-cortex): `status` (`ok`), `version`, `service` (`argus-scout`), `service_version`, `started_at`, `read_only`, and `peer` and `build` when the container is told them. Always 200 while scout answers. It runs no checks and holds nothing from the store. |
 | GET | `/metrics` | none | Prometheus exposition of scout's own state (below) |
 
 FastAPI's own `/docs`, `/redoc` and `/openapi.json` are served too, unless `server.read_auth` is on: they sit outside
-the bearer check, so `read_auth` turns them off.
+the bearer check, so `read_auth` turns them off. `/health` is not listed in `/openapi.json`.
 
 ```bash
 curl -s localhost:8400/wall
