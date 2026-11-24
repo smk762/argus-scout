@@ -365,6 +365,16 @@ async def test_snapcast_restores_even_when_playback_fails(tmp_path):
     assert snap.calls[-1][1]["volume"] == {"muted": True, "percent": 30}
 
 
+async def test_snapcast_reverts_a_setup_call_that_failed(tmp_path):
+    # The snapserver may have applied a change whose reply was lost or an error: it is put back all the same.
+    async with FakeSnapserver(fail={"Client.SetVolume"}) as snap:
+        cfg = snap_cfg(tmp_path / "missing.fifo", control=f"tcp://127.0.0.1:{snap.port}", volume=70)
+        with pytest.raises(ChannelError, match="Client.SetVolume"):
+            await SnapcastChannel(cfg).play(speech(), message())
+    assert [m for m, _ in snap.calls] == ["Server.GetStatus", "Client.SetVolume", "Client.SetVolume"]
+    assert snap.calls[-1][1]["volume"] == {"muted": True, "percent": 30}
+
+
 async def test_snapcast_rpc_errors_and_timeouts_are_bounded():
     async with FakeSnapserver(fail={"Server.GetStatus"}) as snap:
         with pytest.raises(ChannelError, match="Server.GetStatus.*nope"):
