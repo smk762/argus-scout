@@ -330,6 +330,15 @@ def test_prune(store):
     assert store.get_recommendation(rec.id) is not None
 
 
+def test_prune_keeps_an_acked_event_its_source_still_reports(store):
+    store.upsert_event(event("ongoing"), now=T0)
+    store.ack_event("nas", "ongoing", "someone", at=T0)
+    store.upsert_event(event("ongoing"), now=T0 + timedelta(days=9))  # still reported, still acked
+    assert store.prune(T0 + timedelta(days=5))["events"] == 0
+    kept = store.get_event("nas", "ongoing")
+    assert kept is not None and kept.acked_at is not None
+
+
 def test_restart_keeps_everything(db_path):
     rec = proposal()
     with SqliteStore(db_path) as s:

@@ -943,15 +943,17 @@ class SqliteStore:
         """Delete events acked, resolved or expired before ``older_than``, reports and delivery records older
         than it, and usage counts of earlier days.
 
-        Open events, recommendations and their audit trail are never pruned.
+        Open events, recommendations and their audit trail are never pruned, nor is an event its source still
+        reports (``last_seen`` since ``older_than``): pruning it would bring it back unacked, as news.
         """
         cutoff = _ts(older_than)
         with self._tx() as conn:
             events = conn.execute(
-                """DELETE FROM events WHERE (acked_at IS NOT NULL AND acked_at < ?)
-                       OR (resolved_at IS NOT NULL AND resolved_at < ?)
-                       OR (expires_at IS NOT NULL AND expires_at < ?)""",
-                (cutoff, cutoff, cutoff),
+                """DELETE FROM events WHERE last_seen < ?
+                       AND ((acked_at IS NOT NULL AND acked_at < ?)
+                            OR (resolved_at IS NOT NULL AND resolved_at < ?)
+                            OR (expires_at IS NOT NULL AND expires_at < ?))""",
+                (cutoff, cutoff, cutoff, cutoff),
             ).rowcount
             reports = conn.execute("DELETE FROM reports WHERE generated_at < ?", (cutoff,)).rowcount
             deliveries = conn.execute("DELETE FROM deliveries WHERE at < ?", (cutoff,)).rowcount
