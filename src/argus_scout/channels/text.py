@@ -40,11 +40,19 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def clean(text: str) -> str:
-    """``text`` with control and format characters removed; newlines kept, tabs as four spaces."""
-    return "".join(
-        ch if ch == "\n" or not unicodedata.category(ch).startswith("C") else ("    " if ch == "\t" else " ")
-        for ch in text.replace("\r\n", "\n")
-    )
+    """``text`` with control and format characters removed; newlines kept, tabs as four spaces, and the other
+    whitespace controls (``\\r``, ``\\v``, ``\\f``) as one space. Other format characters (soft hyphens, bidi
+    marks, zero-width spaces) are dropped, never spaced, so they don't split words; the zero-width joiner and
+    non-joiner are kept, since emoji sequences and some scripts need them."""
+    return "".join(_clean_char(ch) for ch in text.replace("\r\n", "\n"))
+
+
+def _clean_char(ch: str) -> str:
+    if ch in "\n\u200c\u200d" or not unicodedata.category(ch).startswith("C"):
+        return ch
+    if ch == "\t":
+        return "    "
+    return " " if ch in "\r\v\f" else ""
 
 
 def _segment(value: str) -> str:
