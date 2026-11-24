@@ -13,6 +13,7 @@ from argus_scout.config import (
     ScoutConfig,
     WebhookSource,
     load_config,
+    parse_config,
     parse_env_file,
     resolve_secret,
 )
@@ -190,6 +191,14 @@ def test_secrets_resolve_from_dotenv_and_never_appear(write_file, unset_env, mon
     assert resolve_secret("SCOUT_DEFINITELY_UNSET_VAR") is None
 
     for text in (repr(config), str(config), config.model_dump_json(), repr(config.model_dump()), repr(token)):
+        assert SECRET not in text
+
+
+def test_a_secret_where_its_env_name_belongs_never_appears_in_the_error():
+    with pytest.raises(ConfigError) as caught:
+        parse_config({"server": {"token_env": SECRET}})
+    assert "server.token_env" in str(caught.value) and "not an environment variable name" in str(caught.value)
+    for text in (str(caught.value), str(caught.value.__cause__), repr(caught.value.__cause__)):
         assert SECRET not in text
 
 

@@ -96,7 +96,8 @@ def _resolve_path(value: Path, info: ValidationInfo) -> Path:
 
 def _check_env_name(value: str) -> str:
     if not _ENV_NAME.match(value):
-        raise ValueError(f"{value!r} is not an environment variable name; put the secret in .env and name it here")
+        # Never echo the value: when it isn't a name it is most likely the secret itself.
+        raise ValueError("not an environment variable name; put the secret in .env and name it here")
     return value
 
 
@@ -161,7 +162,9 @@ Name = Annotated[str, AfterValidator(_check_name)]
 
 
 class _Section(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # hide_input_in_errors: a rejected value (maybe a secret pasted where its env-var name belongs) never
+    # reaches a ValidationError's text, a traceback or a log.
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
 
 # --- sections ----------------------------------------------------------------------------------------------
