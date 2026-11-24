@@ -713,7 +713,9 @@ def test_cli_deliver_charges_the_speech_caps(tmp_path, monkeypatch):
     path.write_text("channels:\n  - kind: text\n    name: log\nbudget:\n  limits:\n    tts: 1\n")
     with SqliteStore(tmp_path / "scout.db") as store:
         store.add_report("status", T0, "UPS on battery", {"severity": "critical"})
-        store.consume_usage(datetime.now(UTC).date().isoformat(), "tts", 0)  # today's tts is already spent
+        today = datetime.now(UTC).date().isoformat()
+        assert store.consume_usage(today, "tts", 1) == (True, 1)  # one charge against a limit of 1: spent
+        assert store.usage_counts(today) == {"tts": 1}
     seen = {}
     real = cli_module.build_dispatcher
 
