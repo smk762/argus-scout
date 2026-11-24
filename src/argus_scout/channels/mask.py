@@ -77,7 +77,7 @@ import argus_scout
 from argus_scout.channels.audio import MissingExtra, Pcm, decode, require_numpy, to_s16le
 from argus_scout.channels.base import ChannelError, Delivery, DeliveryResult, SpeechAudio
 from argus_scout.config import ChannelSettings, EnvName, HttpUrl, fill_peer_url, resolve_secret
-from argus_scout.sources.json_poll import allow_host
+from argus_scout.hosts import allow_host
 
 log = structlog.get_logger(__name__)
 

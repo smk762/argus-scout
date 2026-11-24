@@ -40,7 +40,7 @@ import argus_scout
 from argus_scout.channels.base import ChannelError, Delivery, DeliveryResult
 from argus_scout.config import WebhookChannel as WebhookChannelConfig
 from argus_scout.config import resolve_secret
-from argus_scout.sources.json_poll import allow_host
+from argus_scout.hosts import allow_host
 
 log = structlog.get_logger(__name__)
 

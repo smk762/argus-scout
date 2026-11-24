@@ -21,14 +21,11 @@ outage never reads as the suite being fine.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 from argus_scout.config import SuiteStatusSource
+from argus_scout.prometheus import PrometheusClient, PrometheusError
 from argus_scout.sources.base import PollResult, SourceError
 from argus_scout.suite import SuiteStatus, read_suite, suite_events
-
-if TYPE_CHECKING:
-    from argus_scout.prometheus import PrometheusClient
 
 
 async def read_once(
@@ -36,9 +33,6 @@ async def read_once(
 ) -> SuiteStatus:
     """One reading of the suite for ``cfg``. :class:`SourceError` when there is no Prometheus to ask or it can't
     answer. ``client`` is a seam for tests; otherwise the client is built from ``cfg.prometheus_url``."""
-    # Imported here: argus_scout.prometheus imports the sources package (for allow_host), which imports this module.
-    from argus_scout.prometheus import PrometheusClient, PrometheusError
-
     if client is None:
         if not cfg.prometheus_url:
             raise SourceError(f"{cfg.name}: no Prometheus to ask (set services.prometheus_url)")

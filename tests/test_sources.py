@@ -11,6 +11,7 @@ import pytest
 from argus_cortex.net import Reply, afetch
 
 from argus_scout.config import JsonPollSource, WebhookSource, parse_config
+from argus_scout.hosts import allow_host
 from argus_scout.inbox import InvalidEvent
 from argus_scout.severity import Severity
 from argus_scout.sources import (
@@ -23,7 +24,7 @@ from argus_scout.sources import (
     load_registry,
 )
 from argus_scout.sources import registry as registry_module
-from argus_scout.sources.json_poll import allow_host, lookup, map_response, poll_once
+from argus_scout.sources.json_poll import lookup, map_response, poll_once
 from argus_scout.sources.webhook import MAX_EVENTS, check_token, parse_webhook
 
 HOOK = WebhookSource(kind="webhook", name="ci", token_env="CI_TOKEN")

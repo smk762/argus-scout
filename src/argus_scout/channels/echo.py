@@ -67,7 +67,7 @@ from pydantic import ValidationError
 import argus_scout
 from argus_scout.channels.base import Delivery, SpeechAudio, SynthesisError
 from argus_scout.config import EchoConfig
-from argus_scout.sources.json_poll import allow_host
+from argus_scout.hosts import allow_host
 
 log = structlog.get_logger(__name__)
 
