@@ -18,8 +18,8 @@ speaks the envelope needs no ``fields`` at all. Path segments that are integers 
 **Stable ids.** A poller sees the same state on every poll, so an item's event id is derived from the item,
 never random. In order:
 
-1. ``id:`` in the config (a dotted path, or a list of them): ``<name>:<the values>`` (hashed when long or not
-   plain text). Use it whenever the endpoint has a real identity, e.g. ``[labels.alertname, labels.instance]``.
+1. ``id:`` in the config (a dotted path, or a list of them): ``<name>:<the values>`` joined by ``/`` (hashed when long,
+   not plain text, padded with spaces, or when several values and one holds a ``/``, so ids never collide). Use it whenever the endpoint has a real identity, e.g. ``[labels.alertname, labels.instance]``.
    An item missing one of the paths is skipped.
 2. An ``event_id`` the item carries (or ``fields`` maps), as is.
 3. With no ``items`` the response *is* the event: id ``<name>``.
@@ -126,12 +126,16 @@ def _configured_id(cfg: JsonPollSource, item: Any) -> str:
     values = []
     for path in paths:
         value = lookup(item, path)
-        if value is _MISSING or value is None or value == "":
+        if value is _MISSING or value is None or (isinstance(value, str) and not value.strip()):
             raise InvalidEvent(f"id: {path!r} is not in the item")
         values.append(value)
     plain = all(isinstance(v, str | int | float) and not isinstance(v, bool) for v in values)
-    text = "/".join(str(v).strip() for v in values)
-    if plain and len(text) <= ID_TEXT_MAX:
+    texts = [str(v) for v in values]
+    # The readable form must be injective: a value with surrounding whitespace, or a "/" when several values
+    # are joined ("a/b" + "c" vs "a" + "b/c"), would collide, so those are hashed (the hash keeps them apart).
+    readable = all(t == t.strip() for t in texts) and (len(texts) == 1 or not any("/" in t for t in texts))
+    text = "/".join(texts)
+    if plain and readable and len(text) <= ID_TEXT_MAX:
         return f"{cfg.name}:{text}"
     return f"{cfg.name}:{_digest(values)}"
 

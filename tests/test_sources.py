@@ -165,6 +165,28 @@ def test_configured_id_paths_identify_items_across_severity_changes():
     assert missing.events == [] and missing.skipped == ["item 0: id: 'labels.instance' is not in the item"]
 
 
+def test_configured_ids_never_collide_on_the_separator_or_whitespace():
+    cfg = AM.model_copy(update={"id": ["labels.alertname", "labels.instance"]})
+
+    def ids(*pairs):
+        return [
+            e.event_id
+            for e in map_response(
+                cfg, {"alerts": [{"labels": {"alertname": a, "instance": i}} for a, i in pairs]}
+            ).events
+        ]
+
+    split = ids(("a/b", "c"), ("a", "b/c"), (" x", "y"), ("x", "y"))
+    assert len(set(split)) == 4 and split[3] == "am:x/y"
+    blank = map_response(cfg, {"alerts": [{"labels": {"alertname": "  ", "instance": "y"}}]})
+    assert blank.events == [] and "labels.alertname" in blank.skipped[0]
+    single = AM.model_copy(update={"id": "labels.instance"})
+    assert (
+        map_response(single, {"alerts": [{"labels": {"alertname": "X", "instance": "http://h/x"}}]}).events[0].event_id
+        == "am:http://h/x"
+    )
+
+
 def test_derived_id_ignores_volatile_fields_but_keeps_payload_identity():
     cfg = JsonPollSource(kind="json_poll", name="jobs", url="http://backups:8080/status", items="jobs")
     base = {"summary": "Backup late", "payload": {"job": "nas"}}
