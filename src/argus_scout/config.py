@@ -879,8 +879,10 @@ def parse_env_file(path: Path) -> dict[str, str]:
         key, value = key.strip(), value.strip()
         if not sep or not _ENV_NAME.match(key):
             continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        end = value.find(value[0], 1) if value[:1] in ("'", '"') else -1
+        rest = value[end + 1 :].lstrip() if end > 0 else None
+        if rest is not None and (not rest or rest.startswith("#")):
+            value = value[1:end]  # KEY="value" # comment: the quotes and the comment go
         else:
             value = value.split(" #", 1)[0].rstrip()
         values[key] = value
