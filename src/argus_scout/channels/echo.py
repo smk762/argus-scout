@@ -149,7 +149,8 @@ def build_request(cfg: EchoConfig, text: str) -> dict[str, Any]:
 def _clip(sample: float) -> int:
     if math.isnan(sample):
         return 0
-    return max(-32768, min(32767, round(sample * 32767.0)))
+    # Clamp before scaling: an infinite (or huge) sample saturates instead of overflowing round().
+    return max(-32768, min(32767, round(max(-1.0, min(1.0, sample)) * 32767.0)))
 
 
 def to_s16le(data: bytes, audio_format: str) -> bytes:
