@@ -612,7 +612,11 @@ def test_long_fact_lines_never_end_mid_word():
     text = render_template(Facts(kind="status", at=T0, groups=[_group("w1", "warning", summary)]), DEFAULT_PERSONA)
     [line] = [ln for ln in text.splitlines() if ln.startswith("- ")]
     assert len(line) - 2 <= MAX_LINE_CHARS and line.endswith("…")
-    assert line.removesuffix("…").split()[-1] in summary.split()  # a whole word, not a fragment of one
+    # A whole word, not a fragment of one: what is kept is a prefix of the summary that ends where a word does
+    # (a split-membership check would pass "argus-safelist-2" cut from "argus-safelist-23").
+    kept = line.removesuffix("…").rstrip()
+    kept = kept[kept.index("Review queue:") :]
+    assert summary.startswith(kept) and summary[len(kept)] == " "
 
 
 # --- tariff wording -------------------------------------------------------------------------------------------
