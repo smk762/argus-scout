@@ -137,11 +137,13 @@ def parse_duration(value: Any) -> timedelta:
 
 
 def format_duration(value: timedelta) -> str:
-    """The inverse of :func:`parse_duration`, compactly: ``timedelta(minutes=90)`` -> ``1h30m``."""
+    """The inverse of :func:`parse_duration`, compactly: ``timedelta(minutes=90)`` -> ``1h30m``. A negative
+    duration gets a leading ``-`` (``-1m30s``), never floor division's ``-1d23h58m30s``."""
     seconds = int(value.total_seconds())
     if seconds == 0:
         return "0s"
-    parts = []
+    sign, seconds = ("-" if seconds < 0 else ""), abs(seconds)
+    parts = [sign]
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
         n, seconds = divmod(seconds, size)
         if n:

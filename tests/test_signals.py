@@ -96,6 +96,8 @@ def test_parse_duration_refuses(raw):
 def test_format_duration():
     assert format_duration(timedelta(minutes=90)) == "1h30m"
     assert format_duration(timedelta(0)) == "0s"
+    assert format_duration(timedelta(seconds=-90)) == "-1m30s"
+    assert format_duration(-timedelta(days=1, hours=2)) == "-1d2h"
 
 
 # --- templates ------------------------------------------------------------------------------------------------
