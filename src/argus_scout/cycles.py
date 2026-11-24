@@ -202,10 +202,11 @@ class StatusCycle:
         decisions = {g.fingerprint: d for g, d in zip(result.groups, result.decisions, strict=True)}
         speakable = self.speech(groups, decisions, policy, now)
         report = await self.narrator.report("status", groups=groups, meta={"speakable": speakable})
+        # Deliver first: if delivery raises, nothing is marked announced and the next tick reports it again.
+        await self.deliver(report)
         for group in groups:
             for event in group.events:
                 self.store.mark_announced(event.source, event.event_id, at=now)
-        await self.deliver(report)
         return report
 
 
