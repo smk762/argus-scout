@@ -58,13 +58,13 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
 
 import structlog
 from argus_cortex.net import FetchFailed, Reply, UrlRefused, afetch
 
 from argus_scout.config import EVENT_FIELDS, JsonPollSource, resolve_secret
 from argus_scout.events import StatusEvent
+from argus_scout.hosts import allow_host
 from argus_scout.inbox import InvalidEvent, parse_envelope
 from argus_scout.sources.base import PollResult, SourceError
 
@@ -102,14 +102,6 @@ def lookup(data: Any, path: str) -> Any:
         if value is _MISSING:
             return _MISSING
     return value
-
-
-def allow_host(url: str) -> str:
-    """The ``host:port`` entry for ``allow_hosts`` that lets a fetch reach the configured URL itself."""
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower().rstrip(".")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
 IDENTITY_FIELDS = ("summary", "payload", "link")
@@ -266,4 +258,4 @@ class JsonPoll:
 
 plugin = JsonPoll()
 
-__all__ = ["JsonPoll", "Mapped", "allow_host", "fetch_json", "lookup", "map_response", "plugin", "poll_once"]
+__all__ = ["JsonPoll", "Mapped", "fetch_json", "lookup", "map_response", "plugin", "poll_once"]

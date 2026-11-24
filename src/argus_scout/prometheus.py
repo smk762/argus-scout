@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 
 from argus_cortex.net import FetchFailed, Reply, UrlRefused, afetch
 
-from argus_scout.sources.json_poll import allow_host
+from argus_scout.hosts import allow_host
 
 MAX_BYTES = 8 * 1024 * 1024
 TIMEOUT_S = 10.0

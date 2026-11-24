@@ -56,7 +56,7 @@ from pydantic import Field, field_validator
 from argus_scout.channels.audio import SampleFormat, decode, encode, require_numpy, silence
 from argus_scout.channels.base import ChannelError, Delivery, DeliveryResult, SpeechAudio
 from argus_scout.config import ChannelSettings, ConfigPath, NullAsEmptyList
-from argus_scout.sources.json_poll import allow_host
+from argus_scout.hosts import allow_host
 
 log = structlog.get_logger(__name__)
 
