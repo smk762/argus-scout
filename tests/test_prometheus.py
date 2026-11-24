@@ -252,28 +252,82 @@ RAW_SOCKET_USERS = {"channels/snapcast.py"}
 WEBSOCKET_USERS = {"channels/mask.py"}
 
 
+def network_violations(rel: str, source: str) -> list[str]:
+    """How the module at ``rel`` (relative to ``src/argus_scout``) would reach the network beyond what it may.
+
+    Every import form counts: ``import x.y``, ``from x import y`` (checked as ``x`` and ``x.y``, so
+    ``from urllib import request`` is ``urllib.request``), ``argus_cortex.net`` reached as ``import argus_cortex.net``,
+    ``from argus_cortex import net`` or ``from argus_cortex.net import *``, and any ``.fetch`` / ``.afetch``
+    attribute."""
+    found: list[str] = []
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        fetches = False
+        if isinstance(node, ast.Import):
+            names = {a.name for a in node.names}
+            fetches = any(n == "argus_cortex.net" or n.startswith("argus_cortex.net.") for n in names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            aliases = {a.name for a in node.names}
+            names = {module} | {f"{module}.{a}" for a in aliases}
+            fetches = (module == "argus_cortex.net" and bool(aliases & (FETCH_NAMES | {"*"}))) or (
+                module == "argus_cortex" and bool(aliases & {"net", "*"})
+            )
+        elif isinstance(node, ast.Attribute):
+            names = set()
+            fetches = node.attr in FETCH_NAMES
+        else:
+            continue
+        if fetches and rel not in FETCHERS:
+            found.append(f"{rel}:{node.lineno} fetches over the network")
+        bad = {n for n in names if n in NETWORK_MODULES or n.split(".")[0] in {"httpx", "requests", "aiohttp"}}
+        if bad:
+            found.append(f"{rel}:{node.lineno} imports {sorted(bad)}")
+        if rel not in WEBSOCKET_USERS and {n for n in names if n.split(".")[0] == "websockets"}:
+            found.append(f"{rel}:{node.lineno} opens WebSockets")
+    if rel not in RAW_SOCKET_USERS:
+        calls = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in RAW_SOCKET_CALLS} | {
+            n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in RAW_SOCKET_CALLS
+        }
+        if calls:
+            found.append(f"{rel} opens raw sockets: {sorted(calls)}")
+    return found
+
+
 def test_no_module_contacts_hosts_directly():
     """Scout reads telemetry through PromQL only: no module opens sockets or HTTP clients of its own,
     and only the Prometheus client and the status poller use argus_cortex.net's fetch."""
+    found = []
     for path in SRC.rglob("*.py"):
-        rel = path.relative_to(SRC).as_posix()
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = {a.name for a in node.names}
-            elif isinstance(node, ast.ImportFrom):
-                names = {node.module or ""}
-                if node.module == "argus_cortex.net" and {a.name for a in node.names} & FETCH_NAMES:
-                    assert rel in FETCHERS, f"{rel} fetches over the network"
-            else:
-                continue
-            bad = {n for n in names if n in NETWORK_MODULES or n.split(".")[0] in {"httpx", "requests", "aiohttp"}}
-            assert not bad, f"{rel} imports {bad}"
-            if rel not in WEBSOCKET_USERS:
-                ws = {n for n in names if n.split(".")[0] == "websockets"}
-                assert not ws, f"{rel} opens WebSockets: {ws}"
-        if rel not in RAW_SOCKET_USERS:
-            calls = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in RAW_SOCKET_CALLS} | {
-                n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in RAW_SOCKET_CALLS
-            }
-            assert not calls, f"{rel} opens raw sockets: {calls}"
+        found += network_violations(path.relative_to(SRC).as_posix(), path.read_text())
+    assert found == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from argus_cortex.net import fetch",
+        "from argus_cortex.net import afetch as get",
+        "from argus_cortex.net import *",
+        "from argus_cortex import net",
+        "import argus_cortex.net",
+        "client.afetch(url)",
+        "from urllib import request",
+        "from http import client",
+        "import urllib.request",
+        "from httpx import AsyncClient",
+        "import socket",
+        "from websockets import client",
+        "await asyncio.open_connection(host, 1705)",
+    ],
+)
+def test_network_check_catches_every_import_form(source):
+    assert network_violations("narrative.py", source), source
+
+
+def test_network_check_allows_what_it_should():
+    assert (
+        network_violations("narrative.py", "from urllib.parse import urlsplit\nfrom argus_cortex.net import check_url")
+        == []
+    )
+    assert network_violations("prometheus.py", "from argus_cortex.net import afetch\nawait afetch(url)") == []

@@ -162,6 +162,9 @@ def test_no_family_uses_a_prometheus_target_label(store, tmp_path):
         families = list(registry.collect())
         text = client.get("/metrics").text
     assert {f.name for f in families} >= {"scout_job_runs", "scout_deliveries", "scout_tariff_rate", "scout_usage_used"}
+    # The collector yields *MetricFamily objects, whose _labelnames hold the declared labels; if that ever
+    # stops being true the declared check would go quiet, so insist it sees some.
+    assert any(getattr(family, "_labelnames", ()) for family in families)
     for family in families:
         declared = set(getattr(family, "_labelnames", ()))  # the label names, even for a family with no samples
         sampled = {name for sample in family.samples for name in sample.labels}

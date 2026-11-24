@@ -15,7 +15,7 @@ the minor unit has comes from the ISO 4217 currency code (:func:`minor_digits`),
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -268,8 +268,17 @@ def current_period(tariff: Tariff, now: datetime | None = None) -> TariffPeriod:
 
 
 def next_period_change(tariff: Tariff, now: datetime | None = None) -> tuple[str, int]:
-    """The next period's name and the seconds until it starts."""
+    """The next period's name and the seconds until it starts.
+
+    Periods start at wall-clock times; with an aware ``now`` the countdown is in absolute time, so a DST change
+    before the next start is counted (a naive ``now`` has no zone to know it by)."""
     current = now or datetime.now()
+
+    def elapsed(at: datetime) -> float:
+        if current.tzinfo is None:
+            return (at - current).total_seconds()
+        return (at.astimezone(UTC) - current.astimezone(UTC)).total_seconds()
+
     active = current_period(tariff, current)
     starts = sorted(tariff.periods, key=lambda p: _minutes(p.start))
     for day in (0, 1):
@@ -279,8 +288,8 @@ def next_period_change(tariff: Tariff, now: datetime | None = None) -> tuple[str
             at = current.replace(hour=p.start.hour, minute=p.start.minute, second=0, microsecond=0) + timedelta(
                 days=day
             )
-            if at > current:
-                return p.name, int((at - current).total_seconds())
+            if elapsed(at) > 0:
+                return p.name, int(elapsed(at))
     return active.name, 0  # a single all-day period never changes
 
 

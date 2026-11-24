@@ -19,13 +19,18 @@ def no_suite_settings(monkeypatch):
 
 @pytest.fixture
 def write_file(tmp_path):
-    """Write a file and bump its mtime, so mtime-keyed caches see every write."""
+    """Write a file and bump its mtime, so mtime-keyed caches see every write.
+
+    Each write's mtime is a second past both its own and the previous write's, so two quick rewrites (the
+    filesystem clock is coarse) never share one, whatever their contents."""
+    last = [0]
 
     def write(name: str, text: str) -> Path:
         path = tmp_path / name
         path.write_text(text)
         st = path.stat()
-        os.utime(path, (st.st_atime, st.st_mtime + len(text) + 1))
+        last[0] = max(st.st_mtime_ns, last[0]) + 1_000_000_000
+        os.utime(path, ns=(st.st_atime_ns, last[0]))
         return path
 
     return write

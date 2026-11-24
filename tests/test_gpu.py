@@ -134,18 +134,44 @@ async def test_lease_is_released_before_generate_returns():
     assert log == ["acquire", "call", "release", "returned"]
 
 
+LEASE_NAMES = ("lease", "alease")
+
+
+def lease_sites(source: str) -> list[int]:
+    """Lines that take a GPU lease, or import a lease function under any name: ``x.lease(...)``, a bare
+    ``lease(...)`` / ``alease(...)``, and ``from ... import lease`` (aliased or not)."""
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else None
+            if name in LEASE_NAMES:
+                lines.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom) and any(a.name in LEASE_NAMES for a in node.names):
+            lines.append(node.lineno)
+    return lines
+
+
+def test_lease_sites_catch_every_call_and_import_form():
+    for source in (
+        "gpu.lease()",
+        "self._gpu.alease()",
+        "lease()",
+        "async def f():\n    async with alease():\n        pass",
+        "from argus_scout.gpu import lease as take",
+        "from argus_cortex.gpu import alease",
+    ):
+        assert lease_sites(source), source
+    assert lease_sites("release()\nfrom x import leased") == []
+
+
 def test_only_the_narrative_guard_takes_a_lease():
     """Scout leases only around its own model call; nothing (channels, the echo synthesiser) leases around speech."""
     offenders = []
     for path in SRC.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            leases = (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("lease", "alease")
-            )
-            if leases and path.name != "gpu.py":
-                offenders.append(f"{path.relative_to(SRC)}:{node.lineno}")
+        if path.relative_to(SRC) == Path("gpu.py"):  # the narrative guard's own module, and only that one
+            continue
+        offenders += [f"{path.relative_to(SRC)}:{line}" for line in lease_sites(path.read_text(encoding="utf-8"))]
     assert offenders == []
 
 

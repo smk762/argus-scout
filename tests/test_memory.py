@@ -76,9 +76,13 @@ def test_scout_file_symlinked_out_is_never_written_through(root, tmp_path):
     victim = tmp_path / "victim.md"
     victim.write_text("keep me")
     (root / SCOUT_FILE).symlink_to(victim)
-    with pytest.raises(MemoryPathError):
-        Memory(root).write_rejections([REJECTION])
+    (root / f".{SCOUT_FILE}.tmp").symlink_to(victim)
+    memory = Memory(root)
+    for _ in range(2):  # replaced, not raised, and writing carries on
+        assert memory.write_rejections([REJECTION]) == root / SCOUT_FILE
     assert victim.read_text() == "keep me"
+    assert not (root / SCOUT_FILE).is_symlink() and "Recent rejections" in (root / SCOUT_FILE).read_text()
+    assert not (root / f".{SCOUT_FILE}.tmp").exists()
 
 
 def test_creates_root_and_no_root_means_no_memory(tmp_path):

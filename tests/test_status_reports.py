@@ -265,6 +265,25 @@ async def test_a_condition_that_clears_and_recurs_is_reported_again(store):
     assert again is not None and again.meta["facts"]["events"] == ["e1"]
 
 
+async def test_a_delivery_that_raises_leaves_the_news_unannounced(store):
+    clock = Clock()
+    inbox = Inbox(store, clock=clock)
+    inbox.ingest(ev("e1", "warning", "Disk 90% full"))
+
+    async def broken(report: Report) -> None:
+        raise RuntimeError("channel exploded")
+
+    cycle = StatusCycle(
+        store, PolicyFile(None), clock=clock, inbox=inbox, narrator=Narrator(store, clock=clock), deliver=broken
+    )
+    with pytest.raises(RuntimeError):
+        await cycle()
+    assert all(e.last_broadcast_at is None for g in inbox.open_grouped() for e in g.events)
+    clock.advance(minutes=5)
+    again = (await status_cycle(store, PolicyFile(None), clock, inbox=inbox)()).report
+    assert again is not None and again.meta["facts"]["events"] == ["e1"]
+
+
 async def test_a_new_item_is_news_and_the_old_one_rides_along(store):
     clock = Clock()
     inbox = Inbox(store, clock=clock)

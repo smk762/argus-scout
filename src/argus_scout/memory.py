@@ -155,7 +155,9 @@ class Memory:
     def _write(self, rejections: Iterable[Rejection]) -> Path:
         assert self.root is not None
         self.root.mkdir(parents=True, exist_ok=True)
-        path = self.resolve(SCOUT_FILE)
+        # Fixed names, joined without following links: a symlink at either is replaced (unlinked, O_NOFOLLOW,
+        # os.replace swaps the link itself), never resolved, written through, or treated as an escape.
+        path = self.root / SCOUT_FILE
         lines = [
             "# Recent rejections",
             "",
@@ -164,7 +166,7 @@ class Memory:
         ]
         rendered = [f"- {render_rejection(r)}" for r in rejections]
         lines += rendered or ["- none"]
-        tmp = self.resolve(f".{SCOUT_FILE}.tmp")
+        tmp = self.root / f".{SCOUT_FILE}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
         if tmp.is_symlink():
             tmp.unlink()

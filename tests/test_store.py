@@ -330,6 +330,15 @@ def test_prune(store):
     assert store.get_recommendation(rec.id) is not None
 
 
+def test_prune_keeps_an_acked_event_its_source_still_reports(store):
+    store.upsert_event(event("ongoing"), now=T0)
+    store.ack_event("nas", "ongoing", "someone", at=T0)
+    store.upsert_event(event("ongoing"), now=T0 + timedelta(days=9))  # still reported, still acked
+    assert store.prune(T0 + timedelta(days=5))["events"] == 0
+    kept = store.get_event("nas", "ongoing")
+    assert kept is not None and kept.acked_at is not None
+
+
 def test_restart_keeps_everything(db_path):
     rec = proposal()
     with SqliteStore(db_path) as s:
@@ -419,23 +428,39 @@ def test_resolved_column_migration_keeps_open_events_open(tmp_path):
     """A database from before ``resolved_at``: its events stay open, and resolving one never touches the ack."""
     db = tmp_path / "old.db"
     before = MIGRATIONS.index(next(m for m in MIGRATIONS if "resolved_at" in m))
-    with SqliteStore(db) as s:
-        pass
+    columns = (
+        "source, event_id, fingerprint, severity, generated_at, expires_at, first_seen, last_seen, seen_count,"
+        " acked_at, acked_by, last_announced_at, broadcast_count, data"
+    )
+    with SqliteStore(db) as s:  # the legacy rows: one open, one acked
+        s.upsert_event(event("a"), now=T0)
+        s.upsert_event(event("k", summary="kept"), now=T0)
+        s.ack_event("nas", "k", "someone", at=T0)
     conn = sqlite3.connect(db)
-    conn.execute("DROP TABLE events")  # rebuild at the pre-resolved_at schema
+    legacy = conn.execute(f"SELECT {columns} FROM events").fetchall()
+    conn.execute("DROP TABLE events")  # rebuild at the pre-resolved_at schema, rows and all
     conn.executescript(MIGRATIONS[0].split("CREATE TABLE recommendations")[0])
+    conn.executemany(f"INSERT INTO events ({columns}) VALUES ({', '.join('?' * 14)})", legacy)
     conn.execute(f"PRAGMA user_version = {before}")
     conn.commit()
     conn.close()
     with SqliteStore(db) as s:
         assert s.schema_version == SCHEMA_VERSION
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT event_id, resolved_at FROM events ORDER BY event_id").fetchall() == [
+        ("a", None),
+        ("k", None),
+    ]
+    conn.close()
     with SqliteStore(db) as s:
-        s.upsert_event(event("a"), now=T0)
+        assert [e.event_id for e in s.open_events(now=T0)] == ["a"]  # the legacy open event is still open
         s.upsert_event(event("b", summary="other"), now=T0)
-        assert s.resolve_missing("nas", ["b"], at=T0) == ["a"]
-        assert s.resolve_missing("nas", ["b"], at=T0) == []  # idempotent
+        assert sorted(s.resolve_missing("nas", ["b", "k"], at=T0)) == ["a"]
+        assert s.resolve_missing("nas", ["b", "k"], at=T0) == []  # idempotent
         assert [e.event_id for e in s.open_events(now=T0)] == ["b"]
         assert s.get_entry("nas", "a").acked_by is None
+        assert s.resolve_missing("nas", ["b"], at=T0) == ["k"]  # resolving the acked legacy event...
+        assert s.get_entry("nas", "k").acked_by == "someone"  # ...keeps the person's ack
         assert s.events_by_fingerprint(event("a").fingerprint) == []
-        assert s.prune(T0 + timedelta(seconds=1))["events"] == 1
+        assert s.prune(T0 + timedelta(seconds=1))["events"] == 2
         assert s.get_entry("nas", "a") is None and s.get_entry("nas", "b") is not None

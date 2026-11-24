@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from argus_scout.approvals import StandingApprovals
+from argus_scout.approvals import StandingApprovals, StandingRule
 from argus_scout.cycles import AnalysisCycle
 from argus_scout.engine import RecommendationEngine
 from argus_scout.prometheus import PrometheusUnavailable, Sample
@@ -186,15 +186,17 @@ def test_standing_approval_applies_on_proposed(store, clock, write_file):
 
 
 @pytest.mark.parametrize("guarded", [{"severity": Severity.CRITICAL}, {"impact": "high: takes the host offline"}])
-def test_guardrails_refuse_auto_approval(store, clock, write_file, guarded):
-    path = write_file(
-        "approvals.yaml",
-        "rules:\n  - id: anything\n    analyzer: '*'\n    max_impact: medium\n    min_confidence: low\n",
-    )
-    engine = RecommendationEngine(store, StandingApprovals(path), clock=clock)
-    report = engine.run_cycle(ran(hit(**guarded)))
-    assert report.auto_approved == []
-    assert report.new[0].status == Status.PROPOSED
+def test_guardrails_refuse_auto_approval(store, clock, guarded):
+    # A rule wider than the schema allows (max_impact: high), so its own scope refuses nothing: only the
+    # guardrail stands between these hits and an auto-approval.
+    approvals = StandingApprovals()
+    approvals._api_rules["anything"] = StandingRule("anything", max_impact="high", min_confidence="low")
+    engine = RecommendationEngine(store, approvals, clock=clock)
+    report = engine.run_cycle(ran(hit(**guarded), hit("control")))
+    [control] = report.auto_approved  # the same rule approves an unguarded hit
+    assert control.key == "control" and control.approved_by_rule == "anything"
+    [refused] = [r for r in report.new if r.key == KEY]
+    assert refused.status == Status.PROPOSED
 
 
 DISKS_RULE = "rules:\n  - id: disks\n    analyzer: disk-filling\n    max_impact: low\n"
@@ -324,8 +326,10 @@ def test_engine_never_moves_anything_past_approved(store, clock, write_file):
     for i in range(5):
         engine.run_cycle(ran(hit(f"k{i}"), hit(f"c{i}", severity=Severity.CRITICAL)))
         clock.advance(days=3)
-    statuses = {r.status for r in store.list_recommendations()}
-    assert statuses <= {Status.PROPOSED, Status.APPROVED, Status.RETIRED}
+    recs = store.list_recommendations()
+    assert recs and any(r.status == Status.APPROVED for r in recs)  # not vacuous: the rule did approve
+    assert {r.status for r in recs} <= {Status.PROPOSED, Status.APPROVED, Status.RETIRED}
+    assert all(r.status != Status.APPROVED for r in recs if r.severity == Severity.CRITICAL)
 
 
 # --- the scheduled analysis cycle -----------------------------------------------------------------------------

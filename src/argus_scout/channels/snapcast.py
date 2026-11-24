@@ -358,8 +358,10 @@ class SnapcastChannel:
             if self.rpc is not None:
                 status = await self.rpc.call("Server.GetStatus")
                 for change, revert in plan(status, cfg):
-                    await self.rpc.call(*change)
+                    # Recorded first: a call that times out or errors may still have been applied, and putting
+                    # back a setting that never changed is harmless.
                     undo.append(revert)
+                    await self.rpc.call(*change)
             stop = threading.Event()
             try:
                 started = await asyncio.to_thread(play_into_fifo, cfg, data, duration, stop)

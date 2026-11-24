@@ -33,7 +33,7 @@ from argus_scout.channels import (
     load_registry,
 )
 from argus_scout.channels import registry as registry_module
-from argus_scout.channels.text import TextChannel, append, target_path
+from argus_scout.channels.text import TextChannel, append, clean, target_path
 from argus_scout.channels.webhook import PAYLOAD_SCHEMA, WebhookChannel, build_payload, post, sign
 from argus_scout.cli import app
 from argus_scout.config import ConfigError, parse_config
@@ -713,7 +713,9 @@ def test_cli_deliver_charges_the_speech_caps(tmp_path, monkeypatch):
     path.write_text("channels:\n  - kind: text\n    name: log\nbudget:\n  limits:\n    tts: 1\n")
     with SqliteStore(tmp_path / "scout.db") as store:
         store.add_report("status", T0, "UPS on battery", {"severity": "critical"})
-        store.consume_usage(datetime.now(UTC).date().isoformat(), "tts", 0)  # today's tts is already spent
+        today = datetime.now(UTC).date().isoformat()
+        assert store.consume_usage(today, "tts", 1) == (True, 1)  # one charge against a limit of 1: spent
+        assert store.usage_counts(today) == {"tts": 1}
     seen = {}
     real = cli_module.build_dispatcher
 
@@ -838,3 +840,9 @@ def test_deliver_to_a_disabled_channel_says_so(tmp_path, monkeypatch):
     path.write_text(json.dumps({"channels": DISABLED_VOICE}))
     result = runner.invoke(app, ["deliver", "-c", str(path), "--latest", "--channel", "house"])
     assert result.exit_code == 1 and "channel house is disabled" in result.output
+
+
+def test_text_clean_drops_format_characters_without_splitting_words():
+    family = "\U0001f468\u200d\U0001f469"
+    assert clean("co\u00adoperate \u202eabc\u202c x\u200by") == "cooperate abc xy"
+    assert clean(f"{family} a\rb\tc\x00d\r\ne") == f"{family} a b    cd\ne"

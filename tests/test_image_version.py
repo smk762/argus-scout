@@ -38,14 +38,34 @@ def test_release_passes_the_tag_version_as_a_build_arg():
     assert "value=${{ needs.release-tag.outputs.tag }}" in meta["with"]["tags"]
 
 
-def test_dockerfile_builds_the_wheel_with_the_version_arg():
-    text = re.sub(r"\\\n", " ", (ROOT / "Dockerfile").read_text())
-    lines = text.splitlines()
-    arg = next((i for i, line in enumerate(lines) if re.match(r"\s*ARG\s+VERSION(=|\s|$)", line)), None)
-    assert arg is not None, "the Dockerfile declares no ARG VERSION"
+def version_arg_problem(dockerfile: str) -> str | None:
+    """Why ``dockerfile`` would build the wheel without ``VERSION``, or None. An ARG is scoped to its stage: one
+    before the first FROM, or in an earlier stage, is empty in the stage that builds unless declared there again."""
+    lines = re.sub(r"\\\n", " ", dockerfile).splitlines()
     build = next((i for i, line in enumerate(lines) if re.match(r"\s*RUN\s", line) and "uv build" in line), None)
-    assert build is not None and build > arg, "the wheel must be built after ARG VERSION"
-    assert 'SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION"' in lines[build], "the build RUN must hand VERSION to hatch-vcs"
+    if build is None:
+        return "no RUN builds the wheel"
+    stage = max((i for i in range(build) if re.match(r"\s*FROM\s", lines[i], re.IGNORECASE)), default=None)
+    if stage is None:
+        return "the wheel is built outside any stage"
+    if not any(re.match(r"\s*ARG\s+VERSION(=|\s|$)", line) for line in lines[stage + 1 : build]):
+        return "ARG VERSION is not declared in the stage that builds the wheel, before the build"
+    if 'SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION"' not in lines[build]:
+        return "the build RUN must hand VERSION to hatch-vcs"
+    return None
+
+
+def test_dockerfile_builds_the_wheel_with_the_version_arg():
+    assert version_arg_problem((ROOT / "Dockerfile").read_text()) is None
+
+
+def test_version_arg_check_respects_stage_scope():
+    build = 'RUN SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION" uv build --wheel\n'
+    assert version_arg_problem(f"FROM python AS app\nARG VERSION\n{build}") is None
+    assert version_arg_problem(f"ARG VERSION\nFROM python\n{build}") is not None  # global scope only
+    assert version_arg_problem(f"FROM a\nARG VERSION\nFROM b\n{build}") is not None  # an earlier stage's
+    assert version_arg_problem(f"FROM python\n{build}ARG VERSION\n") is not None  # declared after the build
+    assert version_arg_problem("FROM python\nARG VERSION\nRUN uv build --wheel\n") is not None
 
 
 def test_release_checks_the_image_version_before_pushing():

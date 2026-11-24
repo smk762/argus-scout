@@ -422,3 +422,14 @@ async def test_a_refused_clone_is_reported_not_recorded_and_never_retried():
     assert result.get("face").status == "skipped" and result.ok
     assert store.list_deliveries(f"report:{report.id}") == []
     assert (await RedeliveryJob(store, disp, DeliveryConfig(), clock=lambda: T0)()).reports == []
+
+
+def test_infinite_and_huge_float_samples_saturate():
+    floats = array.array("f", [math.inf, -math.inf, 3.4e38, math.nan, 0.5])
+    if sys.byteorder == "big":
+        floats.byteswap()
+    ints = array.array("h")
+    ints.frombytes(to_s16le(floats.tobytes(), "pcm_f32le"))
+    if sys.byteorder == "big":
+        ints.byteswap()
+    assert list(ints) == [32767, -32767, 32767, 0, 16384]

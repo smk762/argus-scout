@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -61,6 +62,14 @@ def test_next_period_change_same_day(tariff: Tariff):
 def test_next_period_change_wraps_to_tomorrow(tariff: Tariff):
     # 23:00 in off_peak: next is solar_soak at 10:00 tomorrow, 11h away.
     assert next_period_change(tariff, at(23)) == ("solar_soak", 11 * 3600)
+
+
+def test_next_period_change_counts_a_dst_change_in_absolute_time(tariff: Tariff):
+    london = ZoneInfo("Europe/London")
+    # 23:00 BST the night before clocks go back: 10:00 GMT tomorrow is 12h away, not the wall clock's 11h.
+    assert next_period_change(tariff, datetime(2026, 10, 24, 23, tzinfo=london)) == ("solar_soak", 12 * 3600)
+    assert next_period_change(tariff, datetime(2026, 3, 28, 23, tzinfo=london)) == ("solar_soak", 10 * 3600)
+    assert next_period_change(tariff, datetime(2026, 5, 9, 23, tzinfo=london)) == ("solar_soak", 11 * 3600)
 
 
 def test_single_all_day_period_never_changes():
