@@ -1,11 +1,17 @@
 """Text generation: the one way scout calls a language model.
 
-Two backends, both :class:`argus_cortex.backends.RemoteBackend` subclasses, so the connection, the bearer
-header, the timeout and the retry policy are cortex's, not scout's:
+Three backends, all :class:`argus_cortex.backends.RemoteBackend` subclasses, so the connection, the timeout and
+the retry policy are cortex's, not scout's:
 
 - :class:`OllamaBackend` posts to Ollama's ``/api/chat`` (non-streaming).
 - :class:`OpenAICompatBackend` posts to an OpenAI-compatible ``/chat/completions``: a local server
   (vLLM, llama.cpp, LM Studio) or a hosted provider, whose key comes from ``services.llm.api_key_env``.
+- :class:`AnthropicBackend` posts to the Claude Messages API (``{base_url}/messages``, ``base_url`` ending in
+  ``/v1``) with ``x-api-key`` and ``anthropic-version``, never a bearer token. Claude models think before they
+  answer (it can't be turned off on Claude Opus 5.5); ``services.llm.effort`` sets how much, and thinking is
+  charged to ``max_tokens``, so give it room. Only ``text`` blocks are read: thinking and fallback blocks are
+  skipped. ``stop_reason: max_tokens`` is a truncation (``length``); ``refusal`` is a failed call, so the report
+  falls back to its template. Server-side refusal fallbacks are on (``fallbacks: "default"``).
 
 Cortex retries a POST only when the request never reached the server (connect errors, pool timeouts),
 so a slow model is never asked twice, and wraps every failure (bad status, bad JSON, unreachable) in
@@ -317,16 +323,88 @@ class OpenAICompatBackend(TextBackend):
         }
 
 
-BACKENDS: dict[str, type[TextBackend]] = {"ollama": OllamaBackend, "openai": OpenAICompatBackend}
+ANTHROPIC_VERSION = "2026-10-21"
+"""The Claude API version scout's requests are written for (no ``temperature``, ``top_p`` or ``top_k``)."""
+ANTHROPIC_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+"""Lets a request declined by the model's safety classifiers be re-run on a fallback model in the same call."""
+
+
+class AnthropicBackend(TextBackend):
+    """The Claude Messages API, ``POST {base_url}/messages``, with ``base_url`` ending in ``/v1``
+    (``https://api.anthropic.com/v1``). The key goes in ``x-api-key``, not a bearer header. ``effort``
+    (``output_config.effort``) sets how much the model thinks; ``temperature`` is never sent (refused by the API
+    version used). ``fallbacks: "default"`` asks the API to re-run a request its classifiers decline on a
+    fallback model; a refusal that survives that is a :class:`BackendError`."""
+
+    name = "anthropic"
+    path = "messages"  # relative, so it joins onto a base_url that ends in /v1
+
+    def __init__(
+        self, base_url: str, model: str, *, api_key: str | None = None, effort: str | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(base_url, model, api_key=None, **kwargs)
+        self.api_key = api_key  # kept for at(); sent as x-api-key, never as a bearer token
+        self.effort = effort
+        self.headers = {
+            "anthropic-version": ANTHROPIC_VERSION,
+            "anthropic-beta": ANTHROPIC_FALLBACK_BETA,
+            **({"x-api-key": api_key} if api_key else {}),
+        }
+
+    def at(self, base_url: str) -> TextBackend:
+        if base_url.rstrip("/") == self.base_url:
+            return self
+        return type(self)(base_url, self.model, api_key=self.api_key, timeout=self.timeout, effort=self.effort)
+
+    def request(self, prompt: Prompt, max_tokens: int) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt.user}],
+            "fallbacks": "default",
+        }
+        if prompt.system:
+            body["system"] = prompt.system
+        if self.effort:
+            body["output_config"] = {"effort": self.effort}
+        return body
+
+    def parse(self, data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        if data.get("type") == "error" or data.get("error"):
+            raise BackendError(f"anthropic: {data.get('error')}")
+        stop = data.get("stop_reason")
+        if stop == "refusal":
+            details = data.get("stop_details") or {}
+            raise BackendError(f"anthropic: the model declined (category {details.get('category')!r})")
+        text = "".join(b["text"] for b in data["content"] if isinstance(b, dict) and b.get("type") == "text")
+        usage = data.get("usage") or {}
+        return text, {
+            "model": data.get("model"),
+            "prompt_tokens": usage.get("input_tokens"),
+            "completion_tokens": usage.get("output_tokens"),
+            "finish_reason": "length" if stop == "max_tokens" else ("stop" if stop == "end_turn" else stop),
+        }
+
+
+BACKENDS: dict[str, type[TextBackend]] = {
+    "ollama": OllamaBackend,
+    "openai": OpenAICompatBackend,
+    "anthropic": AnthropicBackend,
+}
 
 
 def build_backend(config: LLMConfig) -> TextBackend:
     """The backend ``services.llm`` names. The API key is read from ``api_key_env`` now, never stored in config."""
     secret = resolve_secret(config.api_key_env)
+    key = secret.get_secret_value() if secret else None
+    if config.backend == "anthropic":
+        return AnthropicBackend(
+            str(config.base_url), config.model, api_key=key, timeout=config.timeout, effort=config.effort
+        )
     return BACKENDS[config.backend](
         config.base_url,
         config.model,
-        api_key=secret.get_secret_value() if secret else None,
+        api_key=key,
         timeout=config.timeout,
         temperature=config.temperature,
         think=config.think if config.backend == "ollama" else None,

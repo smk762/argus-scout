@@ -1,0 +1,29 @@
+# Speech for the demo, through argus-echo and argus-mask services you already run: scout synthesises each report
+# once on echo (XTTS, a built-in speaker, not a clone) and pushes it to a mask face. Nothing extra runs here.
+#
+#   export ARGUS_XTTS_URL=http://<ECHO_HOST>:8141   # an argus-echo XTTS engine
+#   export ARGUS_MASK_URL=http://<MASK_HOST>:8109   # an argus-mask server
+#   ./demo/demo.sh up --voice
+#   open $ARGUS_MASK_URL/?face=stock-01 on any screen and click once to allow sound
+#
+# Or set both in the suite settings file and add compose.suite.yaml. With no screen watching the face, mask
+# answers "not ready" and scout skips it; the text channel still gets every report. For a recording you publish,
+# use a cleared face (stock or synthetic), never a personal one.
+
+services:
+  scout:
+    environment:
+      SCOUT_CONFIG: /config/scout.voice.yaml
+      ARGUS_XTTS_URL: ${ARGUS_XTTS_URL:-}    # suite-wide peer URLs, read by scout.voice.yaml
+      ARGUS_MASK_URL: ${ARGUS_MASK_URL:-}
+
+  first-brief:
+    environment:
+      ARGUS_XTTS_URL: ${ARGUS_XTTS_URL:-}
+      ARGUS_MASK_URL: ${ARGUS_MASK_URL:-}
+    command:
+      - sh
+      - -c
+      - >-
+        argus-scout brief --config /config/scout.voice.yaml --kind morning &&
+        argus-scout deliver --config /config/scout.voice.yaml --latest --kind morning

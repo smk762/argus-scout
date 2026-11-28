@@ -27,7 +27,7 @@ from argus_scout.approvals import StandingApprovals
 from argus_scout.budget import USAGE_STATE_FILE, DailyBudget, ManualOriginMiddleware, budget_from_config
 from argus_scout.channels import Channels, Delivery, Dispatcher, DispatchReport, Synthesiser, build_dispatcher
 from argus_scout.config import ScoutConfig
-from argus_scout.cycles import Briefings, register_jobs
+from argus_scout.cycles import AnalysisCycle, Briefings, register_jobs
 from argus_scout.heartbeat import PolicyFile
 from argus_scout.inbox import Inbox
 from argus_scout.prometheus import PrometheusClient
@@ -131,8 +131,15 @@ def build_runtime(
         dispatcher=dispatcher,
         approvals=approvals,
     )
+    analysis_job = scheduler.jobs.get("analysis")
     collector = ScoutCollector(
-        store=store, budget=budget, tariff=tariff, scheduler=scheduler, tz=config.schedule.tz, clock=clock
+        store=store,
+        budget=budget,
+        tariff=tariff,
+        scheduler=scheduler,
+        analysis=analysis_job.func if analysis_job and isinstance(analysis_job.func, AnalysisCycle) else None,
+        tz=config.schedule.tz,
+        clock=clock,
     )
     registry = build_registry(collector)
     # argus_build_info{service,version,...}: what the suite's status rules read to tell which version runs where.

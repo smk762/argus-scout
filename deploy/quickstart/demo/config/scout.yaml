@@ -1,0 +1,53 @@
+# argus-scout config for the demo (compose.demo.yaml): the quickstart's config with the simulator's policy files,
+# writes on behind a token (demo.sh generates it into .env), and fast cycles. Mounted at /config in place of
+# ../../config. With compose.voice.yaml, scout reads scout.voice.yaml instead: this file plus speech.
+files:
+  heartbeat: heartbeat.yaml
+  approvals: approvals.yaml
+  tariff: tariff.yaml             # written by the simulator, with the peak period happening now
+  signals: signals.yaml
+  persona: persona.yaml
+
+store:
+  path: scout.db
+
+sources:
+  - kind: suite_status
+    name: suite
+
+channels:
+  - kind: text
+    name: log
+    dir: .
+    file: scout-reports.log
+    rotate_bytes: 1048576
+    keep: 3
+
+schedule:
+  analysis_interval: 20           # seconds: the rules' for: windows are a minute, so scenarios land quickly
+  status_interval: 30
+  timezone: UTC                   # the simulator writes the tariff in UTC wall-clock time
+  briefings: []                   # demo.sh asks for reports; first-brief writes one at startup
+
+services:
+  prometheus_url: http://prometheus:9090
+  llm:
+    backend: anthropic            # the Claude Messages API
+    base_url: https://api.anthropic.com/v1
+    model: claude-opus-5-5        # or claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY  # in .env beside this file (gitignored)
+    effort: low                   # a short briefing needs little thinking
+    max_tokens: 8000              # thinking counts against this; the briefing itself is a few hundred
+    context_tokens: 200000
+    timeout: 120
+
+budget:
+  limits:
+    llm_calls: 40                 # a paid API: a full demo run makes about four calls
+
+server:
+  host: 0.0.0.0
+  port: 8400                      # published on loopback only
+  read_only: false                # demo.sh approves and asks for reports; every write needs the token
+  token_env: SCOUT_API_TOKEN      # demo.sh writes a random one into .env on first run
+  read_auth: false

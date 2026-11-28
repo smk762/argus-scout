@@ -90,8 +90,28 @@ services:
   or a hosted provider. Include the API prefix in `base_url` (`http://llm:8000/v1`). For a hosted one, put the
   key in `.env` and name it with `api_key_env`.
 
-Both go through argus-cortex's remote backends. A request that never reached the server is retried; a slow model
-is never asked twice. Every key: [config reference](config.md#servicesllm).
+- **`anthropic`** posts to `<base_url>/messages` on the Claude Messages API (`base_url:
+  https://api.anthropic.com/v1`), with the key from `api_key_env` sent as `x-api-key`, and API version
+  `2026-10-21`. `api_key_env` is required; `temperature` and `gpu` are refused (the API version doesn't take
+  sampling parameters, and a hosted model takes no lease). Claude models think before answering, and thinking
+  counts against `max_tokens`, so give it room (several thousand) and set `effort` (`low` suits a briefing).
+  Server-side refusal fallbacks are on; a refusal that survives them is a failed call, so the report comes from
+  the template.
+
+```yaml
+services:
+  llm:
+    backend: anthropic
+    base_url: https://api.anthropic.com/v1
+    model: claude-opus-5-5           # or claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY   # put the key in .env beside scout.yaml
+    effort: low
+    max_tokens: 8000
+    context_tokens: 200000
+```
+
+All three go through argus-cortex's remote backends. A request that never reached the server is retried; a slow
+model is never asked twice. Every key: [config reference](config.md#servicesllm).
 
 ### Output allowance
 

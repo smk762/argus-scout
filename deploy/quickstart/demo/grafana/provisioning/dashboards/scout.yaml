@@ -1,0 +1,10 @@
+# Loads demo/grafana/dashboards/*.json (mounted at /var/lib/grafana/dashboards) at startup.
+apiVersion: 1
+providers:
+  - name: argus-scout demo
+    folder: Argus
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

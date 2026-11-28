@@ -60,7 +60,7 @@ from argus_scout.prometheus import PrometheusClient
 from argus_scout.rules_file import SignalRulesFile
 from argus_scout.scheduler import Clock, DailyAt, Every, Scheduler, utc_now
 from argus_scout.severity import rank
-from argus_scout.signals import SignalState, evaluate
+from argus_scout.signals import Evaluation, SignalState, evaluate
 from argus_scout.sources import BoundSource, Sources, build_sources
 from argus_scout.store.base import Report, Store
 from argus_scout.tariff import TariffFile
@@ -240,15 +240,20 @@ class AnalysisCycle:
         self.engine = RecommendationEngine(store, approvals, clock=clock)
         self.last_run: datetime | None = None
         self.last: CycleReport | None = None
+        self.evaluation: Evaluation | None = None
+        """The last cycle's evaluation (which rules were answered, unknown, and their hits), for ``/metrics``;
+        ``None`` until a cycle evaluates, and again after one skips (no Prometheus, no or unreadable rules)."""
 
     async def __call__(self) -> CycleReport | None:
         now = self.last_run = self.clock()
         if self.client is None or not self.rules.path:
             log.info("analysis.skipped", reason="no prometheus_url" if self.client is None else "no signals file")
+            self.evaluation = None
             return None
         ruleset = self.rules.get()
         if ruleset.file_error:
             log.warning("analysis.rules_unreadable", path=self.rules.path, error=ruleset.file_error)
+            self.evaluation = None
             return None
         hits = await evaluate(ruleset.rules, self.client, now, state=self.state)
         tariff = self.tariff.get()
@@ -258,6 +263,7 @@ class AnalysisCycle:
             )
         )
         report = self.engine.run_cycle(hits)
+        self.evaluation = hits
         if report.unknown:
             log.warning("analysis.rules_unknown", rules=sorted(report.unknown))
         self.last = report

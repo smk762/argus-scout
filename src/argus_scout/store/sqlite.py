@@ -806,6 +806,16 @@ class SqliteStore:
         rows = self._query("SELECT channel FROM deliveries WHERE delivery_key = ? AND ok = 1", (delivery_key,))
         return {r["channel"] for r in rows}
 
+    def report_counts(self) -> dict[tuple[str, str, str], int]:
+        """Stored reports per ``(kind, path, fallback_reason)``, for /metrics. ``path`` is ``llm`` or ``template``;
+        ``fallback_reason`` is empty for a model-written report. Pruned reports drop out of the count."""
+        rows = self._query(
+            "SELECT kind, COALESCE(json_extract(meta, '$.path'), '') AS path,"
+            " COALESCE(json_extract(meta, '$.fallback_reason'), '') AS reason, COUNT(*) AS n"
+            " FROM reports GROUP BY kind, path, reason"
+        )
+        return {(r["kind"], str(r["path"]), str(r["reason"])): r["n"] for r in rows}
+
     def delivery_counts(self) -> dict[tuple[str, bool], int]:
         """Delivery attempts per ``(channel, ok)``, for /metrics."""
         rows = self._query("SELECT channel, ok, COUNT(*) AS n FROM deliveries GROUP BY channel, ok")

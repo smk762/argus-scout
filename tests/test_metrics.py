@@ -181,3 +181,84 @@ def test_target_label_check_bites():
     family.add_metric(["status"], 1)
     assert set(family._labelnames) & TARGET_LABELS
     assert {n for s in family.samples for n in s.labels} & TARGET_LABELS
+
+
+def samples(collector) -> dict[str, dict[tuple, float]]:
+    out: dict[str, dict[tuple, float]] = {}
+    for family in collector.collect():
+        for sample in family.samples:
+            out.setdefault(sample.name, {})[tuple(sorted(sample.labels.items()))] = sample.value
+    return out
+
+
+def test_reports_are_counted_by_kind_path_and_fallback_reason(store, tmp_path):
+    store.add_report("morning", NOW, "model text", {"path": "llm", "fallback_reason": None})
+    store.add_report("status", NOW, "t", {"path": "template", "fallback_reason": "error"})
+    store.add_report("status", NOW, "t", {"path": "template", "fallback_reason": "error"})
+    store.add_report("status", NOW, "t", {"path": "template", "fallback_reason": "Bad\nValue {x}"})
+    store.add_report("evening", NOW, "t", {})  # an old row without meta
+    m = scrape(make_app(store, tmp_path))
+    labels = lambda k, p, r: (("fallback_reason", r), ("kind", k), ("path", p))  # noqa: E731
+    assert m["scout_reports_total"] == {
+        labels("morning", "llm", ""): 1,
+        labels("status", "template", "error"): 2,
+        labels("status", "template", "other"): 1,  # stored JSON never becomes a free-text label
+        labels("evening", "", ""): 1,
+    }
+
+
+def test_signal_rules_report_unknown_as_down_never_as_clear():
+    from types import SimpleNamespace
+
+    from argus_scout.server.metrics import ScoutCollector
+    from argus_scout.signals import Evaluation
+
+    hit = SimpleNamespace(rule="high-load")
+    evaluation = Evaluation(
+        [hit, SimpleNamespace(rule="high-load")],
+        evaluated={"high-load", "memory-low"},
+        unknown={"disk-filling": "prometheus unavailable", "shift-heavy-loads": "skipped: no tariff"},
+    )
+    m = samples(ScoutCollector(analysis=SimpleNamespace(evaluation=evaluation)))
+    assert m["scout_signal_rule_up"] == {
+        (("rule", "high-load"),): 1,
+        (("rule", "memory-low"),): 1,
+        (("rule", "disk-filling"),): 0,
+        (("rule", "shift-heavy-loads"),): 0,
+    }
+    # An unknown rule has no hits sample at all: 0 hits would read as "clear".
+    assert m["scout_signal_rule_hits"] == {(("rule", "high-load"),): 2, (("rule", "memory-low"),): 0}
+    # Before any cycle (or after a skipped one) both families are empty, not zero.
+    assert "scout_signal_rule_up" not in samples(ScoutCollector(analysis=SimpleNamespace(evaluation=None)))
+
+
+async def test_the_app_exports_the_analysis_cycles_evaluation(store, tmp_path):
+    from argus_scout.cycles import AnalysisCycle
+    from argus_scout.prometheus import PrometheusUnavailable
+
+    class DownPrometheus:
+        async def query(self, *_a, **_k):
+            raise PrometheusUnavailable("connection refused")
+
+        async def query_range(self, *_a, **_k):
+            raise PrometheusUnavailable("connection refused")
+
+    signals = tmp_path / "signals.yaml"
+    signals.write_text(
+        "rules:\n  - name: high-load\n    query: node_load1\n    op: '>'\n    threshold: 4\n"
+        "    severity: warning\n    recommendation: {title: Load high, action: look}\n"
+    )
+    config = parse_config(
+        {"files": {"signals": str(signals)}, "services": {"prometheus_url": "http://prom:9090"}}, tmp_path
+    )
+    app = create_app(config, store=store, sources=Sources(), clock=lambda: NOW, run_scheduler=False)
+    with TestClient(app) as client:
+        runtime = client.app.state.runtime
+        cycle = runtime.scheduler.jobs["analysis"].func
+        assert isinstance(cycle, AnalysisCycle)
+        assert "scout_signal_rule_up{" not in client.get("/metrics").text  # no cycle yet: nothing, not zero
+        cycle.client = DownPrometheus()
+        await cycle()
+        text = client.get("/metrics").text
+    assert 'scout_signal_rule_up{rule="high-load"} 0.0' in text
+    assert 'scout_signal_rule_hits{rule="high-load"}' not in text

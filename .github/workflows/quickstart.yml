@@ -24,3 +24,5 @@ jobs:
           docker compose -f compose.yaml config -q
           docker compose -f compose.yaml -f compose.gpu.yaml config -q
           docker compose -f compose.yaml -f compose.iris.yaml config -q
+          docker compose -f compose.yaml -f compose.demo.yaml config -q
+          docker compose -f compose.yaml -f compose.demo.yaml -f compose.voice.yaml config -q
