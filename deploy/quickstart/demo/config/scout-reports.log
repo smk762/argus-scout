@@ -1,0 +1,88 @@
+=== 2026-11-28T09:52:07+00:00  morning  [info]  report:1 ===
+Morning briefing, Sat 28 Nov 09:52.
+
+Nothing needs attention.
+
+Energy: peak period now, 52 c/kWh; off_peak starts in 38m.
+
+(Written from a template: the model was unavailable.)
+
+=== 2026-11-28T09:53:49+00:00  status  [info]  report:2 ===
+The system's temperature has increased to 25.7°C, 3.2°C above the normal range. The humidity is 60.5%, 1.9% above the average. The incident report is closed.
+
+=== 2026-11-28T09:54:05+00:00  status  [info]  report:3 ===
+A warning is issued for the critical item "Power outage expected". It is recommended that the operator generates an emergency power source and schedules a backup plan. The recommended action is to act immediately. A critical event is anticipated. Nothing else is recommended or approved.
+
+=== 2026-11-28T09:56:36+00:00  evening  [notice]  report:1 ===
+Good evening, the evening review is open.
+
+Approved recommendations:
+
+- Run batch-render after 10:35 instead of now. By pausing or rescheduling, savings of 1.28 USD can be achieved.
+- Run batch-render after 10:35 instead of now.
+
+No significant issues or warnings noted.
+
+The rest is fine.
+
+=== 2026-11-28T09:58:16+00:00  evening  [critical]  report:2 ===
+Good evening.
+
+The most severe item is the GPU 0 on demo-gpu-node is running hot (92°C). It's recommended to check the GPU's fans and airflow or cap its power limit to prevent damage. [Approved: a person is planning to cap its power limit. ]
+
+The GPU 0 on demo-gpu-node is not the only item awaiting a decision. The following recommendations are also awaiting a decision: [propose] GPU 1 on testnet-node is running low on memory (64MB). [Approved: a person is planning to run it for 60 minutes.]
+
+The current energy tariff is 52 c/kWh during peak hours and 3.75 c/kWh during off-peak hours.
+
+=== 2026-11-28T09:59:26+00:00  evening  [critical]  report:3 ===
+Evening review, Sat 28 Nov 09:59.
+
+Approved, for a person to carry out:
+- [critical] GPU 0 on demo-gpu-node is running hot (92°C): Check the GPU's fans and airflow, or cap its power limit. (why: The GPU has been at or above 90°C for 1m.)
+- [notice] Run batch-render after 10:35 (off_peak) instead of now: Pause or reschedule batch-render until off_peak starts in 39m. (why: batch-render is drawing 1875 W in peak. 3.75 kWh at 52 c/kWh rather than 18 c/kWh saves about 1.28 USD.) (approved by standing rule demo-tariff-shift)
+
+Energy: peak period now, 52 c/kWh; off_peak starts in 35m.
+
+(Written from a template: the model was unavailable.)
+
+=== 2026-11-28T10:24:29+00:00  morning  [critical]  report:4 ===
+Morning briefing, Sat 28 Nov 10:24.
+
+Approved, for a person to carry out:
+- [critical] GPU 0 on demo-gpu-node is running hot (92°C): Check the GPU's fans and airflow, or cap its power limit. (why: The GPU has been at or above 90°C for 1m.)
+- [notice] Run batch-render after 10:35 (off_peak) instead of now: Pause or reschedule batch-render until off_peak starts in 39m. (why: batch-render is drawing 1875 W in peak. 3.75 kWh at 52 c/kWh rather than 18 c/kWh saves about 1.28 USD.) (approved by standing rule demo-tariff-shift)
+
+Energy: peak period now, 52 c/kWh; off_peak starts in 39m.
+
+(Written from a template: the model was unavailable.)
+
+=== 2026-11-28T10:24:48+00:00  evening  [critical]  report:5 ===
+Evening review, Sat 28 Nov 10:24.
+
+Approved, for a person to carry out:
+- [critical] GPU 0 on demo-gpu-node is running hot (92°C): Check the GPU's fans and airflow, or cap its power limit. (why: The GPU has been at or above 90°C for 1m.)
+- [notice] Run batch-render after 10:35 (off_peak) instead of now: Pause or reschedule batch-render until off_peak starts in 39m. (why: batch-render is drawing 1875 W in peak. 3.75 kWh at 52 c/kWh rather than 18 c/kWh saves about 1.28 USD.) (approved by standing rule demo-tariff-shift)
+
+Energy: peak period now, 52 c/kWh; off_peak starts in 39m.
+
+(Written from a template: the model was unavailable.)
+
+=== 2026-11-28T10:25:05+00:00  evening  [critical]  report:6 ===
+Evening review, Sat 28 Nov 10:25.
+
+Approved, for a person to carry out:
+- [critical] GPU 0 on demo-gpu-node is running hot (92°C): Check the GPU's fans and airflow, or cap its power limit. (why: The GPU has been at or above 90°C for 1m.)
+- [notice] Run batch-render after 10:35 (off_peak) instead of now: Pause or reschedule batch-render until off_peak starts in 39m. (why: batch-render is drawing 1875 W in peak. 3.75 kWh at 52 c/kWh rather than 18 c/kWh saves about 1.28 USD.) (approved by standing rule demo-tariff-shift)
+
+Energy: peak period now, 52 c/kWh; off_peak starts in 38m.
+
+(Written from a template: the model was unavailable.)
+
+=== 2026-11-28T10:25:31+00:00  suite  [info]  report:7 ===
+Suite status at 2026-11-28 10:25 UTC: 1 service.
+
+Nothing is down, degraded or out of date.
+
+Services
+- scout on demo: up: health not probed, 0.1.5.dev31+gbb96b6b44.d20261128, 0.1.5.dev32+gb9ef726cf.d20261128
+

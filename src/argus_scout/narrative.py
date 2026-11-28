@@ -637,6 +637,54 @@ def all_clear_phrases(text: str) -> list[str]:
     return [m.group(0) for m in _ALL_CLEAR.finditer(" ".join(text.split()))]
 
 
+SMALL_COUNT = 12
+"""Whole numbers up to this pass the number check unsupported: counts and ordinals ("two items", "first")."""
+NUMBER_TOLERANCE = 0.05
+"""How far a number may sit from a fact's and still match it: rounding ("1.8 kW" for 1813 W, "about 1.3 USD")."""
+_NUMBER = re.compile(r"(?<![\w.])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d,])|(?<![\w.])\d+(?:\.\d+)?")
+_CRITICAL = re.compile(r"\bcritical(?:ly)?\b", re.IGNORECASE)
+_NEGATION = re.compile(r"\b(?:no|not|nothing|none|without|never|neither|nor|isn't|aren't|wasn't|weren't)\b")
+
+
+def numbers_in(text: str) -> list[float]:
+    """The numbers in ``text``, spelled-out ones (0-999) included: ``1,234`` is 1234, ``10:35`` is 10 and 35."""
+    return [float(m.group(0).replace(",", "")) for m in _NUMBER.finditer(numbers_to_digits(text))]
+
+
+def _supported(value: float, known: Collection[float]) -> bool:
+    if value.is_integer() and 0 <= value <= SMALL_COUNT:
+        return True
+    for fact in known:
+        for candidate in (fact, fact / 1000, fact * 1000):  # W and kW, ms and s, and back
+            if abs(value - candidate) <= NUMBER_TOLERANCE * max(abs(candidate), 1.0):
+                return True
+    return False
+
+
+def unsupported_numbers(text: str, facts: Facts) -> list[str]:
+    """The numbers in a model's answer that no fact supports (:func:`_supported`), as written, deduplicated. The
+    facts are every fact line, shown to the model or not: a true number is never refused for being cut."""
+    known = {n for line in fact_lines(facts) for n in numbers_in(line.text)}
+    out: list[str] = []
+    for value in numbers_in(text):
+        if not _supported(value, known):
+            label = f"{value:g}"
+            if label not in out:
+                out.append(label)
+    return out
+
+
+def overstated_severity(text: str, facts: Facts) -> bool:
+    """The answer calls something critical, not negated ("nothing critical"), when no fact says critical."""
+    if any(_CRITICAL.search(line.text) for line in fact_lines(facts)):
+        return False
+    for match in _CRITICAL.finditer(text):
+        before = text[max(0, match.start() - 40) : match.start()].lower().split()[-4:]
+        if not any(_NEGATION.fullmatch(w.strip(",.;:")) for w in before):
+            return True
+    return False
+
+
 def ground_persona(persona: Persona, facts: Facts) -> tuple[Persona, list[str]]:
     """``persona`` with every line that would contradict a report of ``warning`` or above withheld: a voice,
     style or do entry, or a sign-off, that carries an all-clear phrase (a catchphrase like "All systems nominal").
@@ -669,9 +717,10 @@ def ground_persona(persona: Persona, facts: Facts) -> tuple[Persona, list[str]]:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Why a model answer was refused: :attr:`reason` is ``truncated``, ``hollow`` or ``contradicted``;
-    :attr:`rule` the check that failed (``token_limit``, ``too_short``, ``missing_items`` or
-    ``contradicts_severity``)."""
+    """Why a model answer was refused: :attr:`reason` is ``truncated``, ``hollow``, ``contradicted`` or
+    ``ungrounded``; :attr:`rule` the check that failed (``token_limit``, ``too_short``, ``missing_items``,
+    ``contradicts_severity``, ``unsupported_numbers`` or ``overstates_severity``). For ``unsupported_numbers``,
+    :attr:`missing` holds the numbers no fact supports."""
 
     reason: str
     rule: str
@@ -685,8 +734,10 @@ class Verdict:
 def check_completion(completion: Completion, facts: Facts, shown: Collection[str] | None = None) -> Verdict | None:
     """``None`` when the answer may be delivered; otherwise the :class:`Verdict`: ``truncated`` (the token limit
     cut it off), ``hollow`` (near-empty, or missing an item or recommendation :func:`required` names; ``shown`` is
-    the refs of the fact lines the prompt held) or ``contradicted`` (an all-clear phrase in a report of ``warning``
-    or above, :data:`ALL_CLEAR_PHRASES`)."""
+    the refs of the fact lines the prompt held), ``contradicted`` (an all-clear phrase in a report of ``warning``
+    or above, :data:`ALL_CLEAR_PHRASES`) or ``ungrounded`` (a number no fact supports, :func:`unsupported_numbers`,
+    or "critical" with no critical fact, :func:`overstated_severity`): a model that invents is refused, not
+    believed."""
     if completion.truncated:
         detail = f"the model hit its token limit ({completion.completion_tokens} tokens)"
         return Verdict("truncated", "token_limit", detail)
@@ -703,6 +754,12 @@ def check_completion(completion: Completion, facts: Facts, shown: Collection[str
         quoted = ", ".join(f'"{p}"' for p in dict.fromkeys(f.lower() for f in found))
         detail = f"the model's answer called things all clear ({quoted}) in a {severity.value} report"
         return Verdict("contradicted", "contradicts_severity", detail)
+    if overstated_severity(text, facts):
+        detail = f"the model's answer called something critical, but nothing in a {severity.value} report is"
+        return Verdict("ungrounded", "overstates_severity", detail)
+    if unsupported := unsupported_numbers(text, facts):
+        detail = f"the model's answer gave numbers no fact supports ({', '.join(unsupported[:8])})"
+        return Verdict("ungrounded", "unsupported_numbers", detail, tuple(unsupported))
     return None
 
 
@@ -780,6 +837,7 @@ _REASON_TEXT = {
     "truncated": "the model's answer was cut off",
     "hollow": "the model's answer left out what needs attention",
     "contradicted": "the model's answer called things all clear while items need attention",
+    "ungrounded": "the model's answer stated things the facts don't support",
 }
 
 
