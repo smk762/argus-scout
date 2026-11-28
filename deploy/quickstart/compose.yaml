@@ -60,7 +60,7 @@ services:
   #   docker compose exec scout argus-scout brief --config /config/scout.yaml --kind morning
   #   docker compose exec scout argus-scout deliver --config /config/scout.yaml --latest
   # Each `up` writes a fresh one. Remove this service if you don't want that.
-  first-brief:
+  first-brief:  # nosemgrep: service-peer-label  one-shot: writes and delivers one briefing, then exits; serves nothing
     image: ${SCOUT_IMAGE:-argus-scout:quickstart}
     restart: "no"
     user: ${SCOUT_USER:-0:0}
@@ -76,7 +76,7 @@ services:
       scout:
         condition: service_healthy
 
-  prometheus:
+  prometheus:  # nosemgrep: service-peer-label  third-party image (Prometheus)
     image: prom/prometheus:v3.16.0
     restart: unless-stopped
     command:
@@ -97,7 +97,7 @@ services:
   # Real data for the example signal rules. In a container it sees the host's CPU, load and memory, but its
   # own filesystem. For the host's disks too (Linux only), uncomment the lines below; the SELinux line is
   # needed on Fedora/RHEL hosts.
-  node-exporter:
+  node-exporter:  # nosemgrep: service-peer-label  third-party image (Prometheus node exporter)
     image: prom/node-exporter:v1.13.1
     restart: unless-stopped
     # command: ["--path.rootfs=/host"]
@@ -107,7 +107,7 @@ services:
     # security_opt:
     #   - label=disable
 
-  ollama:
+  ollama:  # nosemgrep: service-peer-label  third-party image (Ollama)
     image: ollama/ollama:0.40.16
     restart: unless-stopped
     volumes:
@@ -121,7 +121,7 @@ services:
 
   # One-shot: pull the model scout.yaml names (services.llm.model). Change both together. A 1B model runs
   # on a CPU; a bigger one writes better briefings but wants a GPU (compose.gpu.yaml).
-  ollama-pull:
+  ollama-pull:  # nosemgrep: service-peer-label  one-shot: pulls the model, then exits
     image: ollama/ollama:0.40.16
     restart: "no"
     environment:
