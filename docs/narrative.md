@@ -165,6 +165,7 @@ the bottom. `meta.fallback_reason` is one of:
 | `truncated` | the model hit its token limit (Ollama `done_reason`, OpenAI `finish_reason`: `length`), so its answer was cut off |
 | `hollow` | the answer was too short for its kind, or left out an item that needs attention (below) |
 | `contradicted` | the answer called things all clear in a report that is `warning` or above (below) |
+| `ungrounded` | the answer gave a number no fact supports, or called something critical when nothing is (below) |
 
 The model's output is cleaned before it's stored: control characters and `<think>` blocks are stripped and its
 length capped.
@@ -233,6 +234,18 @@ An answer that came back is still not delivered unless it is whole. Scout falls 
   clear"): the template is the safe side. Below `warning` the phrases are allowed. A real answer this catches, a
   morning briefing written at 22:56 with three critical recommendations open: "Evening. All systems nominal,
   nothing exploding. For once. host-a's CPU is at 91°C ... No immediate crises, but keep an eye on host-a."
+- **it states what the facts don't** (`ungrounded`). Two rules:
+  - `overstates_severity`: the answer calls something critical ("critical", "critically") and no fact says
+    critical. A negation in the four words before it lets it pass ("nothing is critical", "no critical items").
+  - `unsupported_numbers`: a number in the answer (digits, or spelled out up to 999) that no fact line holds,
+    shown to the model or not. Whole numbers up to 12 always pass (counts, ordinals), and a number within 5% of a
+    fact's, or of that fact scaled by 1000, matches it, so rounding and unit changes pass ("about 1.9 kW" for
+    1875 W). `missing` lists the numbers refused.
+
+  These catch inventions near nothing in the facts, not every invention: a made-up number close to a true one
+  passes, and so does an invented item with no number in it. Real answers this catches, from a 1B model: a status
+  report with nothing open that announced "a critical event is anticipated", and an evening review that added
+  "GPU 1 on testnet-node is running low on memory (64MB)".
 
 The template lists the items and recommendations from the same facts (ten a section, but every warning, critical
 and item awaiting acknowledgement, and every warning or critical recommendation, however many there are), so a
@@ -245,9 +258,11 @@ report's `meta` also holds:
 
 - `rejected_text`: the model's answer, cleaned (newlines normalised, control and format characters such as
   terminal escapes and bidi overrides stripped) and clipped to 2000 characters;
-- `rejected_check`: `{reason, rule, detail, missing}`, where `reason` is `truncated`, `hollow` or `contradicted`,
-  `rule` is the check that failed (`token_limit`, `too_short`, `missing_items` or `contradicts_severity`, whose
-  `detail` quotes the phrases found) and `missing` the ids of the items the answer didn't name.
+- `rejected_check`: `{reason, rule, detail, missing}`, where `reason` is `truncated`, `hollow`, `contradicted` or
+  `ungrounded`, `rule` is the check that failed (`token_limit`, `too_short`, `missing_items`,
+  `contradicts_severity`, whose `detail` quotes the phrases found, `overstates_severity` or
+  `unsupported_numbers`) and `missing` the ids of the items the answer didn't name, or the numbers no fact
+  supports.
 
 Channels read the report's text, which is the template's. `rejected_text` is also dropped from the `meta` every
 delivery carries (webhook payloads included): it is unvetted text that the check refused, possibly dropping or
