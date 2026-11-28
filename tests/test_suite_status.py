@@ -89,9 +89,11 @@ class FakePrometheus:
         answered: bool = True,
         ok_in_window: float | None = 1,
         seen: bool = True,
+        watched: bool = True,
     ) -> FakePrometheus:
         """Add one service. ``up``/``code``/``ok`` ``None`` leaves that series out now; ``answered`` is whether
-        anything answered within ``down_for``; ``ok_in_window`` is the guarded max of ``probe_success``."""
+        anything answered within ``down_for``; ``ok_in_window`` is the guarded max of ``probe_success``; ``watched``
+        is whether Prometheus already had the target ``down_for`` ago."""
         labels, probe = target(peer, node, job="argus"), target(peer, node, job="argus-health")
 
         def add(name: str, metric: dict, value: float | None) -> None:
@@ -106,6 +108,8 @@ class FakePrometheus:
         add("code_window", probe, ((code or 200) if answered else 0) if code is not None else None)
         add("ok_window", probe, ok_in_window if code is not None else None)
         add("up_seen", labels, 1 if seen else None)
+        add("up_before", labels, (1 if answered else 0) if watched and up is not None else None)
+        add("code_before", probe, ((code or 200) if answered else 0) if watched and code is not None else None)
         add("code_seen", probe, 200 if seen and code is not None else None)
         build = {**labels, "service": f"argus-{peer}", "service_version": "1.1"}
         if version and present:
@@ -149,7 +153,7 @@ def test_the_one_configurable_name_in_a_query_is_a_plain_token(job):
 async def test_a_reading_asks_only_the_configured_prometheus_with_read_only_instant_queries():
     prom = FakePrometheus().service("lens", "alpha")
     await reading(prom)
-    assert len(prom.calls) == len(queries(CFG)) == 10
+    assert len(prom.calls) == len(queries(CFG)) == 12
     for url, kwargs in prom.calls:
         parts = urlsplit(url)
         assert f"{parts.scheme}://{parts.netloc}" == BASE and parts.path == "/api/v1/query"
@@ -202,6 +206,22 @@ async def test_down_is_not_raised_until_nothing_answered_for_the_whole_window():
     assert suite_events(status, CFG) == []
 
 
+async def test_a_target_first_scraped_inside_the_window_is_not_down_for_the_window():
+    # Prometheus (or the service) just started and its first scrape failed: nothing answered "within down_for",
+    # but nothing has been watched for down_for either. Raising it would say "no answer for at least 2m" 10s in.
+    fresh = FakePrometheus().service("scout", "demo", up=0, code=None, answered=False, watched=False)
+    status = await reading(fresh)
+    assert [(s.state, s.held) for s in status.services] == [("down", False)]
+    assert suite_events(status, CFG) == []
+    # Once it has been watched for the whole window without an answer, it is down.
+    watched = FakePrometheus().service("scout", "demo", up=0, code=None, answered=False, watched=True)
+    assert [e.summary for e in suite_events(await reading(watched), CFG)] == ["scout on demo is down"]
+    # Probed but never scraped counts as watched too.
+    probed = FakePrometheus().service("lens", "alpha", up=None, code=0, ok=0, answered=False)
+    probed.answers.pop("up_seen")
+    assert [(s.state, s.held) for s in (await reading(probed)).services] == [("down", True)]
+
+
 async def test_a_service_that_is_no_longer_a_target_is_down_then_forgotten():
     # argus-iris lists only running containers, so a stopped one disappears from Prometheus instead of up == 0.
     gone = FakePrometheus().service("lens", "alpha", up=None, code=None, answered=False, version="0.14.2")
@@ -227,9 +247,10 @@ async def test_a_probe_job_under_another_name_is_still_not_read_as_the_service_a
     # exporter answered) while the service gives no answer. That `up` must not make the service look alive.
     labels = target("lens", "alpha", job="bb")
     prom = FakePrometheus()
-    for name in ("up_now", "up_window", "up_seen"):
+    for name in ("up_now", "up_window", "up_seen", "up_before"):
         prom.set(name, (labels, 1))
     prom.set("code_now", (labels, 0)).set("ok_now", (labels, 0)).set("code_window", (labels, 0))
+    prom.set("code_before", (labels, 0))
     prom.set("code_seen", (labels, 200))
     status = await reading(prom)
     assert [(s.state, s.held, s.detail) for s in status.services] == [("down", True, "no answer")]
@@ -336,6 +357,7 @@ def test_version_order(older, newer):
 async def test_label_values_from_prometheus_are_only_ever_short_plain_text():
     nasty = {"argus_peer": "lens\n## Down\n- everything", "node": "a" * 500, "container": "c\x00\x1b[31m"}
     prom = FakePrometheus().set("up_now", (nasty, 0)).set("up_seen", (nasty, 1)).set("up_window", (nasty, 0))
+    prom.set("up_before", (nasty, 0))
     status = await reading(prom)
     (service,) = status.services
     assert "\n" not in service.peer and len(service.where) == 80 and "\x1b" not in service.container
