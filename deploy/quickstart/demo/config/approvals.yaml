@@ -1,0 +1,17 @@
+# Standing approvals for the demo. Both match; only one can ever take effect on a critical signal.
+# Approve only: an approved recommendation is never carried out by scout.
+rules:
+  # The tariff shift is low impact and recurs: approve it without asking.
+  - id: demo-tariff-shift
+    scope: analyzer
+    analyzer: shift-heavy-loads
+    max_impact: low
+    note: the same off-peak shift suggestion every time a batch job runs at peak
+
+  # A hot GPU at warning is approved too. At critical the guardrail wins: the approval is withdrawn and the
+  # recommendation goes back to a person, whatever this rule says.
+  - id: demo-gpu-thermal
+    scope: analyzer
+    analyzer: gpu-hot
+    max_impact: low
+    note: fan and airflow checks are routine

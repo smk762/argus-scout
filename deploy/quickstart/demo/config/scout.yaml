@@ -1,0 +1,49 @@
+# argus-scout config for the demo (compose.demo.yaml): the quickstart's config with the simulator's policy files,
+# writes on behind a token (demo.sh generates it into .env), and fast cycles. Mounted at /config in place of
+# ../../config. With compose.voice.yaml, scout reads scout.voice.yaml instead: this file plus speech.
+files:
+  heartbeat: heartbeat.yaml
+  approvals: approvals.yaml
+  tariff: tariff.yaml             # written by the simulator, with the peak period happening now
+  signals: signals.yaml
+  persona: persona.yaml
+
+store:
+  path: scout.db
+
+sources:
+  - kind: suite_status
+    name: suite
+
+channels:
+  - kind: text
+    name: log
+    dir: .
+    file: scout-reports.log
+    rotate_bytes: 1048576
+    keep: 3
+
+schedule:
+  analysis_interval: 20           # seconds: the rules' for: windows are a minute, so scenarios land quickly
+  status_interval: 30
+  timezone: UTC                   # the simulator writes the tariff in UTC wall-clock time
+  briefings: []                   # demo.sh asks for reports; first-brief writes one at startup
+
+services:
+  prometheus_url: http://prometheus:9090
+  llm:
+    backend: ollama
+    base_url: http://ollama:11434
+    model: llama3.2:1b
+    timeout: 180
+
+budget:
+  limits:
+    llm_calls: 200
+
+server:
+  host: 0.0.0.0
+  port: 8400                      # published on loopback only
+  read_only: false                # demo.sh approves and asks for reports; every write needs the token
+  token_env: SCOUT_API_TOKEN      # demo.sh writes a random one into .env on first run
+  read_auth: false

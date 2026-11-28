@@ -1,0 +1,8 @@
+# What scout and the simulator write at runtime, and the demo's generated token.
+.env
+scout.db
+scout.db-*
+scout-reports.log*
+tariff.yaml
+.tariff-*
+.voice

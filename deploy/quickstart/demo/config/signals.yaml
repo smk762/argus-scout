@@ -1,0 +1,73 @@
+# Signal rules for the demo: a few of examples/signals.yaml, with short `for:` windows so each scenario lands in
+# a minute or two instead of 10-15. The simulator (../simulator) and node exporter provide every series here;
+# tests/test_demo.py checks that.
+rules:
+  # Shiftable load during the tariff's peak. The simulator writes tariff.yaml with the peak happening now.
+  - name: shift-heavy-loads
+    kind: tariff_shift
+    query: sum by (load) (load_power_watts{shiftable="true"})
+    unit: W
+    min_shiftable: 300
+    duration: 2h
+    periods: [peak]
+    horizon: 8h
+    min_saving: 20
+    for: 1m
+    severity: notice
+    labels_key: [load]
+    recommendation:
+      title: "Run {load} after {starts_at} ({cheaper_period}) instead of now"
+      action: Pause or reschedule {load} until {cheaper_period} starts in {starts_in}.
+      rationale: >-
+        {load} is drawing {value:.0f} W in {period}. {energy} kWh at {rate} rather
+        than {cheaper_rate} saves about {saving} {currency}.
+      impact: low
+      confidence: medium
+
+  # Warning at 80°C (a standing approval may approve it), critical at 90°C (never auto-approved).
+  - name: gpu-hot
+    query: DCGM_FI_DEV_GPU_TEMP
+    op: ">="
+    threshold: 80
+    for: 1m
+    severity: warning
+    escalate:
+      - {threshold: 90, severity: critical}
+    labels_key: [instance, gpu]
+    recommendation:
+      title: "GPU {gpu} on {instance} is running hot ({value:.0f}°C)"
+      action: Check the GPU's fans and airflow, or cap its power limit.
+      rationale: The GPU has been at or above {threshold:.0f}°C for {for}.
+      impact: low
+      confidence: medium
+
+  # Stop the node-exporter container to see it fire. Stop Prometheus instead and every rule is unknown:
+  # nothing is retired as "cleared" while scout can't see.
+  - name: node-exporter-down
+    query: up{job="node"}
+    op: "=="
+    threshold: 0
+    for: 1m
+    severity: warning
+    labels_key: [instance]
+    recommendation:
+      title: "Node exporter on {instance} is down"
+      action: Check the node-exporter container; scout can't see this host's CPU, memory or disks without it.
+      rationale: Prometheus has failed to scrape it for {for}.
+      impact: low
+      confidence: high
+
+  - name: high-load
+    query: >-
+      node_load5 / on (instance) count by (instance) (node_cpu_seconds_total{mode="idle"})
+    op: ">"
+    threshold: 1.5
+    for: 2m
+    severity: warning
+    labels_key: [instance]
+    recommendation:
+      title: "Load on {instance} is {value:.1f}x its CPU count"
+      action: Find what is using the CPU and whether it can wait.
+      rationale: The five-minute load has been above {threshold}x the CPU count for {for}.
+      impact: low
+      confidence: medium

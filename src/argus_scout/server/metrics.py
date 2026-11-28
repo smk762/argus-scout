@@ -19,11 +19,18 @@ Families (all prefixed ``scout_``):
 - ``job_last_success_timestamp_seconds{job_name}`` (gauge): Unix time the job last finished cleanly.
 - ``job_running{job_name}`` (gauge): 1 while the job is running.
 - ``deliveries_total{channel,result}`` (counter): delivery attempts recorded in the store, ``sent`` or ``failed``.
+- ``reports_total{kind,path,fallback_reason}`` (counter): reports in the store, by who wrote them (``llm`` or
+  ``template``) and why the template was used (empty for the model). Pruned reports drop out.
+- ``signal_rule_up{rule}`` (gauge): from the last analysis cycle, 1 if Prometheus answered the rule, 0 if it is
+  unknown (an outage, a failed query, a skipped tariff rule). Unknown is never "clear". Empty until a cycle runs.
+- ``signal_rule_hits{rule}`` (gauge): instances of an answered rule that held past ``for`` in the last cycle.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -36,9 +43,18 @@ from argus_scout.scheduler import Clock, Scheduler, utc_now
 from argus_scout.store.base import Store
 from argus_scout.tariff import TariffFile, current_period, next_period_change
 
+if TYPE_CHECKING:
+    from argus_scout.cycles import AnalysisCycle
+
 log = structlog.get_logger()
 
 PREFIX = "scout"
+_LABEL_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,31}")
+
+
+def _token(value: str) -> str:
+    """A label value read back from stored JSON: a short plain token, else ``other`` (bounded cardinality)."""
+    return value if value == "" or _LABEL_TOKEN.fullmatch(value) else "other"
 
 
 class ScoutCollector(Collector):
@@ -51,6 +67,7 @@ class ScoutCollector(Collector):
         budget: DailyBudget | None = None,
         tariff: TariffFile | None = None,
         scheduler: Scheduler | None = None,
+        analysis: AnalysisCycle | None = None,
         tz: ZoneInfo | None = None,
         clock: Clock = utc_now,
     ) -> None:
@@ -58,11 +75,20 @@ class ScoutCollector(Collector):
         self.budget = budget
         self.tariff = tariff
         self.scheduler = scheduler
+        self.analysis = analysis
         self.tz = tz or ZoneInfo("UTC")
         self.clock = clock
 
     def collect(self) -> Iterator[Metric]:
-        for part in (self._usage, self._tariff, self._store, self._jobs, self._deliveries):
+        for part in (
+            self._usage,
+            self._tariff,
+            self._store,
+            self._jobs,
+            self._deliveries,
+            self._reports,
+            self._signals,
+        ):
             try:
                 yield from part()
             except Exception:  # noqa: BLE001 — one broken source must not blank the whole scrape
@@ -133,6 +159,45 @@ class ScoutCollector(Collector):
             for (channel, ok), n in sorted(self.store.delivery_counts().items()):
                 deliveries.add_metric([channel, "sent" if ok else "failed"], n)
         yield deliveries
+
+    def _reports(self) -> Iterator[Metric]:
+        reports = CounterMetricFamily(
+            f"{PREFIX}_reports",
+            "Reports in the store, by who wrote them and why the template was used.",
+            labels=["kind", "path", "fallback_reason"],
+        )
+        if self.store is not None:
+            totals: dict[tuple[str, str, str], int] = {}
+            for (kind, path, reason), n in self.store.report_counts().items():
+                key = (_token(kind), _token(path), _token(reason))
+                totals[key] = totals.get(key, 0) + n
+            for key, n in sorted(totals.items()):
+                reports.add_metric(list(key), n)
+        yield reports
+
+    def _signals(self) -> Iterator[Metric]:
+        up = GaugeMetricFamily(
+            f"{PREFIX}_signal_rule_up",
+            "1 if the last analysis cycle could evaluate the rule, 0 if it is unknown (never read as clear).",
+            labels=["rule"],
+        )
+        hits = GaugeMetricFamily(
+            f"{PREFIX}_signal_rule_hits",
+            "Instances of a rule holding past its for: in the last cycle.",
+            labels=["rule"],
+        )
+        evaluation = self.analysis.evaluation if self.analysis is not None else None
+        if evaluation is not None:
+            counts = dict.fromkeys(evaluation.evaluated, 0)
+            for hit in evaluation:
+                counts[hit.rule] = counts.get(hit.rule, 0) + 1
+            for rule in sorted(set(counts) | set(evaluation.unknown)):
+                answered = rule in evaluation.evaluated and rule not in evaluation.unknown
+                up.add_metric([rule], int(answered))
+                if answered:
+                    hits.add_metric([rule], counts[rule])
+        yield up
+        yield hits
 
     def _jobs(self) -> Iterator[Metric]:
         runs = CounterMetricFamily(f"{PREFIX}_job_runs", "Scheduler job runs.", labels=["job_name"])

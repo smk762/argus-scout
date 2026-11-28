@@ -1,0 +1,10 @@
+# Heartbeat policy for the demo: no rest or quiet hours, so the demo works at any hour. Otherwise the defaults
+# (see examples/heartbeat.yaml for every key).
+report:
+  min_severity: notice
+voice:
+  min_severity: warning
+rest_hours:
+quiet_hours:
+reannounce:
+sources:

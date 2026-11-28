@@ -265,9 +265,17 @@ Read from the store and the policy files at scrape time, so the values survive r
 | `scout_job_last_success_timestamp_seconds` | gauge | `job_name` | When a job last finished cleanly |
 | `scout_job_running` | gauge | `job_name` | 1 while a job runs |
 | `scout_deliveries_total` | counter | `channel`, `result` | Delivery attempts, `sent` or `failed` |
+| `scout_reports_total` | counter | `kind`, `path`, `fallback_reason` | Reports in the store: `path` is `llm` or `template`, `fallback_reason` why the template was used (empty for the model). Pruned reports drop out |
+| `scout_signal_rule_up` | gauge | `rule` | From the last analysis cycle: 1 if Prometheus answered the rule, 0 if it is unknown (an outage, a failed query, a tariff rule with no usable tariff) |
+| `scout_signal_rule_hits` | gauge | `rule` | Instances of an answered rule holding past its `for:` in the last cycle. An unknown rule has no sample here, never a 0 |
 
 The job label is `job_name`, not `job`: Prometheus sets `job` and `instance` on every series from the scrape
 target, so a label of that name would be renamed `exported_job` on ingest. No family uses either.
+
+The two `scout_signal_rule_*` families are the one exception to "survives restarts": they describe the last
+analysis cycle this process ran, so they are empty from startup until the first cycle (and after a cycle that
+skipped, for no Prometheus or an unreadable rules file). Empty is "don't know", like an unknown rule. A useful
+alert: `scout_signal_rule_up == 0` for longer than a few analysis intervals means scout is blind to that rule.
 
 Jobs are named `status`, `analysis`, `redeliver`, `briefing:<kind>@<HH:MM>` and `poll:<source>`. A useful alert:
 `time() - scout_job_last_success_timestamp_seconds{job_name="analysis"} > 3600`.

@@ -1,0 +1,64 @@
+# The argus-scout demo: the quickstart plus Grafana, a simulated house (power loads, a GPU, an energy meter and a
+# tariff whose peak is now), and a config with fast cycles and writes on behind a generated token.
+#
+#   cd deploy/quickstart
+#   ./demo/demo.sh up                 # this overlay (generates demo/config/.env first)
+#   ./demo/demo.sh run                # the three scenarios, narrated
+#   ./demo/demo.sh up --voice         # add compose.voice.yaml: echo speaks, the argus-mask face moves
+#   open http://127.0.0.1:3000/d/scout-demo   (Grafana, anonymous viewer)
+#
+# By hand: docker compose -f compose.yaml -f compose.demo.yaml up -d --build
+# See demo/README.md. Ports are published on loopback only, as in the quickstart.
+
+services:
+  scout:
+    volumes:
+      - ./demo/config:/config:z
+    depends_on:
+      simulator:
+        condition: service_healthy
+
+  first-brief:
+    volumes:
+      - ./demo/config:/config:z
+
+  prometheus:
+    volumes:
+      - ./demo/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - prometheus-data:/prometheus
+
+  simulator:
+    image: python:3.13.5-slim
+    restart: unless-stopped
+    command: ["python", "/app/simulator.py", "--port", "9101", "--tariff", "/config/tariff.yaml"]
+    user: ${SCOUT_USER:-0:0}
+    ports:
+      - "${SIMULATOR_PUBLISH:-127.0.0.1:9101}:9101"   # demo.sh switches scenarios here
+    volumes:
+      - ./demo/simulator:/app:ro,z
+      - ./demo/config:/config:z                     # writes tariff.yaml, which scout reloads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/scout-demo.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "${GRAFANA_PUBLISH:-127.0.0.1:3000}:3000"
+    volumes:
+      - ./demo/grafana/provisioning:/etc/grafana/provisioning:ro,z
+      - ./demo/grafana/dashboards:/var/lib/grafana/dashboards:ro,z
+    depends_on:
+      prometheus:
+        condition: service_healthy

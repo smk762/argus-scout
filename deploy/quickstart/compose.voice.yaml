@@ -1,0 +1,81 @@
+# Speech for the demo: argus-echo (XTTS-v2, a built-in speaker, on the CPU) synthesises each report once and
+# scout pushes it to an argus-mask face, lip-synced in any browser. Layer it on the demo:
+#
+#   ./demo/demo.sh up --voice
+#   docker compose -f compose.yaml -f compose.demo.yaml -f compose.voice.yaml up -d --build   # by hand
+#   open http://127.0.0.1:8109/?face=stock-01 and click once to allow sound
+#
+# With no screen watching the face, mask answers "not ready" and scout skips it; the text channel still gets
+# every report. XTTS-v2's weights are under the Coqui Public Model Licence (non-commercial use only); the echo
+# image accepts it at build time. On an NVIDIA host set XTTS_DEVICE=cuda:0 and add a GPU reservation.
+
+services:
+  scout:
+    environment:
+      SCOUT_CONFIG: /config/scout.voice.yaml
+      ARGUS_XTTS_URL: http://xtts:8031     # suite-wide peer URLs, read by scout.voice.yaml
+      ARGUS_MASK_URL: http://mask:8109
+    depends_on:
+      xtts:
+        condition: service_started
+      mask:
+        condition: service_healthy
+
+  first-brief:
+    environment:
+      ARGUS_XTTS_URL: http://xtts:8031
+      ARGUS_MASK_URL: http://mask:8109
+    command:
+      - sh
+      - -c
+      - >-
+        argus-scout brief --config /config/scout.voice.yaml --kind morning &&
+        argus-scout deliver --config /config/scout.voice.yaml --latest --kind morning
+
+  xtts:
+    image: ghcr.io/smk762/argus-echo-xtts:0.3.0
+    restart: unless-stopped
+    labels:
+      argus.peer: xtts
+      argus.service: argus-echo
+      argus.health: /health
+      argus.port: "8031"
+    environment:
+      ARGUS_PEER: xtts
+      XTTS_DEVICE: ${XTTS_DEVICE:-cpu}
+      XTTS_PRELOAD: "1"                    # load at startup, not on the first report
+      XTTS_KEEP_ALIVE_CPU: "0"             # stay loaded for the whole demo
+
+  # One-shot: mask's CC0 stock head (10 MB, checked against its lock file) into the face volume.
+  mask-head:
+    image: ghcr.io/smk762/argus-mask:0.4.0
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - test -f /assets/stock-01/manifest.json || python scripts/fetch_stock_head.py --id stock-01 --assets-dir /assets
+    volumes:
+      - mask-assets:/assets
+
+  mask:
+    image: ghcr.io/smk762/argus-mask:0.4.0
+    restart: unless-stopped
+    labels:
+      argus.peer: mask
+      argus.service: argus-mask
+      argus.health: /health
+      argus.port: "8109"
+    environment:
+      ARGUS_PEER: mask
+      ARGUS_MASK_DRIVER: energy            # mouth from loudness, on the CPU; a2f needs an NVIDIA GPU
+      ARGUS_MASK_TRUSTED_HOSTS: mask       # scout reaches it as http://mask:8109
+    ports:
+      - "${MASK_PUBLISH:-127.0.0.1:8109}:8109"
+    volumes:
+      - mask-assets:/assets:ro
+    depends_on:
+      mask-head:
+        condition: service_completed_successfully
+
+volumes:
+  mask-assets:
