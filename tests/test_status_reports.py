@@ -363,3 +363,23 @@ async def test_an_item_held_back_by_quiet_hours_is_reported_after_them(store, wr
     clock.at = datetime(2026, 6, 2, 8, 0, tzinfo=UTC)
     morning = (await cycle()).report
     assert morning is not None and "w" in morning.meta["facts"]["events"]
+
+
+# --- report.max_items never hides news ----------------------------------------------------------------------
+
+
+async def test_a_new_event_is_reported_past_announced_groups_that_fill_max_items(store, tmp_path):
+    policy = tmp_path / "heartbeat.yaml"
+    policy.write_text("report:\n  max_items: 2\n")
+    clock = Clock()
+    inbox = Inbox(store, clock=clock)
+    inbox.ingest(ev("e1", "critical", "UPS on battery"))
+    inbox.ingest(ev("e2", "critical", "Router down"))
+    cycle = status_cycle(store, PolicyFile(policy), clock)
+    assert (await cycle()).report is not None  # both critical groups announced
+    clock.advance(minutes=1)
+    inbox.ingest(ev("e3", "warning", "Disk 90% full"))
+    result = await cycle()
+    assert result.report is not None, "the new warning was cut off by the announced criticals"
+    assert "Disk 90% full" in result.report.meta["title"] or "Disk 90% full" in result.report.text
+    assert all(e.last_broadcast_at for g in Inbox(store, clock=clock).open_grouped() for e in g.events)

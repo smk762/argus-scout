@@ -153,11 +153,21 @@ class StatusCycle:
         self.last = result
         return result
 
-    def reportable_groups(self, result: StatusResult, policy: HeartbeatPolicy) -> list[EventGroup]:
-        """The groups the report gate let through, most severe first, at most ``report.max_items``."""
+    def reportable_groups(self, result: StatusResult, policy: HeartbeatPolicy, now: datetime) -> list[EventGroup]:
+        """The groups the report gate let through, most severe first, at most ``report.max_items``.
+
+        News (:meth:`is_news`) takes the slots first: otherwise enough open, already-announced groups of a higher
+        severity would cut a new one off every tick, and it would never be reported or marked announced."""
         groups = [g for g, d in zip(result.groups, result.decisions, strict=True) if d.report]
-        groups.sort(key=lambda g: (-rank(g.latest.severity), -g.latest.generated_at.timestamp()))
-        return groups[: policy.report_max_items] if policy.report_max_items > 0 else groups
+
+        def by_severity(g: EventGroup) -> tuple[int, float]:
+            return -rank(g.latest.severity), -g.latest.generated_at.timestamp()
+
+        if policy.report_max_items > 0 and len(groups) > policy.report_max_items:
+            groups.sort(key=lambda g: (not self.is_news(g, policy, now), *by_severity(g)))
+            groups = groups[: policy.report_max_items]
+        groups.sort(key=by_severity)
+        return groups
 
     def is_news(self, group: EventGroup, policy: HeartbeatPolicy, now: datetime) -> bool:
         """Whether ``group`` is worth a status report on its own account.
@@ -197,7 +207,7 @@ class StatusCycle:
 
     async def _report(self, result: StatusResult, policy: HeartbeatPolicy, now: datetime) -> Report | None:
         assert self.narrator is not None
-        groups = self.reportable_groups(result, policy)
+        groups = self.reportable_groups(result, policy, now)
         if not self.report_due(groups, policy, now):
             return None
         decisions = {g.fingerprint: d for g, d in zip(result.groups, result.decisions, strict=True)}

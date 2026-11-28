@@ -375,6 +375,48 @@ async def test_snapcast_reverts_a_setup_call_that_failed(tmp_path):
     assert snap.calls[-1][1]["volume"] == {"muted": True, "percent": 30}
 
 
+class StatefulRpc:
+    """A snapserver that keeps the state its calls set, so a test can see what a run of plays leaves behind."""
+
+    def __init__(self):
+        self.stream, self.muted, self.percent = "default", True, 30
+        self.calls: list[str] = []
+
+    async def call(self, method, params=None):
+        self.calls.append(method)
+        await asyncio.sleep(0)  # a real round trip yields to the loop
+        if method == "Server.GetStatus":
+            status = server_status(stream=self.stream, percent=self.percent)
+            status["server"]["groups"][0]["clients"][0]["config"]["volume"]["muted"] = self.muted
+            return status
+        if method == "Group.SetStream":
+            self.stream = params["stream_id"]
+        elif method == "Client.SetVolume":
+            self.muted, self.percent = params["volume"]["muted"], params["volume"]["percent"]
+        return {}
+
+
+async def test_overlapping_snapcast_plays_queue_and_leave_the_original_settings(tmp_path, monkeypatch):
+    writers = []
+
+    def fake_play(cfg, data, duration, stop=None):
+        writers.append(1)
+        assert len(writers) == 1, "two plays wrote into the FIFO at once"
+        time.sleep(0.05)
+        writers.pop()
+        return time.monotonic()
+
+    monkeypatch.setattr(snapcast_module, "play_into_fifo", fake_play)
+    cfg = snap_cfg(tmp_path / "x.fifo", control="tcp://snap:1705", stream="scout", groups=["g1"], volume=70)
+    channel = SnapcastChannel(cfg)
+    channel.rpc = rpc = StatefulRpc()
+    channel.config = cfg.model_copy(update={"restore_delay": 0})
+    results = await asyncio.gather(channel.play(speech(), message()), channel.play(speech(), message()))
+    assert all(r.ok for r in results)
+    assert (rpc.stream, rpc.muted, rpc.percent) == ("default", True, 30)  # nothing left in the temporary state
+    assert rpc.calls.count("Server.GetStatus") == 2 and rpc.calls.index("Server.GetStatus", 1) == len(rpc.calls) // 2
+
+
 async def test_snapcast_rpc_errors_and_timeouts_are_bounded():
     async with FakeSnapserver(fail={"Server.GetStatus"}) as snap:
         with pytest.raises(ChannelError, match="Server.GetStatus.*nope"):

@@ -870,7 +870,7 @@ class ScoutConfig(_Section):
 def parse_env_file(path: Path) -> dict[str, str]:
     """``KEY=value`` lines from a ``.env`` file: ``#`` comments, optional ``export``, optional quotes."""
     values: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -947,9 +947,11 @@ def load_config(path: str | Path, *, load_env: bool = True) -> ScoutConfig:
     """
     path = Path(path).expanduser()
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")  # never the host locale's: one file reads the same everywhere
     except OSError as exc:
         raise ConfigError(f"{path}: cannot read config ({exc.strerror or exc})") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: cannot decode config as UTF-8 ({exc.reason} at byte {exc.start})") from exc
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
