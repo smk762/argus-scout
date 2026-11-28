@@ -464,3 +464,37 @@ def test_resolved_column_migration_keeps_open_events_open(tmp_path):
         assert s.events_by_fingerprint(event("a").fingerprint) == []
         assert s.prune(T0 + timedelta(seconds=1))["events"] == 2
         assert s.get_entry("nas", "a") is None and s.get_entry("nas", "b") is not None
+
+
+class _FailingCommit:
+    """The store's connection, except that the next ``COMMIT`` fails like a full disk would."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn, self.fail_commit = conn, True
+
+    def execute(self, sql, *args):
+        if sql == "COMMIT" and self.fail_commit:
+            self.fail_commit = False
+            raise sqlite3.OperationalError("database or disk is full")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_a_failed_commit_is_rolled_back_and_the_next_write_works(db_path):
+    with SqliteStore(db_path) as store:
+        real = store._conn
+        store._conn = _FailingCommit(real)
+        with pytest.raises(sqlite3.OperationalError, match="disk is full"):
+            store.consume_usage("2026-06-01", "llm", 10)
+        assert not real.in_transaction  # not left holding the write lock
+        store._conn = real
+        assert store.consume_usage("2026-06-01", "llm", 10) == (True, 1)  # the failed charge never landed
+
+
+def test_a_rollback_sqlite_already_did_never_replaces_the_original_error(store):
+    with pytest.raises(ValueError, match="the real error"), store.transaction():
+        store._conn.execute("ROLLBACK")  # as SQLite does by itself on SQLITE_FULL or SQLITE_IOERR
+        raise ValueError("the real error")
+    assert store.consume_usage("2026-06-01", "llm", 10) == (True, 1)

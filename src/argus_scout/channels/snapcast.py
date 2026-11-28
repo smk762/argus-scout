@@ -333,6 +333,9 @@ class SnapcastChannel:
         self.rpc = (
             SnapcastRpc(config.control, timeout=config.control_timeout, fetcher=fetcher) if config.control else None
         )
+        # One playback at a time: a second play's GetStatus would record the first's changes as the originals and
+        # put them back last, and two writers into one FIFO interleave their PCM.
+        self._playing = asyncio.Lock()
 
     async def deliver(self, message: Delivery) -> DeliveryResult:
         return DeliveryResult(ok=False, error="snapcast is a voice channel: it plays speech, not text")
@@ -349,6 +352,10 @@ class SnapcastChannel:
         return errors
 
     async def play(self, audio: SpeechAudio, message: Delivery) -> DeliveryResult:
+        async with self._playing:
+            return await self._play(audio)
+
+    async def _play(self, audio: SpeechAudio) -> DeliveryResult:
         cfg = self.config
         data = encode(decode(audio), self.format) + silence(self.format, cfg.tail_ms)
         duration = len(data) / self.format.bytes_per_second

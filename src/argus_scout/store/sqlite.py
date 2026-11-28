@@ -294,12 +294,18 @@ class SqliteStore:
             self._tx_depth = 1
             try:
                 yield self._conn
+                self._conn.execute("COMMIT")  # inside the try: a failed commit is rolled back, never left open
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                # SQLite may already have rolled back on its own (SQLITE_FULL, SQLITE_IOERR, an interrupt); a second
+                # ROLLBACK would raise "no transaction is active" in place of the error that caused it.
+                if self._conn.in_transaction:
+                    try:
+                        self._conn.execute("ROLLBACK")
+                    except sqlite3.Error as exc:
+                        log.warning("store.rollback_failed", error=str(exc))
                 raise
             finally:
                 self._tx_depth = 0
-            self._conn.execute("COMMIT")
 
     @contextmanager
     def transaction(self) -> Iterator[None]:

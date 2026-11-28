@@ -136,6 +136,13 @@ def test_invalid_config_raises(write_file, text, expected):
         load_config(path, load_env=False)
 
 
+def test_an_undecodable_config_is_a_config_error(tmp_path):
+    path = tmp_path / "scout.yaml"
+    path.write_bytes(b"server:\n  port: 8080\n# caf\xe9 in latin-1\n")
+    with pytest.raises(ConfigError, match="cannot decode config as UTF-8"):
+        load_config(path)
+
+
 def test_missing_config_raises(tmp_path):
     with pytest.raises(ConfigError, match="cannot read config"):
         load_config(tmp_path / "nope.yaml")
