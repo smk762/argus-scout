@@ -14,7 +14,7 @@ services:
     depends_on:
       - blackbox
 
-  blackbox:
+  blackbox:  # nosemgrep: service-peer-label  third-party image (Prometheus blackbox exporter)
     image: prom/blackbox-exporter:v0.25.0
     restart: unless-stopped
     command:
