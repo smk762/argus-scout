@@ -39,7 +39,7 @@ services:
       - ./demo/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
       - prometheus-data:/prometheus
 
-  simulator:
+  simulator:  # nosemgrep: service-peer-label  demo fixture: simulates the house scout watches; not a suite service
     image: python:3.13.5-slim
     restart: unless-stopped
     command: ["python", "/app/simulator.py", "--port", "9101", "--tariff", "/config/tariff.yaml"]
@@ -55,7 +55,7 @@ services:
       timeout: 3s
       retries: 6
 
-  grafana:
+  grafana:  # nosemgrep: service-peer-label  third-party image (Grafana)
     image: grafana/grafana:12.1.0
     restart: unless-stopped
     environment:
