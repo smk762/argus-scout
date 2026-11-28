@@ -28,6 +28,27 @@ DASHBOARD = DEMO / "grafana" / "dashboards" / "scout-demo.json"
 VOICE_ENV = {"ARGUS_XTTS_URL": "http://xtts:8031", "ARGUS_MASK_URL": "http://mask:8109"}
 
 
+class ComposeLoader(yaml.SafeLoader):
+    """PyYAML plus compose's merge tags (``!override``, ``!reset``), read as the plain value they carry."""
+
+
+for _tag in ("!override", "!reset"):
+    ComposeLoader.add_constructor(
+        _tag,
+        lambda loader, node: (
+            loader.construct_mapping(node)
+            if isinstance(node, yaml.MappingNode)
+            else loader.construct_sequence(node)
+            if isinstance(node, yaml.SequenceNode)
+            else loader.construct_scalar(node)
+        ),
+    )
+
+
+def compose_file(name: str) -> dict:
+    return yaml.load((QUICKSTART / name).read_text(), Loader=ComposeLoader)  # noqa: S506 — SafeLoader subclass
+
+
 def load_simulator():
     spec = importlib.util.spec_from_file_location("demo_simulator", DEMO / "simulator" / "simulator.py")
     assert spec and spec.loader
@@ -71,6 +92,20 @@ def test_voice_config_is_the_demo_config_plus_speech(monkeypatch):
     assert {k: v for k, v in voice.items() if k != "channels"} == {k: v for k, v in base.items() if k != "channels"}
     loaded = load_config(CONFIG / "scout.voice.yaml", load_env=False)
     assert str(loaded.services.echo.url).startswith("http://xtts:8031")
+    assert base["services"]["llm"]["backend"] == "anthropic" and "key" not in str(base["services"]["llm"]).replace(
+        "api_key_env", ""
+    )
+
+
+def test_demo_runs_no_local_model_or_voice_and_stores_no_key():
+    """Claude over the API, echo and mask by URL: the overlays start no model or speech container, and the API key
+    is passed through from the host environment, never written into a file."""
+    demo, voice = compose_file("compose.demo.yaml")["services"], compose_file("compose.voice.yaml")["services"]
+    assert demo["ollama"]["profiles"] == ["ollama"] and demo["ollama-pull"]["profiles"] == ["ollama"]
+    assert set(voice) == {"scout", "first-brief"}, "voice uses the operator's echo and mask by URL"
+    assert demo["scout"]["environment"]["ANTHROPIC_API_KEY"] == "${ANTHROPIC_API_KEY:-}"
+    assert "ollama" not in demo["scout"]["depends_on"]
+    assert "ANTHROPIC_API_KEY" not in (DEMO / "demo.sh").read_text().split("ensure_env() {")[1].split("}")[0]
 
 
 def test_demo_config_is_loopback_writes_behind_a_token():
@@ -79,7 +114,7 @@ def test_demo_config_is_loopback_writes_behind_a_token():
     compose = yaml.safe_load((QUICKSTART / "compose.yaml").read_text())
     assert compose["services"]["scout"]["ports"] == ["${SCOUT_PUBLISH:-127.0.0.1:8400}:8400"]
     for name in ("compose.demo.yaml", "compose.voice.yaml"):
-        for service in yaml.safe_load((QUICKSTART / name).read_text())["services"].values():
+        for service in compose_file(name)["services"].values():
             for port in service.get("ports", []):
                 assert ":-127.0.0.1:" in port, f"{name}: {port} must default to loopback"
 
@@ -186,7 +221,7 @@ def test_demo_approvals_meet_a_guardrail():
 
 def test_images_are_pinned():
     for name in ("compose.demo.yaml", "compose.voice.yaml"):
-        for service, spec in yaml.safe_load((QUICKSTART / name).read_text())["services"].items():
+        for service, spec in compose_file(name)["services"].items():
             if "image" in spec:
                 assert re.search(r":\d+\.\d+(\.\d+)?(-[a-z0-9.]+)?$", spec["image"]), (
                     f"{name}: {service} {spec['image']}"

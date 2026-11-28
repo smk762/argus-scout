@@ -76,7 +76,9 @@ scenario() {
 
 report() {
   note "asking scout for a report (the model if it can, the template if it can't) ..."
-  api POST /api/reports "{\"kind\": \"$REPORT_KIND\", \"deliver\": true}" | python3 -c '
+  local no_llm=false
+  [[ -n "${NO_LLM:-}" ]] && no_llm=true
+  api POST /api/reports "{\"kind\": \"$REPORT_KIND\", \"deliver\": true, \"no_llm\": $no_llm}" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 report = r.get("report", r)
@@ -100,13 +102,24 @@ ensure_env() {
 
 cmd_up() {
   ensure_env
-  if [[ "${1:-}" == "--voice" ]]; then touch "$VOICE_MARK"; else rm -f "$VOICE_MARK"; fi
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    note "ANTHROPIC_API_KEY is not set: every report will come from the template (export it and run up again)"
+  fi
+  if [[ "${1:-}" == "--voice" ]]; then
+    if [[ -z "${ARGUS_XTTS_URL:-}" || -z "${ARGUS_MASK_URL:-}" ]]; then
+      echo "--voice needs ARGUS_XTTS_URL (an argus-echo XTTS engine) and ARGUS_MASK_URL (an argus-mask server)" >&2
+      exit 2
+    fi
+    touch "$VOICE_MARK"
+  else
+    rm -f "$VOICE_MARK"
+  fi
   dc up -d --build
   say "Up"
   note "Grafana:   http://${GRAFANA_PUBLISH:-127.0.0.1:3000}/d/scout-demo"
   note "Scout:     $SCOUT/wall"
   if [[ -f "$VOICE_MARK" ]]; then
-    note "The face:  http://${MASK_PUBLISH:-127.0.0.1:8109}/?face=stock-01   (click once to allow sound)"
+    note "The face:  ${ARGUS_MASK_URL%/}/?face=stock-01   (click once to allow sound)"
   fi
   note "Then:      demo/demo.sh run"
 }
@@ -137,10 +150,9 @@ cmd_run() {
   scenario normal
 
   say "3. Failure: blind is not the same as clear"
-  note "Prometheus stops, and Ollama with it. Grafana reads the same Prometheus, so its panels go blank: the"
-  note "witness is scout's own /metrics. Every rule is unknown (0), never clear, and scout retires nothing"
-  note "while it can't see. The report comes from the deterministic template, with the reason recorded."
-  dc stop prometheus ollama >/dev/null
+  note "Prometheus stops. Grafana reads the same Prometheus, so its panels go blank: the witness is scout's"
+  note "own /metrics. Every rule is unknown (0), never clear, and scout retires nothing while it can't see."
+  dc stop prometheus >/dev/null
   sleep 45
   note "scout's /metrics, Prometheus down (1 answered, 0 unknown):"
   curl -fsS "$SCOUT/metrics" | grep '^scout_signal_rule_up' | sed 's/^/     /'
@@ -150,16 +162,18 @@ import json, sys
 for r in json.load(sys.stdin)["recommendations"]:
     if r["status"] in ("proposed", "approved"):
         print("     [" + r["severity"] + "] " + r["title"] + " (" + r["status"] + ")")'
-  report
-  dc start prometheus ollama >/dev/null
-  note "Prometheus and Ollama are back. The gap in Grafana marks the outage, and the template-fallback"
-  note "annotation marks the report scout wrote without its model."
+  note "The model can't be reached either? The report comes from the deterministic template, with the"
+  note "reason recorded. Here, without the model on purpose:"
+  NO_LLM=1 report
+  dc start prometheus >/dev/null
+  note "Prometheus is back. The gap in Grafana marks the outage, and the template-fallback annotation marks"
+  note "the report scout wrote without its model."
   say "Done. demo/demo.sh reset to go again."
 }
 
 cmd_reset() {
   scenario normal
-  dc start prometheus ollama node-exporter >/dev/null
+  dc start prometheus node-exporter >/dev/null
 }
 
 cmd_down() {

@@ -1,6 +1,5 @@
-# The demo config with speech (compose.voice.yaml): scout.yaml plus argus-echo (XTTS, a built-in speaker, not a
-# clone) and the argus-mask face. The URLs come from the suite-wide ARGUS_XTTS_URL and ARGUS_MASK_URL, which
-# compose.voice.yaml sets. tests/test_demo.py checks this file is scout.yaml plus exactly these parts.
+# The demo config with speech (compose.voice.yaml): scout.yaml plus your argus-echo (XTTS, a built-in speaker,
+# not a clone) and an argus-mask face. The URLs come from the suite-wide ARGUS_XTTS_URL and ARGUS_MASK_URL. tests/test_demo.py checks this file is scout.yaml plus exactly these parts.
 files:
   heartbeat: heartbeat.yaml
   approvals: approvals.yaml
@@ -22,7 +21,7 @@ channels:
     file: scout-reports.log
     rotate_bytes: 1048576
     keep: 3
-  # The face speaks every report. Open http://127.0.0.1:8109/?face=stock-01 and click once to allow sound:
+  # The face speaks every report. Open <ARGUS_MASK_URL>/?face=stock-01 and click once to allow sound:
   # with no screen watching, mask answers "not ready" and scout skips it (text still goes out).
   - kind: mask
     name: face
@@ -38,20 +37,24 @@ schedule:
 services:
   prometheus_url: http://prometheus:9090
   llm:
-    backend: ollama
-    base_url: http://ollama:11434
-    model: llama3.2:1b
-    timeout: 180
+    backend: anthropic            # the Claude Messages API
+    base_url: https://api.anthropic.com/v1
+    model: claude-opus-5-5        # or claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY  # passed through from the host by compose.demo.yaml, never stored
+    effort: low                   # a short briefing needs little thinking
+    max_tokens: 8000              # thinking counts against this; the briefing itself is a few hundred
+    context_tokens: 200000
+    timeout: 120
   echo:
     peer: xtts                    # the URL is ARGUS_XTTS_URL
     speaker: Aaron Dreschner      # an XTTS-v2 built-in studio speaker
     language: en
-    timeout: 240                  # XTTS on a CPU is slower than real time
-    load_timeout: 300
+    timeout: 120
+    load_timeout: 300             # echo loads its model on first use
 
 budget:
   limits:
-    llm_calls: 200
+    llm_calls: 40                 # a paid API: a full demo run makes about four calls
 
 server:
   host: 0.0.0.0

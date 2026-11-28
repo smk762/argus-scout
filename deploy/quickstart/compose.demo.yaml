@@ -1,10 +1,11 @@
 # The argus-scout demo: the quickstart plus Grafana, a simulated house (power loads, a GPU, an energy meter and a
-# tariff whose peak is now), and a config with fast cycles and writes on behind a generated token.
+# tariff whose peak is now), and a config with fast cycles and writes on behind a generated token. Reports are
+# written by Claude through the Messages API: export ANTHROPIC_API_KEY first (it is passed through, never stored).
 #
 #   cd deploy/quickstart
 #   ./demo/demo.sh up                 # this overlay (generates demo/config/.env first)
 #   ./demo/demo.sh run                # the three scenarios, narrated
-#   ./demo/demo.sh up --voice         # add compose.voice.yaml: echo speaks, the argus-mask face moves
+#   ./demo/demo.sh up --voice         # add compose.voice.yaml: your echo speaks, your argus-mask face moves
 #   open http://127.0.0.1:3000/d/scout-demo   (Grafana, anonymous viewer)
 #
 # By hand: docker compose -f compose.yaml -f compose.demo.yaml up -d --build
@@ -14,13 +15,26 @@ services:
   scout:
     volumes:
       - ./demo/config:/config:z
-    depends_on:
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}   # the demo narrates with Claude; unset, reports use the template
+    depends_on: !override
+      prometheus:
+        condition: service_healthy
       simulator:
         condition: service_healthy
 
   first-brief:
     volumes:
       - ./demo/config:/config:z
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+  # The demo's model is Claude over the API: the quickstart's Ollama stays off unless asked for
+  # (COMPOSE_PROFILES=ollama, with services.llm in demo/config/scout.yaml pointed back at it).
+  ollama:
+    profiles: [ollama]
+  ollama-pull:
+    profiles: [ollama]
 
   prometheus:
     volumes:

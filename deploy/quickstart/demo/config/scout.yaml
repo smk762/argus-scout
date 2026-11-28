@@ -32,14 +32,18 @@ schedule:
 services:
   prometheus_url: http://prometheus:9090
   llm:
-    backend: ollama
-    base_url: http://ollama:11434
-    model: llama3.2:1b
-    timeout: 180
+    backend: anthropic            # the Claude Messages API
+    base_url: https://api.anthropic.com/v1
+    model: claude-opus-5-5        # or claude-sonnet-5-5
+    api_key_env: ANTHROPIC_API_KEY  # passed through from the host by compose.demo.yaml, never stored
+    effort: low                   # a short briefing needs little thinking
+    max_tokens: 8000              # thinking counts against this; the briefing itself is a few hundred
+    context_tokens: 200000
+    timeout: 120
 
 budget:
   limits:
-    llm_calls: 200
+    llm_calls: 40                 # a paid API: a full demo run makes about four calls
 
 server:
   host: 0.0.0.0

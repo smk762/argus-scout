@@ -2,32 +2,44 @@
 
 Three scenarios in about five minutes, shown side by side: Grafana with what Prometheus sees and what scout
 concluded, scout's reports in a terminal and, with voice on, the same reports spoken by an argus-mask face.
-Everything runs on one machine on loopback ports. Nothing needs installing on other hosts.
+The stack runs on one machine on loopback ports. Reports are written by Claude through the Messages API, and
+speech goes through the argus-echo and argus-mask services you already run.
 
 The demo sits on top of the quickstart in `deploy/quickstart` as two compose overlays:
 
 | File | Adds |
 |---|---|
-| `compose.demo.yaml` | Grafana with a provisioned dashboard, a simulated house (`demo/simulator`), and scout reading `demo/config` with fast cycles and writes behind a generated token |
-| `compose.voice.yaml` | argus-echo (XTTS-v2, a built-in speaker, on the CPU) and argus-mask with its CC0 stock head. Scout synthesises each report once and the face speaks it |
+| `compose.demo.yaml` | Grafana with a provisioned dashboard, a simulated house (`demo/simulator`), and scout reading `demo/config` with fast cycles, writes behind a generated token, and Claude as its model. The quickstart's Ollama stays off |
+| `compose.voice.yaml` | No containers: scout speaks through your argus-echo XTTS engine (a built-in speaker, not a clone) and your argus-mask face, at `ARGUS_XTTS_URL` and `ARGUS_MASK_URL` |
 
 ## Run it
 
 ```bash
 cd deploy/quickstart
-./demo/demo.sh up            # or: ./demo/demo.sh up --voice
+export ANTHROPIC_API_KEY=...                     # passed through to scout, never written to a file
+./demo/demo.sh up
 ./demo/demo.sh run
+
+# With speech, through services you already run:
+export ARGUS_XTTS_URL=http://<ECHO_HOST>:8141    # an argus-echo XTTS engine
+export ARGUS_MASK_URL=http://<MASK_HOST>:8109    # an argus-mask server
+./demo/demo.sh up --voice
 ```
+
+The model is `claude-opus-5-5` at `effort: low`; change `services.llm.model` in `demo/config/scout.yaml` (and
+`scout.voice.yaml`) to `claude-sonnet-5-5` for a cheaper run. A full run makes about four model calls, and the
+daily cap is 40. Without a key every report comes from the template, which says so.
 
 Then open:
 
 - Grafana: `http://127.0.0.1:3000/d/scout-demo` (anonymous viewer)
 - Scout's reports: `http://127.0.0.1:8400/wall`, or `tail -f demo/config/scout-reports.log`
-- With voice, the face: `http://127.0.0.1:8109/?face=stock-01`. Click once to allow sound. If no screen is
-  watching the face, mask answers "not ready" and scout skips it. The text log still gets every report.
+- With voice, the face: `<ARGUS_MASK_URL>/?face=stock-01` on any screen. Click once to allow sound. If no screen
+  is watching the face, mask answers "not ready" and scout skips it. The text log still gets every report. For a
+  recording you publish, keep to a cleared face (stock or synthetic), never a personal one.
 
 If a port is taken, move it: `SCOUT_PUBLISH`, `PROMETHEUS_PUBLISH`, `GRAFANA_PUBLISH`, `SIMULATOR_PUBLISH`,
-`MASK_PUBLISH` (for example `SCOUT_PUBLISH=127.0.0.1:18400`), and point the script at it with `SCOUT_URL` and
+(for example `SCOUT_PUBLISH=127.0.0.1:18400`), and point the script at it with `SCOUT_URL` and
 `SIMULATOR_URL`.
 
 `./demo/demo.sh reset` returns to the normal scenario. `./demo/demo.sh down` deletes the volumes and the demo's
@@ -46,10 +58,10 @@ rule `demo-gpu-thermal` approves it. At 93°C the signal escalates to critical. 
 critical signal, so scout withdraws the approval and raises a fresh proposal for a person. The script then
 approves it as that person, at the revision they read.
 
-**3. Blind is not clear.** Prometheus and Ollama stop. Grafana reads the same Prometheus, so its panels go
-blank and scout's own `/metrics` is the witness. The script prints `scout_signal_rule_up` at 0 for every rule:
-unknown, never clear. Scout retires nothing as cleared while it can't see. The report comes from the
-deterministic template, with the reason recorded. The state timeline turns grey whenever Prometheus is up but
+**3. Blind is not clear.** Prometheus stops. Grafana reads the same Prometheus, so its panels go blank and
+scout's own `/metrics` is the witness. The script prints `scout_signal_rule_up` at 0 for every rule: unknown,
+never clear. Scout retires nothing as cleared while it can't see. It then asks for a report without the model,
+which comes from the deterministic template with the reason recorded, as it would if the API were unreachable. The state timeline turns grey whenever Prometheus is up but
 a rule still can't be evaluated, such as a tariff rule with no usable tariff.
 
 The timeline annotations show each scenario change, each change in a recommendation's status, each standing
@@ -85,5 +97,5 @@ Scout itself stays where it is. It only queries Prometheus.
 
 ## Licences
 
-XTTS-v2's weights are under the Coqui Public Model Licence (non-commercial use only), which the echo image
-accepts at build time. Mask's `stock-01` head is CC0.
+XTTS-v2's weights, used by argus-echo's XTTS engine, are under the Coqui Public Model Licence (non-commercial use
+only). Mask's `stock-01` head is CC0.

@@ -184,8 +184,8 @@ Voice (argus-echo, Snapcast) is not part of the quickstart; see `docs/channels.m
 ## The demo: Grafana, a simulated house and a talking face
 
 `compose.demo.yaml` adds Grafana with a provisioned dashboard and a simulated house (power loads, a GPU, an
-energy meter, and a tariff whose peak is now). `compose.voice.yaml` adds argus-echo and an argus-mask face that
-speaks each report. `./demo/demo.sh up [--voice]` then `./demo/demo.sh run` plays three scenarios: tariff-aware
+energy meter, and a tariff whose peak is now), with Claude writing the reports. `compose.voice.yaml` speaks each
+report through the argus-echo and argus-mask services you already run. `./demo/demo.sh up [--voice]` then `./demo/demo.sh run` plays three scenarios: tariff-aware
 shifting, a standing approval meeting a guardrail, and a Prometheus outage that scout reads as unknown, never as
 clear. See [demo/README.md](demo/README.md).
 

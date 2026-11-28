@@ -574,13 +574,16 @@ class LLMConfig(_Section):
 
     ``ollama`` talks to Ollama's ``/api/chat``. ``openai`` talks to any OpenAI-compatible
     ``/chat/completions`` (a local server, or a hosted provider with ``api_key_env``); its ``base_url``
-    includes the API prefix, e.g. ``http://llm:8000/v1``.
+    includes the API prefix, e.g. ``http://llm:8000/v1``. ``anthropic`` talks to the Claude Messages API
+    (``base_url: https://api.anthropic.com/v1``, ``api_key_env`` required, ``effort`` optional).
     """
 
-    backend: Literal["ollama", "openai"]
-    """``ollama`` (Ollama's ``/api/chat``) or ``openai`` (any OpenAI-compatible ``/chat/completions``)."""
+    backend: Literal["ollama", "openai", "anthropic"]
+    """``ollama`` (Ollama's ``/api/chat``), ``openai`` (any OpenAI-compatible ``/chat/completions``) or ``anthropic``
+    (the Claude Messages API)."""
     base_url: HttpUrl
-    """The model server. For ``openai``, include the API prefix: ``http://llm:8000/v1``."""
+    """The model server. For ``openai``, include the API prefix: ``http://llm:8000/v1``. For ``anthropic``,
+    ``https://api.anthropic.com/v1``."""
     model: Name
     """The model name the server knows it by."""
     api_key_env: EnvName | None = None
@@ -603,6 +606,9 @@ class LLMConfig(_Section):
     """``openai`` only: extra request fields, passed through as they are, for a server that needs one, e.g.
     ``chat_template_kwargs: {enable_thinking: false}`` (vLLM, SGLang) or ``reasoning_effort: low``. Fields scout
     sets itself (``model``, ``messages``, ``max_tokens``, ``stream``, ``temperature``) can't be replaced."""
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    """``anthropic`` only: how much the model thinks before answering (``output_config.effort``). Unset: the model's
+    default. Thinking counts against ``max_tokens``, so leave room for it; ``low`` suits a short briefing."""
     gpu: LLMGpuConfig | None = None
     """Hold a GPU lease around each model call. Leave unset for a hosted backend."""
 
@@ -628,6 +634,20 @@ class LLMConfig(_Section):
         reserved = sorted(set(self.extra_body) & LLM_REQUEST_FIELDS)
         if reserved:
             raise ValueError(f"extra_body can't set {', '.join(reserved)}: scout sets it")
+        return self
+
+    @model_validator(mode="after")
+    def _anthropic(self) -> LLMConfig:
+        if self.backend != "anthropic":
+            if self.effort is not None:
+                raise ValueError("effort is for backend anthropic")
+            return self
+        if self.api_key_env is None:
+            raise ValueError("backend anthropic needs api_key_env (the env var holding the API key)")
+        if self.temperature is not None:
+            raise ValueError("backend anthropic takes no temperature: the API version scout uses refuses it")
+        if self.gpu is not None:
+            raise ValueError("backend anthropic is hosted: it takes no GPU lease, so leave gpu unset")
         return self
 
     @model_validator(mode="after")

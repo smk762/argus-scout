@@ -13,6 +13,7 @@ from argus_scout.budget import DailyBudget
 from argus_scout.config import LLMConfig
 from argus_scout.llm import (
     LLM_CALLS,
+    AnthropicBackend,
     LLMBudgetExceeded,
     LLMUnavailable,
     OllamaBackend,
@@ -282,3 +283,78 @@ def test_max_tokens_defaults_per_kind_and_is_bounded_by_the_context():
     assert ollama_config(max_tokens=300).max_tokens_for("morning") == 300
     with pytest.raises(ValueError, match="half of context_tokens"):
         ollama_config(max_tokens=2000)
+
+
+def anthropic_reply(text: str = "All quiet.", stop: str = "end_turn", **extra) -> httpx.Response:
+    content = [{"type": "thinking", "thinking": "", "signature": "x"}, {"type": "text", "text": text}]
+    return httpx.Response(
+        200,
+        json={"type": "message", "model": "claude-opus-5-5", "content": content, "stop_reason": stop,
+              "usage": {"input_tokens": 120, "output_tokens": 40}, **extra},
+    )  # fmt: skip
+
+
+def anthropic_config(**kw) -> LLMConfig:
+    base = {"backend": "anthropic", "base_url": "https://api.anthropic.invalid/v1", "model": "claude-opus-5-5",
+            "api_key_env": "SCOUT_TEST_ANTHROPIC_KEY"}  # fmt: skip
+    return LLMConfig(**(base | kw))
+
+
+def test_anthropic_request_headers_and_text_blocks_only(monkeypatch):
+    monkeypatch.setenv("SCOUT_TEST_ANTHROPIC_KEY", "sk-ant-test")
+    seen: list[httpx.Request] = []
+    backend = build_backend(anthropic_config(effort="low"))
+    assert isinstance(backend, AnthropicBackend)
+    completion = stub(backend, lambda r: anthropic_reply(), seen).complete(PROMPT, max_tokens=4000)
+
+    (request,) = seen
+    assert str(request.url) == "https://api.anthropic.invalid/v1/messages"
+    assert request.headers["x-api-key"] == "sk-ant-test"
+    assert "authorization" not in request.headers  # never a bearer token
+    assert request.headers["anthropic-version"] == "2026-10-21"
+    assert request.headers["anthropic-beta"] == "server-side-fallback-2026-07-01"
+    body = json.loads(request.content)
+    assert body["system"] == "rules" and body["messages"] == [{"role": "user", "content": "facts"}]
+    assert body["max_tokens"] == 4000 and body["output_config"] == {"effort": "low"}
+    assert body["fallbacks"] == "default"
+    assert not {"temperature", "top_p", "top_k", "thinking", "stream"} & set(body)
+    assert (completion.text, completion.model, completion.prompt_tokens, completion.completion_tokens) == (
+        "All quiet.", "claude-opus-5-5", 120, 40)  # fmt: skip
+    assert completion.finish_reason == "stop" and not completion.truncated
+
+
+def test_anthropic_max_tokens_is_a_truncation_and_a_refusal_is_a_failure(monkeypatch):
+    monkeypatch.setenv("SCOUT_TEST_ANTHROPIC_KEY", "k")
+    backend = stub(build_backend(anthropic_config()), lambda r: anthropic_reply("Half a sen", "max_tokens"), [])
+    assert backend.complete(PROMPT, max_tokens=100).truncated
+    refused = anthropic_reply("", "refusal", stop_details={"type": "refusal", "category": "cyber"})
+    backend = stub(build_backend(anthropic_config()), lambda r: refused, [])
+    with pytest.raises(BackendError, match="declined"):
+        backend.complete(PROMPT, max_tokens=100)
+
+
+async def test_anthropic_errors_become_llm_unavailable(monkeypatch):
+    monkeypatch.setenv("SCOUT_TEST_ANTHROPIC_KEY", "k")
+    error = httpx.Response(401, json={"type": "error", "error": {"type": "authentication_error"}})
+    backend = stub(build_backend(anthropic_config()), lambda r: error, [])
+    with pytest.raises(LLMUnavailable):
+        await TextGenerator(backend).generate(PROMPT, max_tokens=100)
+
+
+@pytest.mark.parametrize(
+    "kw, message",
+    [
+        ({"api_key_env": None}, "needs api_key_env"),
+        ({"temperature": 0.2}, "no temperature"),
+        ({"gpu": {"min_vram_mb": 1000, "model_mb": 1000}}, "no GPU lease"),
+        ({"extra_body": {"x": 1}}, "extra_body is for backend openai"),
+    ],
+)
+def test_anthropic_config_refuses_what_the_api_would(kw, message):
+    with pytest.raises(ValueError, match=message):
+        anthropic_config(**kw)
+
+
+def test_effort_is_anthropic_only():
+    with pytest.raises(ValueError, match="effort is for backend anthropic"):
+        LLMConfig(backend="ollama", base_url="http://ollama:11434", model="m", effort="low")
