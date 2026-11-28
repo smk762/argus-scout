@@ -11,7 +11,7 @@ which argus-iris's ``/directory/sd`` puts on each service it lists (``docs/suite
   ``ok`` (success), ``degraded`` (``200``, no success), ``starting`` (``503``) and no answer (status ``0``).
 * ``argus_build_info{service, version}``: the gauge every service serves through argus-cortex.
 
-One reading (:func:`read_suite`) is ten instant queries, run together. **If any of them can't be answered the
+One reading (:func:`read_suite`) is twelve instant queries, run together. **If any of them can't be answered the
 reading fails** (:class:`~argus_scout.prometheus.PrometheusError`): a partial view is never reported, so an outage
 can't read as "all clear" or resolve an open event.
 
@@ -89,9 +89,13 @@ def queries(cfg: SuiteStatusSource) -> dict[str, str]:
         "up_now": up,
         "up_window": f"max_over_time({up}[{down}])",
         "up_seen": f"max_over_time({up}[{seen}])",
+        # Whether the target was already there a whole ``down_for`` ago: a target scraped once and failed (the
+        # service still starting when Prometheus first asked) has not been down "for ``down_for``".
+        "up_before": f"{up} offset {down}",
         "code_now": code,
         "code_window": f"max_over_time({code}[{down}])",
         "code_seen": f"max_over_time({code}[{seen}])",
+        "code_before": f"{code} offset {down}",
         "ok_now": ok,
         # Only for a target that was already probed a whole window ago: one that just appeared is not "degraded
         # for ten minutes" after its first probe.
@@ -242,7 +246,8 @@ def _state(key: Key, r: Mapping[str, dict[Key, list[Sample]]]) -> tuple[State, s
     if code is None and up is None:
         return "down", "no longer a scrape target", not answered_in_window
     if not ((code or 0) > 0 or (up or 0) > 0):
-        return "down", "no answer", not answered_in_window
+        watched = key in r["up_before"] or key in r["code_before"]
+        return "down", "no answer", watched and not answered_in_window
     if code is None or code <= 0:
         return "up", "health not probed" if code is None else "the health probe got no answer", False
     if (_worst(r["ok_now"], key) or 0) > 0:

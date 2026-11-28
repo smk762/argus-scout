@@ -124,14 +124,14 @@ sources:
 | `severity` | see below | The severity of each condition's event |
 | `resolve_missing` | `true` | Close an event once a reading no longer finds its condition |
 
-Each reading is ten instant queries against Prometheus, run together. `argus-scout poll --config scout.yaml
+Each reading is twelve instant queries against Prometheus, run together. `argus-scout poll --config scout.yaml
 --source suite` runs one and prints the events without storing anything.
 
 ### The events
 
 | Condition | Raised when | Summary | Default severity |
 |---|---|---|---|
-| down | nothing answered for `down_for`: no `/health` answer and no `/metrics` scrape, or the service is no longer a target | `lens on alpha is down` | `warning` |
+| down | nothing answered for `down_for`, and Prometheus has watched it that long: no `/health` answer and no `/metrics` scrape, or the service is no longer a target | `lens on alpha is down` | `warning` |
 | degraded | `/health` has answered, but never `ok`, for `degraded_for` | `lens on alpha is degraded`, or `is still starting` | `warning` |
 | version change | the service reports a version it did not report earlier within `deploy_window` | `lens on alpha changed version from 0.14.2 to 0.15.0` | `info` |
 | version skew | two hosts report different versions of the same peer | `lens runs different versions: 0.14.2 on beta, 0.15.0 on alpha` | `notice` |
