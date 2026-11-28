@@ -97,15 +97,21 @@ def test_voice_config_is_the_demo_config_plus_speech(monkeypatch):
     )
 
 
-def test_demo_runs_no_local_model_or_voice_and_stores_no_key():
-    """Claude over the API, echo and mask by URL: the overlays start no model or speech container, and the API key
-    is passed through from the host environment, never written into a file."""
+def test_demo_runs_no_local_model_or_voice_and_never_shadows_the_key():
+    """Claude over the API, echo and mask by URL: the overlays start no model or speech container. The API key lives
+    in the gitignored .env beside the config; compose must not pass it through, because an unset shell variable
+    becomes an empty one, which shadows the file (a .env never overrides the environment)."""
     demo, voice = compose_file("compose.demo.yaml")["services"], compose_file("compose.voice.yaml")["services"]
     assert demo["ollama"]["profiles"] == ["ollama"] and demo["ollama-pull"]["profiles"] == ["ollama"]
     assert set(voice) == {"scout", "first-brief"}, "voice uses the operator's echo and mask by URL"
-    assert demo["scout"]["environment"]["ANTHROPIC_API_KEY"] == "${ANTHROPIC_API_KEY:-}"
+    for name in ("scout", "first-brief"):
+        assert "ANTHROPIC_API_KEY" not in str(demo[name].get("environment", {}))
+        assert "ANTHROPIC_API_KEY" not in str(voice[name].get("environment", {}))
+    assert ".env" in (CONFIG / ".gitignore").read_text().split()
     assert "ollama" not in demo["scout"]["depends_on"]
-    assert "ANTHROPIC_API_KEY" not in (DEMO / "demo.sh").read_text().split("ensure_env() {")[1].split("}")[0]
+    assert "ANTHROPIC_API_KEY" not in (DEMO / "demo.sh").read_text().split("ensure_env() {")[1].split("}")[0], (
+        "demo.sh never writes the key"
+    )
 
 
 def test_demo_config_is_loopback_writes_behind_a_token():

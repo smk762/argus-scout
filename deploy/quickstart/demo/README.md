@@ -16,7 +16,8 @@ The demo sits on top of the quickstart in `deploy/quickstart` as two compose ove
 
 ```bash
 cd deploy/quickstart
-export ANTHROPIC_API_KEY=...                     # passed through to scout, never written to a file
+echo 'ANTHROPIC_API_KEY=...' >> demo/config/.env  # gitignored; demo.sh adds the API token beside it
+chmod 600 demo/config/.env
 ./demo/demo.sh up
 ./demo/demo.sh run
 

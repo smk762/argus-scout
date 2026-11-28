@@ -1,6 +1,8 @@
 # The argus-scout demo: the quickstart plus Grafana, a simulated house (power loads, a GPU, an energy meter and a
 # tariff whose peak is now), and a config with fast cycles and writes on behind a generated token. Reports are
-# written by Claude through the Messages API: export ANTHROPIC_API_KEY first (it is passed through, never stored).
+# written by Claude through the Messages API: put ANTHROPIC_API_KEY in demo/config/.env (gitignored, beside the
+# generated API token). It is not passed through from the shell: compose would set it empty when unset, and an
+# empty variable shadows the .env file.
 #
 #   cd deploy/quickstart
 #   ./demo/demo.sh up                 # this overlay (generates demo/config/.env first)
@@ -15,8 +17,6 @@ services:
   scout:
     volumes:
       - ./demo/config:/config:z
-    environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}   # the demo narrates with Claude; unset, reports use the template
     depends_on: !override
       prometheus:
         condition: service_healthy
@@ -26,8 +26,6 @@ services:
   first-brief:
     volumes:
       - ./demo/config:/config:z
-    environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
   # The demo's model is Claude over the API: the quickstart's Ollama stays off unless asked for
   # (COMPOSE_PROFILES=ollama, with services.llm in demo/config/scout.yaml pointed back at it).

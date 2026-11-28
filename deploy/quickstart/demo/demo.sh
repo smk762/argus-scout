@@ -102,8 +102,8 @@ ensure_env() {
 
 cmd_up() {
   ensure_env
-  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    note "ANTHROPIC_API_KEY is not set: every report will come from the template (export it and run up again)"
+  if ! grep -q '^ANTHROPIC_API_KEY=.' "$ENV_FILE"; then
+    note "no ANTHROPIC_API_KEY in demo/config/.env: every report will come from the template"
   fi
   if [[ "${1:-}" == "--voice" ]]; then
     if [[ -z "${ARGUS_XTTS_URL:-}" || -z "${ARGUS_MASK_URL:-}" ]]; then
