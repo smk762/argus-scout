@@ -11,8 +11,9 @@ from argus_scout.cycles import AnalysisCycle
 from argus_scout.engine import RecommendationEngine
 from argus_scout.prometheus import PrometheusUnavailable, Sample, Series
 from argus_scout.recommendations import Status
+from argus_scout.rules_file import SignalRulesFile, parse_rules
 from argus_scout.severity import Severity
-from argus_scout.signals import SignalRule, SignalRulesFile, SignalState, parse_rules
+from argus_scout.signals import SignalRule, SignalState
 from argus_scout.store import SqliteStore
 from argus_scout.tariff import Plan, TariffFile, TariffPeriod, TariffTier, tariff_from_dict
 from argus_scout.tariff_rules import (

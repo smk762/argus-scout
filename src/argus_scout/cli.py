@@ -22,7 +22,8 @@ from argus_scout.memory import Memory
 from argus_scout.narrative import ON_REQUEST_KINDS, SuiteNotConfigured, SuiteUnavailable, build_narrator
 from argus_scout.persona import load_persona
 from argus_scout.prometheus import PrometheusClient
-from argus_scout.signals import Evaluation, SignalState, evaluate, load_signal_rules
+from argus_scout.rules_file import load_signal_rules
+from argus_scout.signals import Evaluation, SignalState, evaluate
 from argus_scout.sources import build_sources
 from argus_scout.store import SqliteStore
 from argus_scout.tariff import TariffFile, coverage_gaps, current_period, load_tariff, next_period_change

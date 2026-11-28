@@ -9,8 +9,9 @@ from argus_scout.cycles import AnalysisCycle
 from argus_scout.engine import RecommendationEngine
 from argus_scout.prometheus import PrometheusUnavailable, Sample
 from argus_scout.recommendations import Confidence, Recommendation, Status
+from argus_scout.rules_file import SignalRulesFile
 from argus_scout.severity import Severity
-from argus_scout.signals import Evaluation, SignalHit, SignalRulesFile
+from argus_scout.signals import Evaluation, SignalHit
 from argus_scout.store import SqliteStore
 
 T0 = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)

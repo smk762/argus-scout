@@ -16,7 +16,7 @@ These are the seams later phases fill in. The structure is already the real one:
   :meth:`Inbox.ingest <argus_scout.inbox.Inbox.ingest>`. Each source is its own job, so one failing source
   never affects another. With the source's ``resolve_missing`` on, a successful, complete poll also resolves
   the source's events it no longer lists (a cleared condition); a failed or partial poll resolves nothing.
-- :class:`AnalysisCycle` reloads the signal rules through :class:`~argus_scout.signals.SignalRulesFile`,
+- :class:`AnalysisCycle` reloads the signal rules through :class:`~argus_scout.rules_file.SignalRulesFile`,
   evaluates them against Prometheus and hands the hits to the
   :class:`~argus_scout.engine.RecommendationEngine`. A bad rule is skipped; a file that won't parse skips
   the cycle (keeping the pending ``for`` clocks); a Prometheus outage makes rules *unknown*, which the
@@ -57,9 +57,10 @@ from argus_scout.heartbeat import Decision, HeartbeatPolicy, PolicyFile, explain
 from argus_scout.inbox import EventGroup, Inbox, InvalidEvent
 from argus_scout.narrative import TITLES, Narrator, build_narrator
 from argus_scout.prometheus import PrometheusClient
+from argus_scout.rules_file import SignalRulesFile
 from argus_scout.scheduler import Clock, DailyAt, Every, Scheduler, utc_now
 from argus_scout.severity import rank
-from argus_scout.signals import SignalRulesFile, SignalState, evaluate
+from argus_scout.signals import SignalState, evaluate
 from argus_scout.sources import BoundSource, Sources, build_sources
 from argus_scout.store.base import Report, Store
 from argus_scout.tariff import TariffFile

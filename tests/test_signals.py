@@ -7,18 +7,16 @@ from pathlib import Path
 import pytest
 
 from argus_scout.prometheus import PrometheusUnavailable, Sample
+from argus_scout.rules_file import SignalRulesFile, load_signal_rules, parse_rules
 from argus_scout.severity import Severity
 from argus_scout.signals import (
     Evaluation,
     SignalRule,
-    SignalRulesFile,
     SignalState,
     dedup_key,
     evaluate,
     format_duration,
-    load_signal_rules,
     parse_duration,
-    parse_rules,
     render,
     template_fields,
 )
